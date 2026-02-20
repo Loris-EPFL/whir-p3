@@ -1,0 +1,24 @@
+# Fixing Spartan WHIR Integration Test
+
+I investigated why the [test_r1cs_whir_integration](file:///home/hybr1d/Desktop/ZK/whir-p3/src/spartan/tests/integration.rs#32-198) integration test was failing to verify and resolved both the compilation issues and the underlying cryptographic mismatch.
+
+## Root Causes of Failure
+
+1. **Compilation Errors (API Updates):** The WHIR API had been updated. [ProtocolParameters](file:///home/hybr1d/Desktop/ZK/whir-p3/src/parameters/mod.rs#147-169) no longer contained an [initial_statement](file:///home/hybr1d/Desktop/ZK/whir-p3/src/whir/prover/mod.rs#93-100) flag. Additionally, `CommitmentWriter::commit` and `WhirProver::prove` were updated to expect a typed [InitialStatement](file:///home/hybr1d/Desktop/ZK/whir-p3/src/whir/constraints/statement/initial.rs#32-41) rather than a raw evaluation list.
+2. **Endianness Mismatch:** Spartan's equation evaluation yields polynomials over evaluation points defined from Least Significant Bit (LSB) to Most Significant Bit (MSB). However, the WHIR [MultilinearPoint](file:///home/hybr1d/Desktop/ZK/whir-p3/src/poly/multilinear.rs#17-18) evaluates coefficients from MSB to LSB.
+3. **Double-Mounting Out-Of-Domain (OOD) Points:** In WHIR, the `CommitmentWriter::commit` function mutates the [statement](file:///home/hybr1d/Desktop/ZK/whir-p3/src/whir/prover/mod.rs#93-100) object by appending OOD sample points during commitment. Calling `statement.normalize()` *after* the commitment resulted in a verifier statement that already contained OOD points, which the verifier then added *again* during proof parsing, leading to a `SumcheckFailed` error.
+4. **Power of Two padding error:** The test contained hacky and incorrect padding for `witness_vec` under the impression that it would trigger an "Evaluation list length must be a power of two" panic. In reality, Spartan's [build_z_vector](file:///home/hybr1d/Desktop/ZK/whir-p3/src/spartan/r1cs.rs#276-289) correctly pads the witness to $2 \times num\_vars$, natively guaranteeing it's a power of two length.
+
+## Changes Made
+
+1. **Rust Toolchain:** Updated [Cargo.toml](file:///home/hybr1d/Desktop/ZK/whir-p3/Cargo.toml)'s `rust-version` to `1.92` to match the local environment.
+2. **API Fixes:**
+   * Initialized the [InitialStatement](file:///home/hybr1d/Desktop/ZK/whir-p3/src/whir/constraints/statement/initial.rs#32-41) struct via `whir_config.initial_statement(...)`.
+   * Adjusted test function signatures to pass `&mut statement` to [commit](file:///home/hybr1d/Desktop/ZK/whir-p3/src/whir/committer/writer.rs#48-127) and `&statement` to [prove](file:///home/hybr1d/Desktop/ZK/whir-p3/src/spartan/r1cs_prover.rs#72-172).
+3. **Endianness Reversal:** Reversed the padded evaluation point slice using `ry_ef.reverse()` before passing it into `MultilinearPoint::new()`.
+4. **Statement Lifecycle Fix:** Normalized [statement](file:///home/hybr1d/Desktop/ZK/whir-p3/src/whir/prover/mod.rs#93-100) into `verifier_statement` *prior* to `committer.commit()`, ensuring the verifier received a clean external equality constraint.
+5. **Cleaned Code:** Passed `witness_vec` directly into [EvaluationsList](file:///home/hybr1d/Desktop/ZK/whir-p3/src/poly/evals.rs#28-29) instead of manually zero-padding indices 6 and 7, and omitted the unused `EqStatement` import.
+
+## Validation Results
+
+Running `cargo test --package whir-p3 --lib -- spartan` now correctly validates that all modules, including the integration test, execute and pass with exit code `0`.

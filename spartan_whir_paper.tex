@@ -1,0 +1,126 @@
+\documentclass{article}
+\usepackage[utf8]{inputenc}
+\usepackage{amsmath, amssymb, amsfonts}
+\usepackage{hyperref}
+\usepackage{listings}
+\usepackage{xcolor}
+
+\lstset{
+    language=Rust,
+    basicstyle=\ttfamily\small,
+    keywordstyle=\color{blue},
+    stringstyle=\color{red},
+    commentstyle=\color{green!50!black},
+    showstringspaces=false,
+    breaklines=true
+}
+
+\title{Spartan-WHIR: Accelerating R1CS Proofs with Super-Fast Reed-Solomon Proximity Testing}
+\author{Implementation Documentation}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+This paper describes the integration of the Spartan zero-knowledge succinct non-interactive argument of knowledge (zkSNARK) arithmetization with the WHIR (Reed--Solomon Proximity Testing with Super-Fast Verification) polynomial commitment scheme (PCS). By replacing Spartan's traditional Pedersen-based inner product arguments with WHIR's hash-based constrained Reed-Solomon proximity testing, we achieve a highly efficient, transparent SNARG for Rank-1 Constraint Satisfiability (R1CS). We detail the mathematical derivations from R1CS to the multilinear polynomial extensions, the sum-check reduction, the SPARK memory-checking compiler, and the ultimate compilation into WHIR's \texttt{EqStatement} utilizing the Plonky3 field and challenger ecosystem.
+\end{abstract}
+
+\section{Introduction}
+Spartan introduces an optimal-prover zkSNARK for R1CS without a trusted setup by leveraging sum-check protocols over low-degree polynomial encodings of sparse matrices. However, the verifier efficiency in Spartan is strictly bounded by the underlying Polynomial Commitment Scheme (PCS). 
+
+WHIR provides a highly optimized Interactive Oracle Proof of Proximity (IOPP) for Constrained Reed-Solomon (CRS) codes over smooth domains, resulting in super-fast verification times (often under a millisecond). 
+
+In the \texttt{whir-p3} repository, we synthesize these two breakthroughs. We implement Spartan's R1CS encoding and SPARK compiler over multilinear extensions (\texttt{src/spartan/}), and pipe the resulting dense witness evaluations into WHIR's commitment and proving pipeline.
+
+\section{Mathematical Arithmetization of R1CS}
+
+\subsection{The R1CS Constraint System}
+An R1CS instance is defined by a tuple $(\mathbb{F}, A, B, C, \text{io}, m, n)$ where matrices $A, B, C \in \mathbb{F}^{m \times m}$ have at most $n$ non-zero entries. An instance is satisfiable if there exists a witness $w$ such that for $Z = (w, 1, \text{io})$:
+\[ (A \cdot Z) \circ (B \cdot Z) = C \cdot Z \]
+
+In our implementation (\texttt{src/spartan/r1cs.rs}), $Z$ is constructed inside \texttt{R1CSInstance::build\_z\_vector()}. To ensure compatibility with WHIR's radix-2 domains (\texttt{EvaluationsList}), we explicitly pad $Z$ to a power of two: $m = 2^s$. 
+
+\subsection{Multilinear Extensions}
+We define multilinear extensions (MLE) for the matrices $A, B, C$ and the witness $Z$. Let $s = \log_2(m)$. We identify each row and column index with a boolean vector in $\{0,1\}^s$. The MLE of $Z$ is defined as $\tilde{Z}: \mathbb{F}^s \to \mathbb{F}$ such that $\tilde{Z}(y) = Z[y]$ for all $y \in \{0,1\}^s$. 
+
+For sparse matrices, we define $\tilde{A}(x, y)$ such that $\tilde{A}(i, j) = A_{i, j}$ for $i,j \in \{0,1\}^s$. This logic is materialized in \texttt{SparseMatPolynomial} and its \texttt{evaluate} function in \texttt{src/spartan/r1cs.rs}.
+
+\subsection{The Degree-3 Polynomial Encoding}
+Following Theorem 4.1 of the Spartan paper, we construct a polynomial $\tilde{F}_{io}(x)$ representing the constraint satisfiability at row $x$:
+
+\[ \tilde{F}_{io}(x) = \left( \sum_{y \in \{0,1\}^s} \tilde{A}(x,y) \tilde{Z}(y) \right) \left( \sum_{y \in \{0,1\}^s} \tilde{B}(x,y) \tilde{Z}(y) \right) - \left( \sum_{y \in \{0,1\}^s} \tilde{C}(x,y) \tilde{Z}(y) \right) \]
+
+To verify that $\tilde{F}_{io}(x) = 0$ for all $x \in \{0,1\}^s$, the verifier samples a random challenge $\tau \in \mathbb{F}^s$ and asks the prover to verify:
+
+\[ \sum_{x \in \{0,1\}^s} G_{io, \tau}(x) = 0 \quad \text{where} \quad G_{io, \tau}(x) = \tilde{F}_{io}(x) \cdot \text{eq}(\tau, x) \]
+
+\textbf{Implementation Reference:} In \texttt{src/spartan/encoding.rs}, the \texttt{compute\_g\_io\_tau} function computes these evaluations exactly over the hypercube, and \texttt{GPoly::from\_r1cs\_instance} constructs the polynomial. The equality polynomial $\text{eq}(\tau, x)$ is evaluated using \texttt{eq\_poly\_at\_index}.
+
+\section{The Sum-Check Reduction}
+
+Evaluating $G_{io, \tau}(x)$ over the entire hypercube is $\mathcal{O}(m)$, which is too slow for the verifier. Spartan utilizes the sum-check protocol to reduce the sum $\sum_{x \in \{0,1\}^s} G_{io, \tau}(x) = 0$ to a single point evaluation of $G_{io, \tau}$ at a random point $r_x \in \mathbb{F}^s$.
+
+Because $G_{io, \tau}(x)$ is a degree-3 polynomial in each variable, the prover sends univariate cubic polynomials in each round. 
+
+\textbf{Implementation Reference:} The \texttt{SumcheckProver} and \texttt{SumcheckVerifier} in \texttt{src/spartan/sumcheck.rs} handle this interaction. In \texttt{src/spartan/r1cs\_prover.rs}, \texttt{R1CSProver::prove} executes the $s$ rounds of the sum-check protocol, tracking the random challenges generated by the \texttt{FieldChallenger}, yielding $r_x$.
+
+At the end of the sumcheck, the verifier must evaluate:
+\[ G_{io, \tau}(r_x) = \left( \tilde{A}(r_x) \tilde{B}(r_x) - \tilde{C}(r_x) \right) \cdot \text{eq}(\tau, r_x) \]
+
+To provide $\tilde{A}(r_x)$, $\tilde{B}(r_x)$, and $\tilde{C}(r_x)$, the prover evaluates the sparse matrix MLEs at $(r_x, r_y)$ where $r_y \in \mathbb{F}^s$ is a newly sampled challenge point. These claims are packed into \texttt{R1CSEvalClaims} in \texttt{src/spartan/r1cs\_prover.rs}.
+
+This leaves the prover with the burden of proving that they know a committed polynomial $\tilde{Z}$ such that:
+\[ v = \tilde{Z}(r_y) \]
+
+\section{The SPARK Compiler}
+
+Directly committing to the dense matrices $A, B, C$ requires $\mathcal{O}(m^2)$ time, which is non-optimal. Spartan solves this using the SPARK compiler, which leverages offline memory-checking techniques to commit to sparse matrices in $\mathcal{O}(n)$ time (where $n$ is the number of non-zero entries).
+
+The prover commits to vectors \texttt{row}, \texttt{col}, and \texttt{val}. To prove that evaluations of these vectors map to the evaluation of $\tilde{A}(r_x, r_y)$, SPARK uses timestamps to track reads and writes to a virtual memory space.
+
+\textbf{Implementation Reference:} In \texttt{src/spartan/spark.rs}, the \texttt{memory\_in\_the\_head} function generates the \texttt{read\_ts}, \texttt{write\_ts}, and \texttt{audit\_ts} vectors. \texttt{SparkCommitment::commit} generates these structures. In a fully weaponized protocol, these 9 vectors per matrix are also committed via the WHIR \texttt{CommitmentWriter}.
+
+\section{Bridging Spartan to WHIR}
+
+The mathematical core of our architecture relies on seamlessly transitioning the evaluation claim $\tilde{Z}(r_y) = v$ derived from Spartan's sum-check protocol into the $\Sigma$-IOP properties of WHIR.
+
+WHIR defines a Constrained Reed-Solomon Code (CRS) that allows verifiers to query multilinear polynomials efficiently. Let $\hat{Z} \in \mathbb{F}^{\le 1}[X_1, \dots, X_s]$ be the multilinear polynomial representing the witness. The query $\tilde{Z}(r_y) = v$ translates to a sum-check constraint in WHIR:
+
+\[ \sum_{b \in \{0,1\}^s} \hat{w}(\hat{Z}(b), b) = v \quad \text{where} \quad \hat{w}(Z, X) = Z \cdot \text{eq}(X, r_y) \]
+
+\subsection{Commitment (Prover)}
+In \texttt{src/spartan/tests/integration.rs}, we instantiate this bridge. First, the witness $Z$ is extracted and manually padded to an exact power-of-two vector length (e.g., length 8) and placed inside an \texttt{EvaluationsList}. 
+\begin{lstlisting}
+let witness_evals = r1cs_prover.prepare_witness(&instance);
+let mut final_vec = vec![F::ZERO; 8]; // Strictly power of 2
+for i in 0..6 { final_vec[i] = witness_vec[i]; }
+let witness_poly = EvaluationsList::new(final_vec);
+\end{lstlisting}
+This polynomial is then committed to the Merkle tree using \texttt{whir::committer::writer::CommitmentWriter}. The root of this tree forms the standard WHIR commitment.
+
+\subsection{Evaluation and Proof (WHIR PCS)}
+The Spartan phase outputs the challenge point $r_y$. We translate this into a \texttt{MultilinearPoint} over the \texttt{BinomialExtensionField} (to satisfy WHIR's security bounds) and compute the claimed evaluation $v$:
+\begin{lstlisting}
+let claimed_val_z = witness_poly.evaluate_hypercube_ext(&query_point);
+\end{lstlisting}
+We then initialize an \texttt{EqStatement} inside WHIR. In the mathematical context of WHIR (Section 1.1 of \texttt{WHIR.txt}), this acts as the "weight polynomial" constraint. 
+\begin{lstlisting}
+let mut statement = EqStatement::initialize(num_vars_z);
+statement.add_evaluated_constraint(query_point.clone(), claimed_val_z);
+\end{lstlisting}
+Finally, we run \texttt{WhirProver::prove}, which applies WHIR's out-of-domain sampling, polynomial folding, and proof-of-work grinding to generate a succint non-interactive argument of this evaluation.
+
+\subsection{Verification}
+The complete verifier orchestrates both protocols:
+\begin{enumerate}
+    \item \textbf{Spartan Verification:} \texttt{R1CSVerifier::verify()} checks the $s$-round univariate sumcheck polynomials sent by the prover, validating $p(0) + p(1) = \text{claim}$ and computing the constraint check: $\tilde{A}(r_x)\tilde{B}(r_x) - \tilde{C}(r_x) = G_{io, \tau}(r_x)$.
+    \item \textbf{WHIR Verification:} \texttt{WhirVerifier::verify()} parses the Merkle tree commitment, asserts the \texttt{EqStatement}, checks the proof-of-work grinding, and performs the super-fast log-scale folding verification to assert that $\tilde{Z}(r_y) = v$.
+\end{enumerate}
+
+\section{Conclusion}
+
+By merging Spartan's theoretical optimal-prover linear-time R1CS sum-check reduction with WHIR's optimal-verifier constrained Reed-Solomon proximity tests, we effectively unlock a robust, transparent, zero-knowledge capable system. The implementation in \texttt{whir-p3/src/spartan/} respects the mathematical rigor of both original papers, successfully aligning the constraint satisfiability logic with Plonky3's advanced folding operations and cryptographic field arithmetic.
+
+\end{document}
