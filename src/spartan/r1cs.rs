@@ -33,7 +33,8 @@ pub struct SparseMatPolynomial<F: Field> {
 }
 
 impl<F: Field> SparseMatPolynomial<F> {
-    pub fn new(num_vars_x: usize, num_vars_y: usize, entries: Vec<SparseMatEntry<F>>) -> Self {
+    #[must_use] 
+    pub const fn new(num_vars_x: usize, num_vars_y: usize, entries: Vec<SparseMatEntry<F>>) -> Self {
         Self {
             num_vars_x,
             num_vars_y,
@@ -41,18 +42,22 @@ impl<F: Field> SparseMatPolynomial<F> {
         }
     }
 
-    pub fn num_entries(&self) -> usize {
+    #[must_use] 
+    pub const fn num_entries(&self) -> usize {
         self.entries.len()
     }
 
-    pub fn num_vars_x(&self) -> usize {
+    #[must_use] 
+    pub const fn num_vars_x(&self) -> usize {
         self.num_vars_x
     }
 
-    pub fn num_vars_y(&self) -> usize {
+    #[must_use] 
+    pub const fn num_vars_y(&self) -> usize {
         self.num_vars_y
     }
 
+    #[must_use] 
     pub fn entries(&self) -> &[SparseMatEntry<F>] {
         &self.entries
     }
@@ -80,9 +85,9 @@ impl<F: Field> SparseMatPolynomial<F> {
 
         for entry in &self.entries {
             // Compute eq polynomial for row
-            let eq_row = compute_eq_poly(&entry.row, rx);
+            let eq_row = compute_eq_poly(entry.row, rx);
             // Compute eq polynomial for col
-            let eq_col = compute_eq_poly(&entry.col, ry);
+            let eq_col = compute_eq_poly(entry.col, ry);
             // Add val * eq(i, rx) * eq(j, ry)
             result += EF::from(entry.val) * eq_row * eq_col;
         }
@@ -93,13 +98,13 @@ impl<F: Field> SparseMatPolynomial<F> {
 
 /// Compute eq(x, r) = prod_{i=1}^m (x_i * r_i + (1-x_i)*(1-r_i))
 /// where x is an integer representing bits and r is the evaluation point
-fn compute_eq_poly<EF: ExtensionField<F>, F: Field>(x: &usize, r: &[EF]) -> EF {
+fn compute_eq_poly<EF: ExtensionField<F>, F: Field>(x: usize, r: &[EF]) -> EF {
     let mut result = EF::ONE;
     let num_bits = r.len();
 
-    for i in 0..num_bits {
-        let bit = (*x >> i) & 1;
-        let r_i = r[i];
+    for (i, r_i) in r.iter().enumerate().take(num_bits) {
+        let bit = (x >> i) & 1;
+        let r_i = *r_i;
         let term = if bit == 1 { r_i } else { EF::ONE - r_i };
         result *= term;
     }
@@ -126,6 +131,7 @@ pub struct R1CSShape<F: Field> {
 
 impl<F: Field> R1CSShape<F> {
     /// Create a new R1CS shape from constraint matrices
+    #[must_use] 
     pub fn new(
         num_cons: usize,
         num_vars: usize,
@@ -154,37 +160,45 @@ impl<F: Field> R1CSShape<F> {
         }
     }
 
-    pub fn num_cons(&self) -> usize {
+    #[must_use] 
+    pub const fn num_cons(&self) -> usize {
         self.num_cons
     }
 
-    pub fn num_vars(&self) -> usize {
+    #[must_use] 
+    pub const fn num_vars(&self) -> usize {
         self.num_vars
     }
 
-    pub fn num_inputs(&self) -> usize {
+    #[must_use] 
+    pub const fn num_inputs(&self) -> usize {
         self.num_inputs
     }
 
     /// Number of variables for polynomial x-dimension (log2 of num_cons)
-    pub fn num_poly_vars_x(&self) -> usize {
+    #[must_use] 
+    pub const fn num_poly_vars_x(&self) -> usize {
         self.num_cons.trailing_zeros() as usize
     }
 
     /// Number of variables for polynomial y-dimension (log2 of num_cols)
-    pub fn num_poly_vars_y(&self) -> usize {
+    #[must_use] 
+    pub const fn num_poly_vars_y(&self) -> usize {
         ((2 * self.num_vars).trailing_zeros()) as usize
     }
 
-    pub fn a(&self) -> &SparseMatPolynomial<F> {
+    #[must_use] 
+    pub const fn a(&self) -> &SparseMatPolynomial<F> {
         &self.a
     }
 
-    pub fn b(&self) -> &SparseMatPolynomial<F> {
+    #[must_use] 
+    pub const fn b(&self) -> &SparseMatPolynomial<F> {
         &self.b
     }
 
-    pub fn c(&self) -> &SparseMatPolynomial<F> {
+    #[must_use] 
+    pub const fn c(&self) -> &SparseMatPolynomial<F> {
         &self.c
     }
 
@@ -251,6 +265,7 @@ pub struct R1CSInstance<F: Field> {
 }
 
 impl<F: Field> R1CSInstance<F> {
+    #[must_use] 
     pub fn new(shape: R1CSShape<F>, input: Vec<F>, witness: Vec<F>) -> Self {
         assert_eq!(witness.len(), shape.num_vars());
         assert_eq!(input.len(), shape.num_inputs());
@@ -261,14 +276,17 @@ impl<F: Field> R1CSInstance<F> {
         }
     }
 
-    pub fn shape(&self) -> &R1CSShape<F> {
+    #[must_use] 
+    pub const fn shape(&self) -> &R1CSShape<F> {
         &self.shape
     }
 
+    #[must_use] 
     pub fn input(&self) -> &[F] {
         &self.input
     }
 
+    #[must_use] 
     pub fn witness(&self) -> &[F] {
         &self.witness
     }
@@ -288,6 +306,7 @@ impl<F: Field> R1CSInstance<F> {
     }
 
     /// Verify that the witness satisfies the constraints
+    #[must_use] 
     pub fn verify(&self) -> bool {
         self.shape.is_sat(&self.witness, &self.input)
     }

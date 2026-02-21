@@ -39,14 +39,14 @@ impl<F: Field> SpartanSumcheckData<F> {
     pub fn observe_and_sample<Challenger>(
         &mut self,
         challenger: &mut Challenger,
-        round_evals: Vec<F>,
+        round_evals: &[F],
         pow_bits: usize,
     ) -> F
     where
         Challenger: FieldChallenger<F> + CanObserve<F> + GrindingChallenger<Witness = F>,
     {
-        self.round_evaluations.push(round_evals.clone());
-        challenger.observe_algebra_slice(&round_evals);
+        self.round_evaluations.push(round_evals.to_vec());
+        challenger.observe_algebra_slice(round_evals);
         if pow_bits > 0 {
             self.pow_witnesses.push(challenger.grind(pow_bits));
         }
@@ -75,7 +75,8 @@ impl<F: Field> SumcheckProver<F> {
     /// # Arguments
     /// * `evals` - Evaluations of the polynomial over the boolean hypercube
     /// * `degree_bound` - Maximum degree in each variable
-    pub fn new(evals: Vec<F>, degree_bound: usize) -> Self {
+    #[must_use] 
+    pub const fn new(evals: Vec<F>, degree_bound: usize) -> Self {
         let num_vars = evals.len().trailing_zeros() as usize;
         Self {
             evals,
@@ -100,7 +101,7 @@ impl<F: Field> SumcheckProver<F> {
 
         // For each value of the current variable (0, 1, ..., degree)
         // compute the sum over all other variables
-        for j in 0..=degree {
+        for (j, uni_j) in univariate.iter_mut().enumerate().take(degree + 1) {
             let mut sum = F::ZERO;
 
             // Sum over all combinations of remaining variables
@@ -112,7 +113,7 @@ impl<F: Field> SumcheckProver<F> {
                 }
             }
 
-            univariate[j] = sum;
+            *uni_j = sum;
         }
 
         self.round += 1;
@@ -143,6 +144,7 @@ impl<F: Field> SumcheckProver<F> {
     }
 
     /// Get the final evaluation after all rounds
+    #[must_use] 
     pub fn final_eval(&self) -> F {
         assert_eq!(self.evals.len(), 1);
         self.evals[0]
@@ -159,12 +161,13 @@ impl<F: Field> SumcheckProver<F> {
         Challenger: FieldChallenger<F> + CanObserve<F> + GrindingChallenger<Witness = F>,
     {
         let round_evals = self.prove_round();
-        let challenge = data.observe_and_sample(challenger, round_evals.clone(), pow_bits);
+        let challenge = data.observe_and_sample(challenger, &round_evals, pow_bits);
         self.bind(challenge);
         self.challenges.push(challenge);
         round_evals
     }
 
+    #[must_use] 
     pub fn challenges(&self) -> &[F] {
         &self.challenges
     }
@@ -189,7 +192,7 @@ pub struct SumcheckVerifier<F: Field> {
 
 impl<F: Field> SumcheckVerifier<F> {
     /// Create a new sum-check verifier
-    pub fn new(claim: F, num_vars: usize, degree_bound: usize) -> Self {
+    pub const fn new(claim: F, num_vars: usize, degree_bound: usize) -> Self {
         Self {
             initial_claim: claim,
             current_claim: claim,
@@ -251,17 +254,17 @@ impl<F: Field> SumcheckVerifier<F> {
     }
 
     /// Get the final claim after all rounds.
-    pub fn final_claim(&self) -> F {
+    pub const fn final_claim(&self) -> F {
         self.current_claim
     }
 
     /// Get initial claim.
-    pub fn initial_claim(&self) -> F {
+    pub const fn initial_claim(&self) -> F {
         self.initial_claim
     }
 }
 
-fn validate_round_evals_len<F: Field>(
+const fn validate_round_evals_len<F: Field>(
     round_evals: &[F],
     degree_bound: usize,
 ) -> Result<(), &'static str> {
@@ -323,7 +326,8 @@ impl<F: Field> R1CSSumcheck<F> {
     ///
     /// # Arguments
     /// * `g_evals` - Evaluations of G_io,τ over boolean hypercube
-    pub fn new(g_evals: Vec<F>) -> Self {
+    #[must_use] 
+    pub const fn new(g_evals: Vec<F>) -> Self {
         Self {
             phase1_prover: SumcheckProver::new(g_evals, 3), // Degree 3
             phase2_prover: None,

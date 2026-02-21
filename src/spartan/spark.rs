@@ -82,6 +82,7 @@ pub struct SparkEvaluations<F: Field> {
 
 impl<F: Field> SparkCommitment<F> {
     /// Create a new SPARK commitment to a sparse polynomial.
+    #[must_use] 
     pub fn commit(poly: &SparseMatPolynomial<F>) -> Self {
         let n = poly.num_entries();
         let num_rows = 1usize << poly.num_vars_x();
@@ -134,6 +135,7 @@ impl<F: Field> SparkCommitment<F> {
     }
 
     /// Verifies memory-checking metadata consistency for row/col access streams.
+    #[must_use] 
     pub fn verify_structure(&self) -> bool {
         verify_memory_in_the_head(
             self.num_rows,
@@ -180,7 +182,7 @@ impl<F: Field> SparkCommitment<F> {
         multiset_hash(&elems, gamma)
     }
 
-    fn cost_profile(&self) -> SparkCostProfile {
+    const fn cost_profile(&self) -> SparkCostProfile {
         let n = self.val_comm.len();
         let row_t = self.read_ts_row.len() + self.write_ts_row.len() + self.audit_ts_row.len();
         let col_t = self.read_ts_col.len() + self.write_ts_col.len() + self.audit_ts_col.len();

@@ -80,7 +80,8 @@ pub struct R1CSProver<F: Field> {
 
 impl<F: Field> R1CSProver<F> {
     /// Create a new R1CS prover
-    pub fn new() -> Self {
+    #[must_use] 
+    pub const fn new() -> Self {
         Self {
             _phantom: core::marker::PhantomData,
         }
@@ -100,6 +101,7 @@ impl<F: Field> R1CSProver<F> {
     /// * `challenger` - Fiat-Shamir challenger for randomness
     ///
     /// # Returns
+    #[allow(clippy::too_many_lines)]
     /// The R1CS proof
     pub fn prove<EF, Challenger>(
         &self,
@@ -277,7 +279,8 @@ pub struct R1CSVerifier<F: Field> {
 
 impl<F: Field> R1CSVerifier<F> {
     /// Create a new R1CS verifier
-    pub fn new() -> Self {
+    #[must_use] 
+    pub const fn new() -> Self {
         Self {
             _phantom: core::marker::PhantomData,
         }
@@ -298,6 +301,7 @@ impl<F: Field> R1CSVerifier<F> {
     /// * `challenger` - Fiat-Shamir challenger (must match prover's)
     ///
     /// # Returns
+    #[allow(clippy::too_many_lines)]
     /// Ok(()) if verification succeeds, Err otherwise
     pub fn verify<EF, Challenger>(
         &self,

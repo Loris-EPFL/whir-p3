@@ -30,9 +30,9 @@ pub fn eq_poly_at_index<EF: ExtensionField<F>, F: Field>(idx: usize, r: &[EF]) -
     let mut result = EF::ONE;
     let num_bits = r.len();
 
-    for i in 0..num_bits {
+    for (i, r_i) in r.iter().enumerate().take(num_bits) {
         let bit = (idx >> i) & 1;
-        let r_i = r[i];
+        let r_i = *r_i;
         let term = if bit == 1 { r_i } else { EF::ONE - r_i };
         result *= term;
     }
@@ -85,7 +85,7 @@ pub fn eval_f_io_mle<EF: ExtensionField<F>, F: Field>(
 
     // Compute A(rx) = sum_{y∈{0,1}^s} Ã(rx, y) * Z(y)
     let mut a_rx = EF::ZERO;
-    for y_idx in 0..(1 << num_vars_y) {
+    for (y_idx, z_y) in z.iter().enumerate().take(1 << num_vars_y) {
         let eq_y = eq_poly_at_index::<EF, F>(y_idx, rx);
         // Find contribution from A matrix
         let a_val: F = shape
@@ -95,12 +95,12 @@ pub fn eval_f_io_mle<EF: ExtensionField<F>, F: Field>(
             .filter(|e| e.col == y_idx)
             .map(|e| e.val)
             .sum();
-        a_rx += eq_y * EF::from(a_val) * EF::from(z[y_idx]);
+        a_rx += eq_y * EF::from(a_val) * EF::from(*z_y);
     }
 
     // Compute B(rx) and C(rx) similarly
     let mut b_rx = EF::ZERO;
-    for y_idx in 0..(1 << num_vars_y) {
+    for (y_idx, z_y) in z.iter().enumerate().take(1 << num_vars_y) {
         let eq_y = eq_poly_at_index::<EF, F>(y_idx, rx);
         let b_val: F = shape
             .b()
@@ -109,11 +109,11 @@ pub fn eval_f_io_mle<EF: ExtensionField<F>, F: Field>(
             .filter(|e| e.col == y_idx)
             .map(|e| e.val)
             .sum();
-        b_rx += eq_y * EF::from(b_val) * EF::from(z[y_idx]);
+        b_rx += eq_y * EF::from(b_val) * EF::from(*z_y);
     }
 
     let mut c_rx = EF::ZERO;
-    for y_idx in 0..(1 << num_vars_y) {
+    for (y_idx, z_y) in z.iter().enumerate().take(1 << num_vars_y) {
         let eq_y = eq_poly_at_index::<EF, F>(y_idx, rx);
         let c_val: F = shape
             .c()
@@ -122,7 +122,7 @@ pub fn eval_f_io_mle<EF: ExtensionField<F>, F: Field>(
             .filter(|e| e.col == y_idx)
             .map(|e| e.val)
             .sum();
-        c_rx += eq_y * EF::from(c_val) * EF::from(z[y_idx]);
+        c_rx += eq_y * EF::from(c_val) * EF::from(*z_y);
     }
 
     a_rx * b_rx - c_rx
@@ -173,6 +173,7 @@ pub struct GPoly<F: Field> {
 
 impl<F: Field> GPoly<F> {
     /// Create G_io,τ polynomial from R1CS instance
+    #[must_use] 
     pub fn from_r1cs_instance(instance: &R1CSInstance<F>, tau: Vec<F>) -> Self {
         let shape = instance.shape();
         let z = instance.build_z_vector();
@@ -188,6 +189,7 @@ impl<F: Field> GPoly<F> {
     }
 
     /// Get the evaluations (for use in sumcheck)
+    #[must_use] 
     pub fn evaluations(&self) -> &[F] {
         &self.evaluations
     }
@@ -198,14 +200,17 @@ impl<F: Field> GPoly<F> {
     }
 
     /// Verify that the sum is zero (completeness check)
+    #[must_use] 
     pub fn verify_sum_is_zero(&self) -> bool {
         verify_sum_g_io_tau(&self.evaluations)
     }
 
-    pub fn num_vars(&self) -> usize {
+    #[must_use] 
+    pub const fn num_vars(&self) -> usize {
         self.num_vars
     }
 
+    #[must_use] 
     pub fn tau(&self) -> &[F] {
         &self.tau
     }
