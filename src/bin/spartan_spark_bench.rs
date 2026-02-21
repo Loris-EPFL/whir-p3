@@ -584,6 +584,28 @@ bench_field_impl!(
     32
 );
 
+bench_field_impl!(
+    bench_koalabear,
+    "KoalaBear",
+    p3_koala_bear::KoalaBear,
+    BinomialExtensionField<p3_koala_bear::KoalaBear, 4>,
+    p3_koala_bear::Poseidon2KoalaBear<16>,
+    DuplexChallenger<p3_koala_bear::KoalaBear, p3_koala_bear::Poseidon2KoalaBear<16>, 16, 8>,
+    4,
+    32
+);
+
+bench_field_impl!(
+    bench_goldilocks,
+    "Goldilocks",
+    p3_goldilocks::Goldilocks,
+    BinomialExtensionField<p3_goldilocks::Goldilocks, 2>,
+    p3_goldilocks::Poseidon2Goldilocks<16>,
+    DuplexChallenger<p3_goldilocks::Goldilocks, p3_goldilocks::Poseidon2Goldilocks<16>, 16, 8>,
+    8,
+    32
+);
+
 fn main() {
     let quick = std::env::args().any(|a| a == "--quick");
     let repeats = if quick { 2 } else { 6 };
@@ -625,6 +647,24 @@ fn main() {
 
     println!("Running M31 benchmark...");
     bench_m31::run(
+        quick,
+        repeats,
+        &mut metrics,
+        &mut opening,
+        &mut verifier_queries,
+    );
+
+    println!("Running KoalaBear benchmark...");
+    bench_koalabear::run(
+        quick,
+        repeats,
+        &mut metrics,
+        &mut opening,
+        &mut verifier_queries,
+    );
+
+    println!("Running Goldilocks benchmark...");
+    bench_goldilocks::run(
         quick,
         repeats,
         &mut metrics,
