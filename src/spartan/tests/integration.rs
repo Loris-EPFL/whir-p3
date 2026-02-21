@@ -30,8 +30,15 @@ type MyHash = PaddingFreeSponge<Perm, 16, 8, 8>;
 type MyCompress = TruncatedPermutation<Perm, 2, 8, 16>;
 type MyChallenger = DuplexChallenger<F, Perm, 16, 8>;
 
-#[test]
-fn test_r1cs_whir_integration() {
+const DEMO_SETUP_SEED: u64 = 42;
+const DEMO_TRANSCRIPT_SEED: u64 = 123;
+
+pub(super) fn run_spartan_whir_phase1_zry_demo() {
+    // This demo is intentionally scoped to:
+    // - Spartan phase-1 (sumcheck and claim extraction)
+    // - WHIR opening for the derived claim Z(r_y) = v
+    // - deterministic tamper checks
+
     // 1. Setup R1CS Instance (w^2 = y)
     // --------------------------------
     let num_cons = 4usize;
@@ -57,7 +64,7 @@ fn test_r1cs_whir_integration() {
 
     // 2. Setup WHIR Config
     // --------------------
-    let mut rng = SmallRng::seed_from_u64(42);
+    let mut rng = SmallRng::seed_from_u64(DEMO_SETUP_SEED);
     let perm = Perm::new_from_rng_128(&mut rng);
     let merkle_hash = MyHash::new(perm.clone());
     let merkle_compress = MyCompress::new(perm.clone());
@@ -85,15 +92,15 @@ fn test_r1cs_whir_integration() {
 
     // 3. Run Spartan Prover (Phase 1: Sumcheck)
     // -----------------------------------------
-    // Create challenger for Spartan
-    let mut rng_chal = SmallRng::seed_from_u64(123);
+    // Use fixed transcript seed for deterministic prover/verifier replay.
+    let mut rng_chal = SmallRng::seed_from_u64(DEMO_TRANSCRIPT_SEED);
     let perm_chal = Perm::new_from_rng_128(&mut rng_chal);
     let mut spartan_challenger = MyChallenger::new(perm_chal.clone());
 
     let r1cs_proof = r1cs_prover.prove::<EF, _>(&instance, &mut spartan_challenger);
 
-    // 4. WHIR Commitment to Witness (Phase 2)
-    // ---------------------------------------
+    // 4. WHIR Commitment to Witness
+    // -----------------------------
     let committer = CommitmentWriter::new(&whir_config);
     let dft = Radix2DFTSmallBatch::<F>::default();
 
@@ -110,8 +117,8 @@ fn test_r1cs_whir_integration() {
 
     let mut statement = whir_config.initial_statement(witness_poly, SumcheckStrategy::Classic);
 
-    // 5. Convert Spartan claim `v = Z(r_y)` into a WHIR equality constraint.
-    // ---------------------------------------------------------------------
+    // 5. Bridge Spartan claim `v = Z(r_y)` into WHIR equality constraint.
+    // -------------------------------------------------------------------
     let ry = &r1cs_proof.eval_claims.ry;
     let mut ry_padded = ry.clone();
     while ry_padded.len() < num_vars_z {
@@ -119,27 +126,25 @@ fn test_r1cs_whir_integration() {
     }
 
     let mut ry_ef: Vec<EF> = ry_padded.iter().map(|&x| EF::from(x)).collect();
-    ry_ef.reverse(); // Explicitly switch from Spartan (LSB-first) to WHIR (MSB-first).
+    ry_ef.reverse(); // Spartan is LSB-first while WHIR points are MSB-first.
 
     let query_point = crate::poly::multilinear::MultilinearPoint::new(ry_ef.clone());
     assert_eq!(
         query_point[0],
         EF::from(*ry_padded.last().expect("non-empty query point")),
-        "WHIR query point should be MSB-first"
+        "query-point endian conversion mismatch between Spartan and WHIR"
     );
 
     let claimed_val_z = r1cs_proof.eval_claims.z_eval;
     let witness_eval_at_ry = statement.evaluate(&query_point);
     assert_eq!(
         witness_eval_at_ry, claimed_val_z,
-        "Spartan claim v=Z(r_y) must match witness polynomial evaluation"
+        "bridge check failed: WHIR statement eval does not match Spartan claim Z(r_y)=v"
     );
 
     // Normalize statement before commit adds OOD samples
     let verifier_statement = statement.normalize();
 
-    // 4. WHIR Commitment to Witness (Phase 2)
-    // ---------------------------------------
     let witness_commitment = committer
         .commit::<_, <F as Field>::Packing, F, <F as Field>::Packing, 8>(
             &dft,
@@ -147,10 +152,10 @@ fn test_r1cs_whir_integration() {
             &mut whir_challenger,
             &mut statement,
         )
-        .expect("Commitment failed");
+        .expect("WHIR commitment failed in demo");
 
-    // 5. WHIR Prover
-    // --------------------------------
+    // 6. WHIR Prover
+    // --------------
     let whir_prover_struct = WhirProver(&whir_config);
     whir_prover_struct
         .prove::<_, <F as Field>::Packing, F, <F as Field>::Packing, 8>(
@@ -160,14 +165,14 @@ fn test_r1cs_whir_integration() {
             &statement,
             witness_commitment,
         )
-        .expect("WHIR proving failed");
+        .expect("WHIR proving failed in demo");
 
-    // 6. Verification
+    // 7. Verification
     // ---------------
 
-    // Verify Spartan Proof
+    // Verify Spartan proof.
     let verifier = R1CSVerifier::new();
-    let mut spartan_verifier_challenger = MyChallenger::new(perm_chal.clone()); // Same seed as prover
+    let mut spartan_verifier_challenger = MyChallenger::new(perm_chal.clone());
     let r1cs_result = verifier.verify::<EF, _>(
         &shape,
         &input,
@@ -176,14 +181,14 @@ fn test_r1cs_whir_integration() {
     );
     assert!(
         r1cs_result.is_ok(),
-        "Spartan verification failed: {:?}",
+        "Spartan phase-1 verification failed: {:?}",
         r1cs_result.err()
     );
 
-    // Verify WHIR Proof
+    // Verify WHIR proof for the bridged claim.
     let commitment_reader = CommitmentReader::new(&whir_config);
     let whir_verifier = WhirVerifier::new(&whir_config);
-    let mut whir_verifier_challenger = MyChallenger::new(perm_chal.clone()); // Same seed
+    let mut whir_verifier_challenger = MyChallenger::new(perm_chal.clone());
 
     // Replay domain separator
     let mut domainsep_v = DomainSeparator::<EF, F>::new(vec![]);
@@ -203,12 +208,12 @@ fn test_r1cs_whir_integration() {
 
     assert!(
         whir_result.is_ok(),
-        "WHIR verification failed: {:?}",
+        "WHIR verification for Z(r_y)=v failed: {:?}",
         whir_result.err()
     );
 
-    // 7. Adversarial checks
-    // ---------------------
+    // 8. Deterministic tamper checks
+    // ------------------------------
 
     // (a) Mutate r_y in Spartan proof -> Spartan verifier must fail.
     let mut bad_ry_proof = r1cs_proof.clone();
@@ -216,14 +221,17 @@ fn test_r1cs_whir_integration() {
     let mut spartan_bad_ry_challenger = MyChallenger::new(perm_chal.clone());
     let bad_ry_result =
         verifier.verify::<EF, _>(&shape, &input, &bad_ry_proof, &mut spartan_bad_ry_challenger);
-    assert!(bad_ry_result.is_err(), "Mutated r_y should fail Spartan verify");
+    assert!(
+        bad_ry_result.is_err(),
+        "tamper check failed: mutated r_y should fail Spartan verify"
+    );
 
     // (b) Mutate WHIR proof payload -> WHIR verifier must fail.
     let mut bad_whir_proof = whir_proof.clone();
     if let Some(final_poly) = bad_whir_proof.final_poly.as_mut() {
         final_poly.0[0] += EF::ONE;
     } else {
-        panic!("expected final polynomial in WHIR proof");
+        panic!("tamper setup failed: expected final polynomial in WHIR proof");
     }
 
     let mut whir_bad_challenger = MyChallenger::new(perm_chal.clone());
@@ -242,7 +250,7 @@ fn test_r1cs_whir_integration() {
         );
     assert!(
         bad_whir_result.is_err(),
-        "Mutated WHIR proof should fail verification"
+        "tamper check failed: mutated WHIR proof should fail verification"
     );
 
     // (c) Mutate claimed v in verifier statement -> WHIR verifier must fail.
@@ -265,13 +273,21 @@ fn test_r1cs_whir_integration() {
         );
     assert!(
         bad_claim_result.is_err(),
-        "Mutated claimed v should fail WHIR verification"
+        "tamper check failed: mutated claimed v should fail WHIR verification"
     );
 }
 
 #[test]
-#[should_panic(expected = "Witness does not satisfy R1CS constraints")]
-fn test_r1cs_whir_integration_rejects_invalid_witness() {
+fn test_r1cs_whir_integration() {
+    run_spartan_whir_phase1_zry_demo();
+}
+
+#[test]
+fn test_spartan_whir_phase1_zry_demo() {
+    run_spartan_whir_phase1_zry_demo();
+}
+
+pub(super) fn run_invalid_witness_case() {
     let num_cons = 4usize;
     let num_vars = 4usize;
     let num_inputs = 1usize;
@@ -291,10 +307,16 @@ fn test_r1cs_whir_integration_rejects_invalid_witness() {
     let instance = R1CSInstance::new(shape, input, witness);
 
     let r1cs_prover = R1CSProver::new();
-    let mut rng_chal = SmallRng::seed_from_u64(123);
+    let mut rng_chal = SmallRng::seed_from_u64(DEMO_TRANSCRIPT_SEED);
     let perm_chal = Perm::new_from_rng_128(&mut rng_chal);
     let mut spartan_challenger = MyChallenger::new(perm_chal);
 
     // Prover should fail immediately on unsatisfied instance in v1.
     let _ = r1cs_prover.prove::<EF, _>(&instance, &mut spartan_challenger);
+}
+
+#[test]
+#[should_panic(expected = "Witness does not satisfy R1CS constraints")]
+fn test_r1cs_whir_integration_rejects_invalid_witness() {
+    run_invalid_witness_case();
 }
