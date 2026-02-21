@@ -12,9 +12,9 @@ use rand::rngs::SmallRng;
 use crate::fiat_shamir::domain_separator::DomainSeparator;
 use crate::parameters::{FoldingFactor, ProtocolParameters, errors::SecurityAssumption};
 use crate::poly::evals::EvaluationsList;
-use crate::whir::constraints::statement::EqStatement;
 use crate::spartan::r1cs::{R1CSInstance, R1CSShape, SparseMatEntry};
 use crate::spartan::r1cs_prover::{R1CSProver, R1CSVerifier};
+use crate::whir::constraints::statement::EqStatement;
 use crate::whir::{
     committer::{reader::CommitmentReader, writer::CommitmentWriter},
     parameters::{SumcheckStrategy, WhirConfig},
@@ -138,11 +138,11 @@ pub(super) fn run_spartan_whir_phase1_zry_demo() {
     let claimed_val_z = r1cs_proof.eval_claims.z_eval;
     let witness_eval_at_ry = statement.evaluate(&query_point);
     assert_eq!(
-        witness_eval_at_ry, claimed_val_z,
-        "bridge check failed: WHIR statement eval does not match Spartan claim Z(r_y)=v"
+        witness_eval_at_ry,
+        EF::from(claimed_val_z),
+        "bridge pre-check failed: witness eval at r_y does not match Spartan claim"
     );
 
-    // Normalize statement before commit adds OOD samples
     let verifier_statement = statement.normalize();
 
     let witness_commitment = committer
@@ -219,8 +219,12 @@ pub(super) fn run_spartan_whir_phase1_zry_demo() {
     let mut bad_ry_proof = r1cs_proof.clone();
     bad_ry_proof.eval_claims.ry[0] += F::ONE;
     let mut spartan_bad_ry_challenger = MyChallenger::new(perm_chal.clone());
-    let bad_ry_result =
-        verifier.verify::<EF, _>(&shape, &input, &bad_ry_proof, &mut spartan_bad_ry_challenger);
+    let bad_ry_result = verifier.verify::<EF, _>(
+        &shape,
+        &input,
+        &bad_ry_proof,
+        &mut spartan_bad_ry_challenger,
+    );
     assert!(
         bad_ry_result.is_err(),
         "tamper check failed: mutated r_y should fail Spartan verify"
@@ -241,8 +245,8 @@ pub(super) fn run_spartan_whir_phase1_zry_demo() {
     domainsep_bad.observe_domain_separator(&mut whir_bad_challenger);
     let parsed_bad =
         commitment_reader.parse_commitment::<F, 8>(&bad_whir_proof, &mut whir_bad_challenger);
-    let bad_whir_result =
-        whir_verifier.verify::<<F as Field>::Packing, F, <F as Field>::Packing, 8>(
+    let bad_whir_result = whir_verifier
+        .verify::<<F as Field>::Packing, F, <F as Field>::Packing, 8>(
             &bad_whir_proof,
             &mut whir_bad_challenger,
             &parsed_bad,
@@ -254,8 +258,9 @@ pub(super) fn run_spartan_whir_phase1_zry_demo() {
     );
 
     // (c) Mutate claimed v in verifier statement -> WHIR verifier must fail.
-    let mut bad_claim_statement: EqStatement<EF> = verifier_statement.clone();
-    bad_claim_statement.add_evaluated_constraint(query_point.clone(), claimed_val_z + EF::ONE);
+    let mut bad_claim_statement: EqStatement<EF> = EqStatement::initialize(num_vars_z);
+    bad_claim_statement
+        .add_evaluated_constraint(query_point.clone(), EF::from(claimed_val_z) + EF::ONE);
 
     let mut whir_bad_claim_challenger = MyChallenger::new(perm_chal.clone());
     let mut domainsep_bad_claim = DomainSeparator::<EF, F>::new(vec![]);
@@ -264,8 +269,8 @@ pub(super) fn run_spartan_whir_phase1_zry_demo() {
     domainsep_bad_claim.observe_domain_separator(&mut whir_bad_claim_challenger);
     let parsed_ok =
         commitment_reader.parse_commitment::<F, 8>(&whir_proof, &mut whir_bad_claim_challenger);
-    let bad_claim_result =
-        whir_verifier.verify::<<F as Field>::Packing, F, <F as Field>::Packing, 8>(
+    let bad_claim_result = whir_verifier
+        .verify::<<F as Field>::Packing, F, <F as Field>::Packing, 8>(
             &whir_proof,
             &mut whir_bad_claim_challenger,
             &parsed_ok,

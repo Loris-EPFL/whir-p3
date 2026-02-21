@@ -1,0 +1,92 @@
+<svg xmlns='http://www.w3.org/2000/svg' width='1100' height='700' viewBox='0 0 1100 700'>
+<rect x='0' y='0' width='1100' height='700' fill='#fffaf2' />
+<text x='90.0' y='32' font-size='24' fill='#222' font-family='Georgia'>Prover/Verifier Cost vs Total nnz (Global)</text>
+<line x1='90' y1='70' x2='90' y2='590' stroke='#333' stroke-width='2'/>
+<line x1='90' y1='590' x2='810' y2='590' stroke='#333' stroke-width='2'/>
+<line x1='90' y1='590.00' x2='810' y2='590.00' stroke='#ddd' stroke-width='1'/>
+<text x='10' y='594.00' font-size='12' fill='#444' font-family='monospace'>0.275</text>
+<line x1='90' y1='486.00' x2='810' y2='486.00' stroke='#ddd' stroke-width='1'/>
+<text x='10' y='490.00' font-size='12' fill='#444' font-family='monospace'>43.407</text>
+<line x1='90' y1='382.00' x2='810' y2='382.00' stroke='#ddd' stroke-width='1'/>
+<text x='10' y='386.00' font-size='12' fill='#444' font-family='monospace'>86.538</text>
+<line x1='90' y1='278.00' x2='810' y2='278.00' stroke='#ddd' stroke-width='1'/>
+<text x='10' y='282.00' font-size='12' fill='#444' font-family='monospace'>129.670</text>
+<line x1='90' y1='174.00' x2='810' y2='174.00' stroke='#ddd' stroke-width='1'/>
+<text x='10' y='178.00' font-size='12' fill='#444' font-family='monospace'>172.801</text>
+<line x1='90' y1='70.00' x2='810' y2='70.00' stroke='#ddd' stroke-width='1'/>
+<text x='10' y='74.00' font-size='12' fill='#444' font-family='monospace'>215.933</text>
+<line x1='90.00' y1='70' x2='90.00' y2='590' stroke='#eee' stroke-width='1'/>
+<text x='78.00' y='610' font-size='12' fill='#444' font-family='monospace'>48.00</text>
+<line x1='234.00' y1='70' x2='234.00' y2='590' stroke='#eee' stroke-width='1'/>
+<text x='222.00' y='610' font-size='12' fill='#444' font-family='monospace'>192.00</text>
+<line x1='378.00' y1='70' x2='378.00' y2='590' stroke='#eee' stroke-width='1'/>
+<text x='366.00' y='610' font-size='12' fill='#444' font-family='monospace'>336.00</text>
+<line x1='522.00' y1='70' x2='522.00' y2='590' stroke='#eee' stroke-width='1'/>
+<text x='510.00' y='610' font-size='12' fill='#444' font-family='monospace'>480.00</text>
+<line x1='666.00' y1='70' x2='666.00' y2='590' stroke='#eee' stroke-width='1'/>
+<text x='654.00' y='610' font-size='12' fill='#444' font-family='monospace'>624.00</text>
+<line x1='810.00' y1='70' x2='810.00' y2='590' stroke='#eee' stroke-width='1'/>
+<text x='798.00' y='610' font-size='12' fill='#444' font-family='monospace'>768.00</text>
+<path d='M 90.00 586.12 L 234.00 577.81' stroke='#005f73' stroke-width='2.5' fill='none'/>
+<circle cx='90.00' cy='586.12' r='2.8' fill='#005f73'/>
+<circle cx='234.00' cy='577.81' r='2.8' fill='#005f73'/>
+<path d='M 90.00 589.94 L 234.00 589.66' stroke='#0a9396' stroke-width='2.5' fill='none'/>
+<circle cx='90.00' cy='589.94' r='2.8' fill='#0a9396'/>
+<circle cx='234.00' cy='589.66' r='2.8' fill='#0a9396'/>
+<path d='M 234.00 510.45 L 810.00 330.84' stroke='#94d2bd' stroke-width='2.5' fill='none'/>
+<circle cx='234.00' cy='510.45' r='2.8' fill='#94d2bd'/>
+<circle cx='810.00' cy='330.84' r='2.8' fill='#94d2bd'/>
+<path d='M 234.00 589.35 L 810.00 588.31' stroke='#ee9b00' stroke-width='2.5' fill='none'/>
+<circle cx='234.00' cy='589.35' r='2.8' fill='#ee9b00'/>
+<circle cx='810.00' cy='588.31' r='2.8' fill='#ee9b00'/>
+<path d='M 90.00 588.00 L 234.00 582.98' stroke='#ca6702' stroke-width='2.5' fill='none'/>
+<circle cx='90.00' cy='588.00' r='2.8' fill='#ca6702'/>
+<circle cx='234.00' cy='582.98' r='2.8' fill='#ca6702'/>
+<path d='M 90.00 590.00 L 234.00 589.75' stroke='#bb3e03' stroke-width='2.5' fill='none'/>
+<circle cx='90.00' cy='590.00' r='2.8' fill='#bb3e03'/>
+<circle cx='234.00' cy='589.75' r='2.8' fill='#bb3e03'/>
+<path d='M 234.00 547.68 L 810.00 439.26' stroke='#ae2012' stroke-width='2.5' fill='none'/>
+<circle cx='234.00' cy='547.68' r='2.8' fill='#ae2012'/>
+<circle cx='810.00' cy='439.26' r='2.8' fill='#ae2012'/>
+<path d='M 234.00 589.43 L 810.00 588.25' stroke='#9b2226' stroke-width='2.5' fill='none'/>
+<circle cx='234.00' cy='589.43' r='2.8' fill='#9b2226'/>
+<circle cx='810.00' cy='588.25' r='2.8' fill='#9b2226'/>
+<path d='M 90.00 578.78 L 234.00 564.76' stroke='#264653' stroke-width='2.5' fill='none'/>
+<circle cx='90.00' cy='578.78' r='2.8' fill='#264653'/>
+<circle cx='234.00' cy='564.76' r='2.8' fill='#264653'/>
+<path d='M 90.00 589.83 L 234.00 589.54' stroke='#2a9d8f' stroke-width='2.5' fill='none'/>
+<circle cx='90.00' cy='589.83' r='2.8' fill='#2a9d8f'/>
+<circle cx='234.00' cy='589.54' r='2.8' fill='#2a9d8f'/>
+<path d='M 234.00 385.23 L 810.00 70.00' stroke='#e76f51' stroke-width='2.5' fill='none'/>
+<circle cx='234.00' cy='385.23' r='2.8' fill='#e76f51'/>
+<circle cx='810.00' cy='70.00' r='2.8' fill='#e76f51'/>
+<path d='M 234.00 589.09 L 810.00 588.21' stroke='#3a86ff' stroke-width='2.5' fill='none'/>
+<circle cx='234.00' cy='589.09' r='2.8' fill='#3a86ff'/>
+<circle cx='810.00' cy='588.21' r='2.8' fill='#3a86ff'/>
+<line x1='840' y1='90' x2='860' y2='90' stroke='#005f73' stroke-width='3'/>
+<text x='868' y='94' font-size='12' fill='#222' font-family='monospace'>square-log4 prover</text>
+<line x1='840' y1='108' x2='860' y2='108' stroke='#0a9396' stroke-width='3'/>
+<text x='868' y='112' font-size='12' fill='#222' font-family='monospace'>square-log4 verifier</text>
+<line x1='840' y1='126' x2='860' y2='126' stroke='#94d2bd' stroke-width='3'/>
+<text x='868' y='130' font-size='12' fill='#222' font-family='monospace'>square-log6 prover</text>
+<line x1='840' y1='144' x2='860' y2='144' stroke='#ee9b00' stroke-width='3'/>
+<text x='868' y='148' font-size='12' fill='#222' font-family='monospace'>square-log6 verifier</text>
+<line x1='840' y1='162' x2='860' y2='162' stroke='#ca6702' stroke-width='3'/>
+<text x='868' y='166' font-size='12' fill='#222' font-family='monospace'>tall-log4 prover</text>
+<line x1='840' y1='180' x2='860' y2='180' stroke='#bb3e03' stroke-width='3'/>
+<text x='868' y='184' font-size='12' fill='#222' font-family='monospace'>tall-log4 verifier</text>
+<line x1='840' y1='198' x2='860' y2='198' stroke='#ae2012' stroke-width='3'/>
+<text x='868' y='202' font-size='12' fill='#222' font-family='monospace'>tall-log6 prover</text>
+<line x1='840' y1='216' x2='860' y2='216' stroke='#9b2226' stroke-width='3'/>
+<text x='868' y='220' font-size='12' fill='#222' font-family='monospace'>tall-log6 verifier</text>
+<line x1='840' y1='234' x2='860' y2='234' stroke='#264653' stroke-width='3'/>
+<text x='868' y='238' font-size='12' fill='#222' font-family='monospace'>wide-log4 prover</text>
+<line x1='840' y1='252' x2='860' y2='252' stroke='#2a9d8f' stroke-width='3'/>
+<text x='868' y='256' font-size='12' fill='#222' font-family='monospace'>wide-log4 verifier</text>
+<line x1='840' y1='270' x2='860' y2='270' stroke='#e76f51' stroke-width='3'/>
+<text x='868' y='274' font-size='12' fill='#222' font-family='monospace'>wide-log6 prover</text>
+<line x1='840' y1='288' x2='860' y2='288' stroke='#3a86ff' stroke-width='3'/>
+<text x='868' y='292' font-size='12' fill='#222' font-family='monospace'>wide-log6 verifier</text>
+<text x='370' y='670' font-size='14' fill='#222' font-family='Georgia'>total_nnz_global</text>
+<text transform='translate(24,410) rotate(-90)' font-size='14' fill='#222' font-family='Georgia'>time (ms)</text>
+</svg>

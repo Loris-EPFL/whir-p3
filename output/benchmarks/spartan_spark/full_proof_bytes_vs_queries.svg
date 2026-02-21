@@ -1,0 +1,46 @@
+<svg xmlns='http://www.w3.org/2000/svg' width='1100' height='700' viewBox='0 0 1100 700'>
+<rect x='0' y='0' width='1100' height='700' fill='#fffaf2' />
+<text x='90.0' y='32' font-size='24' fill='#222' font-family='Georgia'>Full Proof Size vs Query Batch Size</text>
+<line x1='90' y1='70' x2='90' y2='590' stroke='#333' stroke-width='2'/>
+<line x1='90' y1='590' x2='810' y2='590' stroke='#333' stroke-width='2'/>
+<line x1='90' y1='590.00' x2='810' y2='590.00' stroke='#ddd' stroke-width='1'/>
+<text x='10' y='594.00' font-size='12' fill='#444' font-family='monospace'>612.000</text>
+<line x1='90' y1='486.00' x2='810' y2='486.00' stroke='#ddd' stroke-width='1'/>
+<text x='10' y='490.00' font-size='12' fill='#444' font-family='monospace'>2200.000</text>
+<line x1='90' y1='382.00' x2='810' y2='382.00' stroke='#ddd' stroke-width='1'/>
+<text x='10' y='386.00' font-size='12' fill='#444' font-family='monospace'>3788.000</text>
+<line x1='90' y1='278.00' x2='810' y2='278.00' stroke='#ddd' stroke-width='1'/>
+<text x='10' y='282.00' font-size='12' fill='#444' font-family='monospace'>5376.000</text>
+<line x1='90' y1='174.00' x2='810' y2='174.00' stroke='#ddd' stroke-width='1'/>
+<text x='10' y='178.00' font-size='12' fill='#444' font-family='monospace'>6964.000</text>
+<line x1='90' y1='70.00' x2='810' y2='70.00' stroke='#ddd' stroke-width='1'/>
+<text x='10' y='74.00' font-size='12' fill='#444' font-family='monospace'>8552.000</text>
+<line x1='90.00' y1='70' x2='90.00' y2='590' stroke='#eee' stroke-width='1'/>
+<text x='78.00' y='610' font-size='12' fill='#444' font-family='monospace'>1.00</text>
+<line x1='234.00' y1='70' x2='234.00' y2='590' stroke='#eee' stroke-width='1'/>
+<text x='222.00' y='610' font-size='12' fill='#444' font-family='monospace'>4.00</text>
+<line x1='378.00' y1='70' x2='378.00' y2='590' stroke='#eee' stroke-width='1'/>
+<text x='366.00' y='610' font-size='12' fill='#444' font-family='monospace'>7.00</text>
+<line x1='522.00' y1='70' x2='522.00' y2='590' stroke='#eee' stroke-width='1'/>
+<text x='510.00' y='610' font-size='12' fill='#444' font-family='monospace'>10.00</text>
+<line x1='666.00' y1='70' x2='666.00' y2='590' stroke='#eee' stroke-width='1'/>
+<text x='654.00' y='610' font-size='12' fill='#444' font-family='monospace'>13.00</text>
+<line x1='810.00' y1='70' x2='810.00' y2='590' stroke='#eee' stroke-width='1'/>
+<text x='798.00' y='610' font-size='12' fill='#444' font-family='monospace'>16.00</text>
+<line x1='90.00' y1='70' x2='90.00' y2='590' stroke='#111' stroke-dasharray='6 6' stroke-width='2'/>
+<text x='96.00' y='88' font-size='12' fill='#111' font-family='monospace'>crossover=1.0</text>
+<path d='M 90.00 569.04 L 234.00 469.23 L 810.00 70.00' stroke='#005f73' stroke-width='2.5' fill='none'/>
+<circle cx='90.00' cy='569.04' r='2.8' fill='#005f73'/>
+<circle cx='234.00' cy='469.23' r='2.8' fill='#005f73'/>
+<circle cx='810.00' cy='70.00' r='2.8' fill='#005f73'/>
+<path d='M 90.00 590.00 L 234.00 554.63 L 810.00 413.17' stroke='#0a9396' stroke-width='2.5' fill='none'/>
+<circle cx='90.00' cy='590.00' r='2.8' fill='#0a9396'/>
+<circle cx='234.00' cy='554.63' r='2.8' fill='#0a9396'/>
+<circle cx='810.00' cy='413.17' r='2.8' fill='#0a9396'/>
+<line x1='840' y1='90' x2='860' y2='90' stroke='#005f73' stroke-width='3'/>
+<text x='868' y='94' font-size='12' fill='#222' font-family='monospace'>unbatched</text>
+<line x1='840' y1='108' x2='860' y2='108' stroke='#0a9396' stroke-width='3'/>
+<text x='868' y='112' font-size='12' fill='#222' font-family='monospace'>batched</text>
+<text x='370' y='670' font-size='14' fill='#222' font-family='Georgia'>queries</text>
+<text transform='translate(24,410) rotate(-90)' font-size='14' fill='#222' font-family='Georgia'>bytes</text>
+</svg>
