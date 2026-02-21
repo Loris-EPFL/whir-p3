@@ -6,30 +6,48 @@
 - Full proof-size model includes sum-check payload, transcript overhead, and Merkle authentication-path hashes.
 
 ## Prover/Verifier Cost Table
-| shape | log_m | num_cons | num_vars | nnz_per_row | nnz_per_matrix_global | total_nnz_global | prover_ms | verifier_ms |
-|---|---:|---:|---:|---:|---:|---:|---:|---:|
-| square | 4 | 16 | 16 | 1 | 16 | 48 | 1.8835 | 0.3011 |
-| square | 4 | 16 | 16 | 4 | 64 | 192 | 5.3298 | 0.4144 |
-| square | 6 | 64 | 64 | 1 | 64 | 192 | 33.2663 | 0.5447 |
-| square | 6 | 64 | 64 | 4 | 256 | 768 | 107.7555 | 0.9758 |
-| tall | 4 | 16 | 8 | 1 | 16 | 48 | 1.1043 | 0.2754 |
-| tall | 4 | 16 | 8 | 4 | 64 | 192 | 3.1854 | 0.3792 |
-| tall | 6 | 64 | 32 | 1 | 64 | 192 | 17.8275 | 0.5138 |
-| tall | 6 | 64 | 32 | 4 | 256 | 768 | 62.7908 | 1.0001 |
-| wide | 4 | 16 | 32 | 1 | 16 | 48 | 4.9283 | 0.3478 |
-| wide | 4 | 16 | 32 | 4 | 64 | 192 | 10.7425 | 0.4672 |
-| wide | 6 | 64 | 128 | 1 | 64 | 192 | 85.2003 | 0.6517 |
-| wide | 6 | 64 | 128 | 4 | 256 | 768 | 215.9326 | 1.0197 |
+| field | shape | log_m | num_cons | num_vars | nnz_per_row | nnz_per_matrix_global | total_nnz_global | prover_ms | verifier_ms |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| BabyBear | square | 4 | 16 | 16 | 1 | 16 | 48 | 1.6286 | 0.3001 |
+| BabyBear | square | 4 | 16 | 16 | 4 | 64 | 192 | 4.5700 | 0.3955 |
+| BabyBear | square | 6 | 64 | 64 | 1 | 64 | 192 | 26.1099 | 0.4822 |
+| BabyBear | square | 6 | 64 | 64 | 4 | 256 | 768 | 83.6727 | 0.8828 |
+| BabyBear | tall | 4 | 16 | 8 | 1 | 16 | 48 | 0.8284 | 0.2389 |
+| BabyBear | tall | 4 | 16 | 8 | 4 | 64 | 192 | 2.2692 | 0.3146 |
+| BabyBear | tall | 6 | 64 | 32 | 1 | 64 | 192 | 12.7076 | 0.4461 |
+| BabyBear | tall | 6 | 64 | 32 | 4 | 256 | 768 | 45.5135 | 0.7669 |
+| BabyBear | wide | 4 | 16 | 32 | 1 | 16 | 48 | 3.2688 | 0.2948 |
+| BabyBear | wide | 4 | 16 | 32 | 4 | 64 | 192 | 7.9463 | 0.3709 |
+| BabyBear | wide | 6 | 64 | 128 | 1 | 64 | 192 | 61.7018 | 0.5413 |
+| BabyBear | wide | 6 | 64 | 128 | 4 | 256 | 768 | 170.2382 | 1.0793 |
+| M31 | square | 4 | 16 | 16 | 1 | 16 | 48 | 2.4593 | 0.3241 |
+| M31 | square | 4 | 16 | 16 | 4 | 64 | 192 | 7.9460 | 0.5901 |
+| M31 | square | 6 | 64 | 64 | 1 | 64 | 192 | 48.8056 | 0.6819 |
+| M31 | square | 6 | 64 | 64 | 4 | 256 | 768 | 153.5558 | 1.2669 |
+| M31 | tall | 4 | 16 | 8 | 1 | 16 | 48 | 1.3735 | 0.3025 |
+| M31 | tall | 4 | 16 | 8 | 4 | 64 | 192 | 4.2028 | 0.4273 |
+| M31 | tall | 6 | 64 | 32 | 1 | 64 | 192 | 24.0575 | 0.5937 |
+| M31 | tall | 6 | 64 | 32 | 4 | 256 | 768 | 87.6240 | 1.2295 |
+| M31 | wide | 4 | 16 | 32 | 1 | 16 | 48 | 5.5446 | 0.3618 |
+| M31 | wide | 4 | 16 | 32 | 4 | 64 | 192 | 14.8358 | 0.5015 |
+| M31 | wide | 6 | 64 | 128 | 1 | 64 | 192 | 109.2758 | 0.7316 |
+| M31 | wide | 6 | 64 | 128 | 4 | 256 | 768 | 300.8632 | 1.5328 |
 
 ## Crossover Thresholds
-| shape | log_m | runtime crossover queries | payload-fields crossover queries | full-proof-bytes crossover queries |
-|---|---:|---:|---:|---:|
-| square | 4 | 1 | 1 | 1 |
-| square | 6 | 1 | 1 | 1 |
-| tall | 4 | 1 | 1 | 1 |
-| tall | 6 | 1 | 1 | 1 |
-| wide | 4 | 1 | 1 | 1 |
-| wide | 6 | 1 | 1 | 1 |
+| field | shape | log_m | runtime crossover queries | payload-fields crossover queries | full-proof-bytes crossover queries |
+|---|---|---:|---:|---:|---:|
+| BabyBear | square | 4 | 1 | 1 | 1 |
+| BabyBear | square | 6 | 1 | 1 | 1 |
+| BabyBear | tall | 4 | 1 | 1 | 1 |
+| BabyBear | tall | 6 | 1 | 1 | 1 |
+| BabyBear | wide | 4 | 1 | 1 | 1 |
+| BabyBear | wide | 6 | 1 | 1 | 1 |
+| M31 | square | 4 | 1 | 1 | 1 |
+| M31 | square | 6 | 1 | 1 | 1 |
+| M31 | tall | 4 | 1 | 1 | 1 |
+| M31 | tall | 6 | 1 | 1 | 1 |
+| M31 | wide | 4 | 1 | 1 | 1 |
+| M31 | wide | 6 | 1 | 1 | 1 |
 
 ## Verifier Query Sweep
 - Per-`log_m` plots are generated to show verifier-time scaling with query count.

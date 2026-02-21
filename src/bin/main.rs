@@ -1,3 +1,6 @@
+mod spartan_spark_bench;
+mod spartan_spark_report;
+
 use std::time::Instant;
 
 use clap::Parser;

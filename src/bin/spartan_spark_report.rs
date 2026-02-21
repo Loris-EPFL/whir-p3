@@ -1,10 +1,11 @@
-use std::collections::BTreeMap;
-use std::fs::{File, create_dir_all, read_to_string};
+use std::collections::{BTreeMap, BTreeSet};
+use std::fs::{create_dir_all, read_to_string, File};
 use std::io::Write;
 use std::path::Path;
 
 #[derive(Clone)]
 struct MetricRow {
+    field: String,
     shape: String,
     log_m: usize,
     num_cons: usize,
@@ -18,6 +19,7 @@ struct MetricRow {
 
 #[derive(Clone)]
 struct OpeningRow {
+    field: String,
     shape: String,
     log_m: usize,
     nnz_per_row: usize,
@@ -35,6 +37,7 @@ struct OpeningRow {
 
 #[derive(Clone)]
 struct VerifierQueryRow {
+    field: String,
     shape: String,
     log_m: usize,
     queries: usize,
@@ -80,15 +83,16 @@ fn parse_metrics(path: &Path) -> Vec<MetricRow> {
         .map(|line| {
             let c: Vec<&str> = line.split(',').collect();
             MetricRow {
-                shape: c[0].to_string(),
-                log_m: c[1].parse().unwrap(),
-                num_cons: c[2].parse().unwrap(),
-                num_vars: c[3].parse().unwrap(),
-                nnz_per_row: c[4].parse().unwrap(),
-                nnz_per_matrix_global: c[5].parse().unwrap(),
-                total_nnz_global: c[6].parse().unwrap(),
-                prover_ms: c[7].parse().unwrap(),
-                verifier_ms: c[8].parse().unwrap(),
+                field: c[0].to_string(),
+                shape: c[1].to_string(),
+                log_m: c[2].parse().unwrap(),
+                num_cons: c[3].parse().unwrap(),
+                num_vars: c[4].parse().unwrap(),
+                nnz_per_row: c[5].parse().unwrap(),
+                nnz_per_matrix_global: c[6].parse().unwrap(),
+                total_nnz_global: c[7].parse().unwrap(),
+                prover_ms: c[8].parse().unwrap(),
+                verifier_ms: c[9].parse().unwrap(),
             }
         })
         .collect()
@@ -102,19 +106,20 @@ fn parse_opening(path: &Path) -> Vec<OpeningRow> {
         .map(|line| {
             let c: Vec<&str> = line.split(',').collect();
             OpeningRow {
-                shape: c[0].to_string(),
-                log_m: c[1].parse().unwrap(),
-                nnz_per_row: c[4].parse().unwrap(),
-                nnz_per_matrix_global: c[5].parse().unwrap(),
-                queries: c[6].parse().unwrap(),
-                unbatched_us: c[7].parse().unwrap(),
-                batched_us: c[8].parse().unwrap(),
-                unbatched_field_ops: c[9].parse().unwrap(),
-                batched_field_ops: c[10].parse().unwrap(),
-                unbatched_serialized_fields: c[11].parse().unwrap(),
-                batched_serialized_fields: c[12].parse().unwrap(),
-                unbatched_full_proof_bytes: c[13].parse().unwrap(),
-                batched_full_proof_bytes: c[14].parse().unwrap(),
+                field: c[0].to_string(),
+                shape: c[1].to_string(),
+                log_m: c[2].parse().unwrap(),
+                nnz_per_row: c[5].parse().unwrap(),
+                nnz_per_matrix_global: c[6].parse().unwrap(),
+                queries: c[7].parse().unwrap(),
+                unbatched_us: c[8].parse().unwrap(),
+                batched_us: c[9].parse().unwrap(),
+                unbatched_field_ops: c[10].parse().unwrap(),
+                batched_field_ops: c[11].parse().unwrap(),
+                unbatched_serialized_fields: c[12].parse().unwrap(),
+                batched_serialized_fields: c[13].parse().unwrap(),
+                unbatched_full_proof_bytes: c[14].parse().unwrap(),
+                batched_full_proof_bytes: c[15].parse().unwrap(),
             }
         })
         .collect()
@@ -128,11 +133,12 @@ fn parse_verifier_queries(path: &Path) -> Vec<VerifierQueryRow> {
         .map(|line| {
             let c: Vec<&str> = line.split(',').collect();
             VerifierQueryRow {
-                shape: c[0].to_string(),
-                log_m: c[1].parse().unwrap(),
-                queries: c[6].parse().unwrap(),
-                verifier_unbatched_us: c[7].parse().unwrap(),
-                verifier_batched_us: c[8].parse().unwrap(),
+                field: c[0].to_string(),
+                shape: c[1].to_string(),
+                log_m: c[2].parse().unwrap(),
+                queries: c[7].parse().unwrap(),
+                verifier_unbatched_us: c[8].parse().unwrap(),
+                verifier_batched_us: c[9].parse().unwrap(),
             }
         })
         .collect()
@@ -169,17 +175,18 @@ fn write_summary(
     writeln!(out, "## Prover/Verifier Cost Table").unwrap();
     writeln!(
         out,
-        "| shape | log_m | num_cons | num_vars | nnz_per_row | nnz_per_matrix_global | total_nnz_global | prover_ms | verifier_ms |"
+        "| field | shape | log_m | num_cons | num_vars | nnz_per_row | nnz_per_matrix_global | total_nnz_global | prover_ms | verifier_ms |"
     )
     .unwrap();
-    writeln!(out, "|---|---:|---:|---:|---:|---:|---:|---:|---:|").unwrap();
+    writeln!(out, "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|").unwrap();
 
     let mut sorted = metrics.to_vec();
-    sorted.sort_by_key(|r| (r.shape.clone(), r.log_m, r.nnz_per_row));
+    sorted.sort_by_key(|r| (r.field.clone(), r.shape.clone(), r.log_m, r.nnz_per_row));
     for r in &sorted {
         writeln!(
             out,
-            "| {} | {} | {} | {} | {} | {} | {} | {:.4} | {:.4} |",
+            "| {} | {} | {} | {} | {} | {} | {} | {} | {:.4} | {:.4} |",
+            r.field,
             r.shape,
             r.log_m,
             r.num_cons,
@@ -194,9 +201,10 @@ fn write_summary(
     }
     writeln!(out).unwrap();
 
-    let mut by_shape_log: BTreeMap<(String, usize), (usize, usize, usize)> = BTreeMap::new();
+    let mut by_shape_log: BTreeMap<(String, String, usize), (usize, usize, usize)> =
+        BTreeMap::new();
     for row in opening {
-        let key = (row.shape.clone(), row.log_m);
+        let key = (row.field.clone(), row.shape.clone(), row.log_m);
         let entry = by_shape_log
             .entry(key)
             .or_insert((usize::MAX, usize::MAX, usize::MAX));
@@ -214,11 +222,11 @@ fn write_summary(
     writeln!(out, "## Crossover Thresholds").unwrap();
     writeln!(
         out,
-        "| shape | log_m | runtime crossover queries | payload-fields crossover queries | full-proof-bytes crossover queries |"
+        "| field | shape | log_m | runtime crossover queries | payload-fields crossover queries | full-proof-bytes crossover queries |"
     )
     .unwrap();
-    writeln!(out, "|---|---:|---:|---:|---:|").unwrap();
-    for ((shape, log_m), (runtime_q, payload_q, proof_q)) in by_shape_log {
+    writeln!(out, "|---|---|---:|---:|---:|---:|").unwrap();
+    for ((field, shape, log_m), (runtime_q, payload_q, proof_q)) in by_shape_log {
         let runtime_cell = if runtime_q == usize::MAX {
             "none".to_string()
         } else {
@@ -236,16 +244,16 @@ fn write_summary(
         };
         writeln!(
             out,
-            "| {} | {} | {} | {} | {} |",
-            shape, log_m, runtime_cell, payload_cell, proof_cell
+            "| {} | {} | {} | {} | {} | {} |",
+            field, shape, log_m, runtime_cell, payload_cell, proof_cell
         )
         .unwrap();
     }
     writeln!(out).unwrap();
 
-    let mut verifier_shape_lines: BTreeMap<(String, usize), (f64, f64)> = BTreeMap::new();
+    let mut verifier_shape_lines: BTreeMap<(String, String, usize), (f64, f64)> = BTreeMap::new();
     for row in verifier_queries {
-        let key = (row.shape.clone(), row.log_m);
+        let key = (row.field.clone(), row.shape.clone(), row.log_m);
         let entry = verifier_shape_lines.entry(key).or_insert((0.0, 0.0));
         entry.0 += row.verifier_unbatched_us;
         entry.1 += row.verifier_batched_us;
@@ -300,26 +308,26 @@ fn append_verifier_plot_list(root: &Path, plot_files: &[String]) {
 }
 
 fn write_prover_verifier_plot(root: &Path, rows: &[MetricRow]) {
-    let mut grouped: BTreeMap<(String, usize), Vec<&MetricRow>> = BTreeMap::new();
+    let mut grouped: BTreeMap<(String, String, usize), Vec<&MetricRow>> = BTreeMap::new();
     for row in rows {
         grouped
-            .entry((row.shape.clone(), row.log_m))
+            .entry((row.field.clone(), row.shape.clone(), row.log_m))
             .or_default()
             .push(row);
     }
 
     let mut series = Vec::new();
-    for ((shape, log_m), mut points) in grouped {
+    for ((field, shape, log_m), mut points) in grouped {
         points.sort_by_key(|r| r.total_nnz_global);
         series.push(Series {
-            name: format!("{}-log{} prover", shape, log_m),
+            name: format!("{}-{}-log{} prover", field, shape, log_m),
             points: points
                 .iter()
                 .map(|r| (r.total_nnz_global as f64, r.prover_ms))
                 .collect(),
         });
         series.push(Series {
-            name: format!("{}-log{} verifier", shape, log_m),
+            name: format!("{}-{}-log{} verifier", field, shape, log_m),
             points: points
                 .iter()
                 .map(|r| (r.total_nnz_global as f64, r.verifier_ms))
@@ -338,25 +346,42 @@ fn write_prover_verifier_plot(root: &Path, rows: &[MetricRow]) {
 }
 
 fn write_opening_runtime_plot(root: &Path, rows: &[OpeningRow]) {
-    let mut by_q: BTreeMap<usize, (f64, f64, usize)> = BTreeMap::new();
+    let mut by_field_q: BTreeMap<(String, usize), (f64, f64, usize)> = BTreeMap::new();
     for row in rows {
-        let e = by_q.entry(row.queries).or_insert((0.0, 0.0, 0));
+        let e = by_field_q
+            .entry((row.field.clone(), row.queries))
+            .or_insert((0.0, 0.0, 0));
         e.0 += row.unbatched_us;
         e.1 += row.batched_us;
         e.2 += 1;
     }
 
-    let mut unbatched = Vec::new();
-    let mut batched = Vec::new();
+    let mut series = Vec::new();
     let mut crossover_x = None;
-    for (q, (u, b, n)) in by_q {
-        let u_avg = u / n as f64;
-        let b_avg = b / n as f64;
-        if crossover_x.is_none() && b_avg <= u_avg {
-            crossover_x = Some(q as f64);
+
+    let mut fields: BTreeSet<String> = rows.iter().map(|r| r.field.clone()).collect();
+    for f in fields {
+        let mut unbatched = Vec::new();
+        let mut batched = Vec::new();
+        for ((field, q), (u, b, n)) in &by_field_q {
+            if field == &f {
+                let u_avg = *u / *n as f64;
+                let b_avg = *b / *n as f64;
+                if crossover_x.is_none() && b_avg <= u_avg {
+                    crossover_x = Some(*q as f64);
+                }
+                unbatched.push((*q as f64, u_avg));
+                batched.push((*q as f64, b_avg));
+            }
         }
-        unbatched.push((q as f64, u_avg));
-        batched.push((q as f64, b_avg));
+        series.push(Series {
+            name: format!("{} unbatched", f),
+            points: unbatched,
+        });
+        series.push(Series {
+            name: format!("{} batched", f),
+            points: batched,
+        });
     }
 
     write_line_plot_svg(
@@ -364,40 +389,48 @@ fn write_opening_runtime_plot(root: &Path, rows: &[OpeningRow]) {
         "Opening Runtime vs Query Batch Size",
         "queries",
         "time (us)",
-        &[
-            Series {
-                name: "unbatched".to_string(),
-                points: unbatched,
-            },
-            Series {
-                name: "batched".to_string(),
-                points: batched,
-            },
-        ],
+        &series,
         crossover_x,
     );
 }
 
 fn write_opening_payload_plot(root: &Path, rows: &[OpeningRow]) {
-    let mut by_q: BTreeMap<usize, (f64, f64, usize)> = BTreeMap::new();
+    let mut by_field_q: BTreeMap<(String, usize), (f64, f64, usize)> = BTreeMap::new();
     for row in rows {
-        let e = by_q.entry(row.queries).or_insert((0.0, 0.0, 0));
+        let e = by_field_q
+            .entry((row.field.clone(), row.queries))
+            .or_insert((0.0, 0.0, 0));
         e.0 += row.unbatched_serialized_fields as f64;
         e.1 += row.batched_serialized_fields as f64;
         e.2 += 1;
     }
 
-    let mut unbatched = Vec::new();
-    let mut batched = Vec::new();
+    let mut series = Vec::new();
     let mut crossover_x = None;
-    for (q, (u, b, n)) in by_q {
-        let u_avg = u / n as f64;
-        let b_avg = b / n as f64;
-        if crossover_x.is_none() && b_avg <= u_avg {
-            crossover_x = Some(q as f64);
+
+    let mut fields: BTreeSet<String> = rows.iter().map(|r| r.field.clone()).collect();
+    for f in fields {
+        let mut unbatched = Vec::new();
+        let mut batched = Vec::new();
+        for ((field, q), (u, b, n)) in &by_field_q {
+            if field == &f {
+                let u_avg = *u / *n as f64;
+                let b_avg = *b / *n as f64;
+                if crossover_x.is_none() && b_avg <= u_avg {
+                    crossover_x = Some(*q as f64);
+                }
+                unbatched.push((*q as f64, u_avg));
+                batched.push((*q as f64, b_avg));
+            }
         }
-        unbatched.push((q as f64, u_avg));
-        batched.push((q as f64, b_avg));
+        series.push(Series {
+            name: format!("{} unbatched", f),
+            points: unbatched,
+        });
+        series.push(Series {
+            name: format!("{} batched", f),
+            points: batched,
+        });
     }
 
     write_line_plot_svg(
@@ -405,40 +438,48 @@ fn write_opening_payload_plot(root: &Path, rows: &[OpeningRow]) {
         "Opening Payload Size vs Query Batch Size",
         "queries",
         "serialized field elements",
-        &[
-            Series {
-                name: "unbatched".to_string(),
-                points: unbatched,
-            },
-            Series {
-                name: "batched".to_string(),
-                points: batched,
-            },
-        ],
+        &series,
         crossover_x,
     );
 }
 
 fn write_full_proof_size_plot(root: &Path, rows: &[OpeningRow]) {
-    let mut by_q: BTreeMap<usize, (f64, f64, usize)> = BTreeMap::new();
+    let mut by_field_q: BTreeMap<(String, usize), (f64, f64, usize)> = BTreeMap::new();
     for row in rows {
-        let e = by_q.entry(row.queries).or_insert((0.0, 0.0, 0));
+        let e = by_field_q
+            .entry((row.field.clone(), row.queries))
+            .or_insert((0.0, 0.0, 0));
         e.0 += row.unbatched_full_proof_bytes as f64;
         e.1 += row.batched_full_proof_bytes as f64;
         e.2 += 1;
     }
 
-    let mut unbatched = Vec::new();
-    let mut batched = Vec::new();
+    let mut series = Vec::new();
     let mut crossover_x = None;
-    for (q, (u, b, n)) in by_q {
-        let u_avg = u / n as f64;
-        let b_avg = b / n as f64;
-        if crossover_x.is_none() && b_avg <= u_avg {
-            crossover_x = Some(q as f64);
+
+    let mut fields: BTreeSet<String> = rows.iter().map(|r| r.field.clone()).collect();
+    for f in fields {
+        let mut unbatched = Vec::new();
+        let mut batched = Vec::new();
+        for ((field, q), (u, b, n)) in &by_field_q {
+            if field == &f {
+                let u_avg = *u / *n as f64;
+                let b_avg = *b / *n as f64;
+                if crossover_x.is_none() && b_avg <= u_avg {
+                    crossover_x = Some(*q as f64);
+                }
+                unbatched.push((*q as f64, u_avg));
+                batched.push((*q as f64, b_avg));
+            }
         }
-        unbatched.push((q as f64, u_avg));
-        batched.push((q as f64, b_avg));
+        series.push(Series {
+            name: format!("{} unbatched", f),
+            points: unbatched,
+        });
+        series.push(Series {
+            name: format!("{} batched", f),
+            points: batched,
+        });
     }
 
     write_line_plot_svg(
@@ -446,16 +487,7 @@ fn write_full_proof_size_plot(root: &Path, rows: &[OpeningRow]) {
         "Full Proof Size vs Query Batch Size",
         "queries",
         "bytes",
-        &[
-            Series {
-                name: "unbatched".to_string(),
-                points: unbatched,
-            },
-            Series {
-                name: "batched".to_string(),
-                points: batched,
-            },
-        ],
+        &series,
         crossover_x,
     );
 }
@@ -468,19 +500,35 @@ fn write_verifier_vs_queries_plots(root: &Path, rows: &[VerifierQueryRow]) -> Ve
 
     let mut files = Vec::new();
     for (log_m, subset) in log_set {
-        let mut by_q: BTreeMap<usize, (f64, f64, usize)> = BTreeMap::new();
+        let mut by_field_q: BTreeMap<(String, usize), (f64, f64, usize)> = BTreeMap::new();
         for row in subset {
-            let e = by_q.entry(row.queries).or_insert((0.0, 0.0, 0));
+            let e = by_field_q
+                .entry((row.field.clone(), row.queries))
+                .or_insert((0.0, 0.0, 0));
             e.0 += row.verifier_unbatched_us;
             e.1 += row.verifier_batched_us;
             e.2 += 1;
         }
 
-        let mut unbatched = Vec::new();
-        let mut batched = Vec::new();
-        for (q, (u, b, n)) in by_q {
-            unbatched.push((q as f64, u / n as f64));
-            batched.push((q as f64, b / n as f64));
+        let mut series = Vec::new();
+        let mut fields: BTreeSet<String> = by_field_q.keys().map(|k| k.0.clone()).collect();
+        for f in fields {
+            let mut unbatched = Vec::new();
+            let mut batched = Vec::new();
+            for ((field, q), (u, b, n)) in &by_field_q {
+                if field == &f {
+                    unbatched.push((*q as f64, *u / *n as f64));
+                    batched.push((*q as f64, *b / *n as f64));
+                }
+            }
+            series.push(Series {
+                name: format!("{} unbatched", f),
+                points: unbatched,
+            });
+            series.push(Series {
+                name: format!("{} batched", f),
+                points: batched,
+            });
         }
 
         let file = format!("verifier_vs_queries_logm{}.svg", log_m);
@@ -489,16 +537,7 @@ fn write_verifier_vs_queries_plots(root: &Path, rows: &[VerifierQueryRow]) -> Ve
             &format!("Verifier Time vs Queries (fixed log_m={})", log_m),
             "queries",
             "verifier time (us)",
-            &[
-                Series {
-                    name: "unbatched".to_string(),
-                    points: unbatched,
-                },
-                Series {
-                    name: "batched".to_string(),
-                    points: batched,
-                },
-            ],
+            &series,
             None,
         );
         files.push(file);
