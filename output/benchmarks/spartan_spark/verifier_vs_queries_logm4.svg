@@ -4,17 +4,17 @@
 <line x1='90' y1='70' x2='90' y2='590' stroke='#333' stroke-width='2'/>
 <line x1='90' y1='590' x2='810' y2='590' stroke='#333' stroke-width='2'/>
 <line x1='90' y1='590.00' x2='810' y2='590.00' stroke='#ddd' stroke-width='1'/>
-<text x='10' y='594.00' font-size='12' fill='#444' font-family='monospace'>7.106</text>
+<text x='10' y='594.00' font-size='12' fill='#444' font-family='monospace'>0.475</text>
 <line x1='90' y1='486.00' x2='810' y2='486.00' stroke='#ddd' stroke-width='1'/>
-<text x='10' y='490.00' font-size='12' fill='#444' font-family='monospace'>113.394</text>
+<text x='10' y='490.00' font-size='12' fill='#444' font-family='monospace'>5.883</text>
 <line x1='90' y1='382.00' x2='810' y2='382.00' stroke='#ddd' stroke-width='1'/>
-<text x='10' y='386.00' font-size='12' fill='#444' font-family='monospace'>219.683</text>
+<text x='10' y='386.00' font-size='12' fill='#444' font-family='monospace'>11.292</text>
 <line x1='90' y1='278.00' x2='810' y2='278.00' stroke='#ddd' stroke-width='1'/>
-<text x='10' y='282.00' font-size='12' fill='#444' font-family='monospace'>325.971</text>
+<text x='10' y='282.00' font-size='12' fill='#444' font-family='monospace'>16.700</text>
 <line x1='90' y1='174.00' x2='810' y2='174.00' stroke='#ddd' stroke-width='1'/>
-<text x='10' y='178.00' font-size='12' fill='#444' font-family='monospace'>432.260</text>
+<text x='10' y='178.00' font-size='12' fill='#444' font-family='monospace'>22.109</text>
 <line x1='90' y1='70.00' x2='810' y2='70.00' stroke='#ddd' stroke-width='1'/>
-<text x='10' y='74.00' font-size='12' fill='#444' font-family='monospace'>538.548</text>
+<text x='10' y='74.00' font-size='12' fill='#444' font-family='monospace'>27.517</text>
 <line x1='90.00' y1='70' x2='90.00' y2='590' stroke='#eee' stroke-width='1'/>
 <text x='78.00' y='610' font-size='12' fill='#444' font-family='monospace'>1.00</text>
 <line x1='234.00' y1='70' x2='234.00' y2='590' stroke='#eee' stroke-width='1'/>
@@ -27,30 +27,54 @@
 <text x='654.00' y='610' font-size='12' fill='#444' font-family='monospace'>13.00</text>
 <line x1='810.00' y1='70' x2='810.00' y2='590' stroke='#eee' stroke-width='1'/>
 <text x='798.00' y='610' font-size='12' fill='#444' font-family='monospace'>16.00</text>
-<path d='M 90.00 579.44 L 234.00 523.06 L 810.00 287.00' stroke='#005f73' stroke-width='2.5' fill='none'/>
-<circle cx='90.00' cy='579.44' r='2.8' fill='#005f73'/>
-<circle cx='234.00' cy='523.06' r='2.8' fill='#005f73'/>
-<circle cx='810.00' cy='287.00' r='2.8' fill='#005f73'/>
-<path d='M 90.00 590.00 L 234.00 567.00 L 810.00 471.19' stroke='#0a9396' stroke-width='2.5' fill='none'/>
-<circle cx='90.00' cy='590.00' r='2.8' fill='#0a9396'/>
-<circle cx='234.00' cy='567.00' r='2.8' fill='#0a9396'/>
-<circle cx='810.00' cy='471.19' r='2.8' fill='#0a9396'/>
-<path d='M 90.00 564.00 L 234.00 464.47 L 810.00 70.00' stroke='#94d2bd' stroke-width='2.5' fill='none'/>
-<circle cx='90.00' cy='564.00' r='2.8' fill='#94d2bd'/>
-<circle cx='234.00' cy='464.47' r='2.8' fill='#94d2bd'/>
-<circle cx='810.00' cy='70.00' r='2.8' fill='#94d2bd'/>
-<path d='M 90.00 583.80 L 234.00 544.50 L 810.00 388.06' stroke='#ee9b00' stroke-width='2.5' fill='none'/>
-<circle cx='90.00' cy='583.80' r='2.8' fill='#ee9b00'/>
-<circle cx='234.00' cy='544.50' r='2.8' fill='#ee9b00'/>
-<circle cx='810.00' cy='388.06' r='2.8' fill='#ee9b00'/>
+<path d='M 90.00 563.37 L 234.00 462.86 L 810.00 72.91' stroke='#005f73' stroke-width='2.5' fill='none'/>
+<circle cx='90.00' cy='563.37' r='2.8' fill='#005f73'/>
+<circle cx='234.00' cy='462.86' r='2.8' fill='#005f73'/>
+<circle cx='810.00' cy='72.91' r='2.8' fill='#005f73'/>
+<path d='M 90.00 585.96 L 234.00 547.34 L 810.00 405.50' stroke='#0a9396' stroke-width='2.5' fill='none'/>
+<circle cx='90.00' cy='585.96' r='2.8' fill='#0a9396'/>
+<circle cx='234.00' cy='547.34' r='2.8' fill='#0a9396'/>
+<circle cx='810.00' cy='405.50' r='2.8' fill='#0a9396'/>
+<path d='M 90.00 574.45 L 234.00 502.45 L 810.00 137.94' stroke='#94d2bd' stroke-width='2.5' fill='none'/>
+<circle cx='90.00' cy='574.45' r='2.8' fill='#94d2bd'/>
+<circle cx='234.00' cy='502.45' r='2.8' fill='#94d2bd'/>
+<circle cx='810.00' cy='137.94' r='2.8' fill='#94d2bd'/>
+<path d='M 90.00 589.37 L 234.00 561.23 L 810.00 447.18' stroke='#ee9b00' stroke-width='2.5' fill='none'/>
+<circle cx='90.00' cy='589.37' r='2.8' fill='#ee9b00'/>
+<circle cx='234.00' cy='561.23' r='2.8' fill='#ee9b00'/>
+<circle cx='810.00' cy='447.18' r='2.8' fill='#ee9b00'/>
+<path d='M 90.00 562.64 L 234.00 462.12 L 810.00 70.00' stroke='#ca6702' stroke-width='2.5' fill='none'/>
+<circle cx='90.00' cy='562.64' r='2.8' fill='#ca6702'/>
+<circle cx='234.00' cy='462.12' r='2.8' fill='#ca6702'/>
+<circle cx='810.00' cy='70.00' r='2.8' fill='#ca6702'/>
+<path d='M 90.00 585.52 L 234.00 548.69 L 810.00 408.22' stroke='#bb3e03' stroke-width='2.5' fill='none'/>
+<circle cx='90.00' cy='585.52' r='2.8' fill='#bb3e03'/>
+<circle cx='234.00' cy='548.69' r='2.8' fill='#bb3e03'/>
+<circle cx='810.00' cy='408.22' r='2.8' fill='#bb3e03'/>
+<path d='M 90.00 577.20 L 234.00 505.35 L 810.00 232.14' stroke='#ae2012' stroke-width='2.5' fill='none'/>
+<circle cx='90.00' cy='577.20' r='2.8' fill='#ae2012'/>
+<circle cx='234.00' cy='505.35' r='2.8' fill='#ae2012'/>
+<circle cx='810.00' cy='232.14' r='2.8' fill='#ae2012'/>
+<path d='M 90.00 590.00 L 234.00 562.80 L 810.00 465.54' stroke='#9b2226' stroke-width='2.5' fill='none'/>
+<circle cx='90.00' cy='590.00' r='2.8' fill='#9b2226'/>
+<circle cx='234.00' cy='562.80' r='2.8' fill='#9b2226'/>
+<circle cx='810.00' cy='465.54' r='2.8' fill='#9b2226'/>
 <line x1='840' y1='90' x2='860' y2='90' stroke='#005f73' stroke-width='3'/>
 <text x='868' y='94' font-size='12' fill='#222' font-family='monospace'>BabyBear unbatched</text>
 <line x1='840' y1='108' x2='860' y2='108' stroke='#0a9396' stroke-width='3'/>
 <text x='868' y='112' font-size='12' fill='#222' font-family='monospace'>BabyBear batched</text>
 <line x1='840' y1='126' x2='860' y2='126' stroke='#94d2bd' stroke-width='3'/>
-<text x='868' y='130' font-size='12' fill='#222' font-family='monospace'>M31 unbatched</text>
+<text x='868' y='130' font-size='12' fill='#222' font-family='monospace'>Goldilocks unbatched</text>
 <line x1='840' y1='144' x2='860' y2='144' stroke='#ee9b00' stroke-width='3'/>
-<text x='868' y='148' font-size='12' fill='#222' font-family='monospace'>M31 batched</text>
+<text x='868' y='148' font-size='12' fill='#222' font-family='monospace'>Goldilocks batched</text>
+<line x1='840' y1='162' x2='860' y2='162' stroke='#ca6702' stroke-width='3'/>
+<text x='868' y='166' font-size='12' fill='#222' font-family='monospace'>KoalaBear unbatched</text>
+<line x1='840' y1='180' x2='860' y2='180' stroke='#bb3e03' stroke-width='3'/>
+<text x='868' y='184' font-size='12' fill='#222' font-family='monospace'>KoalaBear batched</text>
+<line x1='840' y1='198' x2='860' y2='198' stroke='#ae2012' stroke-width='3'/>
+<text x='868' y='202' font-size='12' fill='#222' font-family='monospace'>M31 unbatched</text>
+<line x1='840' y1='216' x2='860' y2='216' stroke='#9b2226' stroke-width='3'/>
+<text x='868' y='220' font-size='12' fill='#222' font-family='monospace'>M31 batched</text>
 <text x='370' y='670' font-size='14' fill='#222' font-family='Georgia'>queries</text>
 <text transform='translate(24,410) rotate(-90)' font-size='14' fill='#222' font-family='Georgia'>verifier time (us)</text>
 </svg>

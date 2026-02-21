@@ -45,14 +45,38 @@
 <circle cx='90.00' cy='590.00' r='2.8' fill='#ee9b00'/>
 <circle cx='234.00' cy='555.33' r='2.8' fill='#ee9b00'/>
 <circle cx='810.00' cy='416.67' r='2.8' fill='#ee9b00'/>
+<path d='M 90.00 590.00 L 234.00 486.00 L 810.00 70.00' stroke='#ca6702' stroke-width='2.5' fill='none'/>
+<circle cx='90.00' cy='590.00' r='2.8' fill='#ca6702'/>
+<circle cx='234.00' cy='486.00' r='2.8' fill='#ca6702'/>
+<circle cx='810.00' cy='70.00' r='2.8' fill='#ca6702'/>
+<path d='M 90.00 590.00 L 234.00 555.33 L 810.00 416.67' stroke='#bb3e03' stroke-width='2.5' fill='none'/>
+<circle cx='90.00' cy='590.00' r='2.8' fill='#bb3e03'/>
+<circle cx='234.00' cy='555.33' r='2.8' fill='#bb3e03'/>
+<circle cx='810.00' cy='416.67' r='2.8' fill='#bb3e03'/>
+<path d='M 90.00 590.00 L 234.00 486.00 L 810.00 70.00' stroke='#ae2012' stroke-width='2.5' fill='none'/>
+<circle cx='90.00' cy='590.00' r='2.8' fill='#ae2012'/>
+<circle cx='234.00' cy='486.00' r='2.8' fill='#ae2012'/>
+<circle cx='810.00' cy='70.00' r='2.8' fill='#ae2012'/>
+<path d='M 90.00 590.00 L 234.00 555.33 L 810.00 416.67' stroke='#9b2226' stroke-width='2.5' fill='none'/>
+<circle cx='90.00' cy='590.00' r='2.8' fill='#9b2226'/>
+<circle cx='234.00' cy='555.33' r='2.8' fill='#9b2226'/>
+<circle cx='810.00' cy='416.67' r='2.8' fill='#9b2226'/>
 <line x1='840' y1='90' x2='860' y2='90' stroke='#005f73' stroke-width='3'/>
 <text x='868' y='94' font-size='12' fill='#222' font-family='monospace'>BabyBear unbatched</text>
 <line x1='840' y1='108' x2='860' y2='108' stroke='#0a9396' stroke-width='3'/>
 <text x='868' y='112' font-size='12' fill='#222' font-family='monospace'>BabyBear batched</text>
 <line x1='840' y1='126' x2='860' y2='126' stroke='#94d2bd' stroke-width='3'/>
-<text x='868' y='130' font-size='12' fill='#222' font-family='monospace'>M31 unbatched</text>
+<text x='868' y='130' font-size='12' fill='#222' font-family='monospace'>Goldilocks unbatched</text>
 <line x1='840' y1='144' x2='860' y2='144' stroke='#ee9b00' stroke-width='3'/>
-<text x='868' y='148' font-size='12' fill='#222' font-family='monospace'>M31 batched</text>
+<text x='868' y='148' font-size='12' fill='#222' font-family='monospace'>Goldilocks batched</text>
+<line x1='840' y1='162' x2='860' y2='162' stroke='#ca6702' stroke-width='3'/>
+<text x='868' y='166' font-size='12' fill='#222' font-family='monospace'>KoalaBear unbatched</text>
+<line x1='840' y1='180' x2='860' y2='180' stroke='#bb3e03' stroke-width='3'/>
+<text x='868' y='184' font-size='12' fill='#222' font-family='monospace'>KoalaBear batched</text>
+<line x1='840' y1='198' x2='860' y2='198' stroke='#ae2012' stroke-width='3'/>
+<text x='868' y='202' font-size='12' fill='#222' font-family='monospace'>M31 unbatched</text>
+<line x1='840' y1='216' x2='860' y2='216' stroke='#9b2226' stroke-width='3'/>
+<text x='868' y='220' font-size='12' fill='#222' font-family='monospace'>M31 batched</text>
 <text x='370' y='670' font-size='14' fill='#222' font-family='Georgia'>queries</text>
 <text transform='translate(24,410) rotate(-90)' font-size='14' fill='#222' font-family='Georgia'>serialized field elements</text>
 </svg>
