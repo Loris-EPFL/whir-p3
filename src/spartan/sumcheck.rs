@@ -75,7 +75,7 @@ impl<F: Field> SumcheckProver<F> {
     /// # Arguments
     /// * `evals` - Evaluations of the polynomial over the boolean hypercube
     /// * `degree_bound` - Maximum degree in each variable
-    #[must_use] 
+    #[must_use]
     pub const fn new(evals: Vec<F>, degree_bound: usize) -> Self {
         let num_vars = evals.len().trailing_zeros() as usize;
         Self {
@@ -144,7 +144,7 @@ impl<F: Field> SumcheckProver<F> {
     }
 
     /// Get the final evaluation after all rounds
-    #[must_use] 
+    #[must_use]
     pub fn final_eval(&self) -> F {
         assert_eq!(self.evals.len(), 1);
         self.evals[0]
@@ -167,7 +167,7 @@ impl<F: Field> SumcheckProver<F> {
         round_evals
     }
 
-    #[must_use] 
+    #[must_use]
     pub fn challenges(&self) -> &[F] {
         &self.challenges
     }
@@ -326,7 +326,7 @@ impl<F: Field> R1CSSumcheck<F> {
     ///
     /// # Arguments
     /// * `g_evals` - Evaluations of G_io,τ over boolean hypercube
-    #[must_use] 
+    #[must_use]
     pub const fn new(g_evals: Vec<F>) -> Self {
         Self {
             phase1_prover: SumcheckProver::new(g_evals, 3), // Degree 3

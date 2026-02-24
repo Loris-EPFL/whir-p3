@@ -118,3 +118,7 @@ harness = false
 [[bench]]
 name = "stir_queries"
 harness = false
+
+[[bench]]
+name = "spartan"
+harness = false

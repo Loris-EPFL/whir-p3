@@ -173,7 +173,7 @@ pub struct GPoly<F: Field> {
 
 impl<F: Field> GPoly<F> {
     /// Create G_io,τ polynomial from R1CS instance
-    #[must_use] 
+    #[must_use]
     pub fn from_r1cs_instance(instance: &R1CSInstance<F>, tau: Vec<F>) -> Self {
         let shape = instance.shape();
         let z = instance.build_z_vector();
@@ -189,7 +189,7 @@ impl<F: Field> GPoly<F> {
     }
 
     /// Get the evaluations (for use in sumcheck)
-    #[must_use] 
+    #[must_use]
     pub fn evaluations(&self) -> &[F] {
         &self.evaluations
     }
@@ -200,17 +200,17 @@ impl<F: Field> GPoly<F> {
     }
 
     /// Verify that the sum is zero (completeness check)
-    #[must_use] 
+    #[must_use]
     pub fn verify_sum_is_zero(&self) -> bool {
         verify_sum_g_io_tau(&self.evaluations)
     }
 
-    #[must_use] 
+    #[must_use]
     pub const fn num_vars(&self) -> usize {
         self.num_vars
     }
 
-    #[must_use] 
+    #[must_use]
     pub fn tau(&self) -> &[F] {
         &self.tau
     }

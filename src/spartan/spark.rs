@@ -82,7 +82,7 @@ pub struct SparkEvaluations<F: Field> {
 
 impl<F: Field> SparkCommitment<F> {
     /// Create a new SPARK commitment to a sparse polynomial.
-    #[must_use] 
+    #[must_use]
     pub fn commit(poly: &SparseMatPolynomial<F>) -> Self {
         let n = poly.num_entries();
         let num_rows = 1usize << poly.num_vars_x();
@@ -135,7 +135,7 @@ impl<F: Field> SparkCommitment<F> {
     }
 
     /// Verifies memory-checking metadata consistency for row/col access streams.
-    #[must_use] 
+    #[must_use]
     pub fn verify_structure(&self) -> bool {
         verify_memory_in_the_head(
             self.num_rows,

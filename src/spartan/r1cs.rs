@@ -5,6 +5,7 @@
 use alloc::vec;
 use alloc::vec::Vec;
 use p3_field::{ExtensionField, Field};
+use rand::RngExt;
 
 /// A sparse matrix entry (row, col, value)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -33,8 +34,12 @@ pub struct SparseMatPolynomial<F: Field> {
 }
 
 impl<F: Field> SparseMatPolynomial<F> {
-    #[must_use] 
-    pub const fn new(num_vars_x: usize, num_vars_y: usize, entries: Vec<SparseMatEntry<F>>) -> Self {
+    #[must_use]
+    pub const fn new(
+        num_vars_x: usize,
+        num_vars_y: usize,
+        entries: Vec<SparseMatEntry<F>>,
+    ) -> Self {
         Self {
             num_vars_x,
             num_vars_y,
@@ -42,22 +47,22 @@ impl<F: Field> SparseMatPolynomial<F> {
         }
     }
 
-    #[must_use] 
+    #[must_use]
     pub const fn num_entries(&self) -> usize {
         self.entries.len()
     }
 
-    #[must_use] 
+    #[must_use]
     pub const fn num_vars_x(&self) -> usize {
         self.num_vars_x
     }
 
-    #[must_use] 
+    #[must_use]
     pub const fn num_vars_y(&self) -> usize {
         self.num_vars_y
     }
 
-    #[must_use] 
+    #[must_use]
     pub fn entries(&self) -> &[SparseMatEntry<F>] {
         &self.entries
     }
@@ -131,7 +136,7 @@ pub struct R1CSShape<F: Field> {
 
 impl<F: Field> R1CSShape<F> {
     /// Create a new R1CS shape from constraint matrices
-    #[must_use] 
+    #[must_use]
     pub fn new(
         num_cons: usize,
         num_vars: usize,
@@ -160,44 +165,44 @@ impl<F: Field> R1CSShape<F> {
         }
     }
 
-    #[must_use] 
+    #[must_use]
     pub const fn num_cons(&self) -> usize {
         self.num_cons
     }
 
-    #[must_use] 
+    #[must_use]
     pub const fn num_vars(&self) -> usize {
         self.num_vars
     }
 
-    #[must_use] 
+    #[must_use]
     pub const fn num_inputs(&self) -> usize {
         self.num_inputs
     }
 
     /// Number of variables for polynomial x-dimension (log2 of num_cons)
-    #[must_use] 
+    #[must_use]
     pub const fn num_poly_vars_x(&self) -> usize {
         self.num_cons.trailing_zeros() as usize
     }
 
     /// Number of variables for polynomial y-dimension (log2 of num_cols)
-    #[must_use] 
+    #[must_use]
     pub const fn num_poly_vars_y(&self) -> usize {
         ((2 * self.num_vars).trailing_zeros()) as usize
     }
 
-    #[must_use] 
+    #[must_use]
     pub const fn a(&self) -> &SparseMatPolynomial<F> {
         &self.a
     }
 
-    #[must_use] 
+    #[must_use]
     pub const fn b(&self) -> &SparseMatPolynomial<F> {
         &self.b
     }
 
-    #[must_use] 
+    #[must_use]
     pub const fn c(&self) -> &SparseMatPolynomial<F> {
         &self.c
     }
@@ -265,7 +270,7 @@ pub struct R1CSInstance<F: Field> {
 }
 
 impl<F: Field> R1CSInstance<F> {
-    #[must_use] 
+    #[must_use]
     pub fn new(shape: R1CSShape<F>, input: Vec<F>, witness: Vec<F>) -> Self {
         assert_eq!(witness.len(), shape.num_vars());
         assert_eq!(input.len(), shape.num_inputs());
@@ -276,17 +281,17 @@ impl<F: Field> R1CSInstance<F> {
         }
     }
 
-    #[must_use] 
+    #[must_use]
     pub const fn shape(&self) -> &R1CSShape<F> {
         &self.shape
     }
 
-    #[must_use] 
+    #[must_use]
     pub fn input(&self) -> &[F] {
         &self.input
     }
 
-    #[must_use] 
+    #[must_use]
     pub fn witness(&self) -> &[F] {
         &self.witness
     }
@@ -306,7 +311,9 @@ impl<F: Field> R1CSInstance<F> {
     }
 
     /// Verify that the witness satisfies the constraints
-    #[must_use] 
+    #[must_use]
+    /// Produces a synthetic R1CS instance for benchmarking.
+
     pub fn verify(&self) -> bool {
         self.shape.is_sat(&self.witness, &self.input)
     }
@@ -366,5 +373,80 @@ mod tests {
         let input = vec![F::ZERO];
 
         assert!(shape.is_sat(&witness, &input));
+    }
+}
+
+impl<F: p3_field::Field> R1CSInstance<F>
+where
+    rand::distr::StandardUniform: rand::distr::Distribution<F>,
+{
+    /// Produces a synthetic R1CS instance for benchmarking.
+    pub fn produce_synthetic_r1cs(
+        num_cons: usize,
+        num_vars: usize,
+        num_inputs: usize,
+        rng: &mut impl rand::Rng,
+    ) -> (R1CSShape<F>, Self) {
+        assert!(
+            num_cons.is_power_of_two(),
+            "num_cons must be a power of two"
+        );
+        assert!(
+            num_vars.is_power_of_two(),
+            "num_vars must be a power of two"
+        );
+        assert!(
+            num_inputs < num_vars,
+            "num_inputs must be less than num_vars"
+        );
+
+        let mut witness = vec![F::ZERO; num_vars];
+        let mut input = vec![F::ZERO; num_inputs];
+
+        for i in 0..num_vars {
+            witness[i] = rng.random();
+        }
+        for i in 0..num_inputs {
+            input[i] = rng.random();
+        }
+
+        let size_z = 2 * num_vars;
+        let mut z = vec![F::ZERO; size_z];
+        z[..num_vars].copy_from_slice(&witness);
+        z[num_vars] = F::ONE;
+        z[num_vars + 1..num_vars + 1 + num_inputs].copy_from_slice(&input);
+
+        let mut a_entries = Vec::new();
+        let mut b_entries = Vec::new();
+        let mut c_entries = Vec::new();
+
+        let one = F::ONE;
+        let max_idx = num_vars + 1 + num_inputs;
+
+        for i in 0..num_cons {
+            let a_idx = i % max_idx;
+            let b_idx = (i + 2) % max_idx;
+
+            a_entries.push(SparseMatEntry::new(i, a_idx, one));
+            b_entries.push(SparseMatEntry::new(i, b_idx, one));
+
+            let ab_val = z[a_idx] * z[b_idx];
+
+            let c_idx = (i + 3) % max_idx;
+            let c_val = z[c_idx];
+
+            if c_val == F::ZERO {
+                c_entries.push(SparseMatEntry::new(i, num_vars, ab_val));
+            } else {
+                let coeff = ab_val * c_val.inverse();
+                c_entries.push(SparseMatEntry::new(i, c_idx, coeff));
+            }
+        }
+
+        let shape = R1CSShape::new(
+            num_cons, num_vars, num_inputs, a_entries, b_entries, c_entries,
+        );
+        let instance = Self::new(shape.clone(), input, witness);
+        (shape, instance)
     }
 }

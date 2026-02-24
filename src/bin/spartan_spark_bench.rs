@@ -1,12 +1,12 @@
 use std::collections::BTreeSet;
-use std::fs::{create_dir_all, File};
+use std::fs::{File, create_dir_all};
 use std::hint::black_box;
 use std::io::Write;
 use std::path::Path;
 use std::time::Instant;
 
 use p3_challenger::DuplexChallenger;
-use p3_field::{extension::BinomialExtensionField, Field, PrimeCharacteristicRing};
+use p3_field::{Field, PrimeCharacteristicRing, extension::BinomialExtensionField};
 use rand::SeedableRng;
 use whir_p3::spartan::{R1CSInstance, R1CSProver, R1CSShape, R1CSVerifier, SparseMatEntry};
 
