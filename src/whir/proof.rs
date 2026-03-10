@@ -2,10 +2,12 @@ use alloc::vec::Vec;
 use core::array;
 
 use p3_challenger::{FieldChallenger, GrindingChallenger};
-use p3_field::{ExtensionField, Field};
+use p3_field::{ExtensionField, Field, TwoAdicField};
 use serde::{Deserialize, Serialize};
 
-use crate::{parameters::ProtocolParameters, poly::evals::EvaluationsList};
+use crate::{
+    parameters::ProtocolParameters, poly::evals::EvaluationsList, whir::parameters::WhirConfig,
+};
 
 /// Complete WHIR proof
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -242,6 +244,28 @@ impl<F: Default, EF: Default, W: Default, const DIGEST_ELEMS: usize>
             final_sumcheck: None,
         }
     }
+
+    pub fn from_whir_config<BF, H, C, Challenger>(
+        config: &WhirConfig<EF, BF, H, C, Challenger>,
+    ) -> Self
+    where
+        BF: TwoAdicField,
+        EF: ExtensionField<BF> + TwoAdicField,
+        Challenger: FieldChallenger<BF> + GrindingChallenger<Witness = BF>,
+    {
+        Self {
+            initial_commitment: array::from_fn(|_| W::default()),
+            initial_ood_answers: Vec::new(),
+            initial_sumcheck: SumcheckData::default(),
+            rounds: (0..config.n_rounds())
+                .map(|_| WhirRoundProof::default())
+                .collect(),
+            final_poly: None,
+            final_pow_witness: F::default(),
+            final_queries: Vec::with_capacity(config.final_queries),
+            final_sumcheck: None,
+        }
+    }
 }
 
 impl<F: Clone, EF, W, const DIGEST_ELEMS: usize> WhirProof<F, EF, W, DIGEST_ELEMS> {
@@ -282,12 +306,12 @@ mod tests {
 
     use p3_baby_bear::{BabyBear, Poseidon2BabyBear};
     use p3_challenger::DuplexChallenger;
-    use p3_field::{PrimeCharacteristicRing, extension::BinomialExtensionField};
+    use p3_field::{extension::BinomialExtensionField, PrimeCharacteristicRing};
     use p3_symmetric::{PaddingFreeSponge, TruncatedPermutation};
     use rand::SeedableRng;
 
     use super::*;
-    use crate::parameters::{FoldingFactor, errors::SecurityAssumption};
+    use crate::parameters::{errors::SecurityAssumption, FoldingFactor};
 
     /// Type alias for the base field used in tests
     type F = BabyBear;

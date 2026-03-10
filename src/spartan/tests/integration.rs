@@ -6,11 +6,11 @@ use p3_dft::Radix2DFTSmallBatch;
 use p3_field::extension::BinomialExtensionField;
 use p3_field::{Field, PrimeCharacteristicRing};
 use p3_symmetric::{PaddingFreeSponge, TruncatedPermutation};
-use rand::SeedableRng;
 use rand::rngs::SmallRng;
+use rand::SeedableRng;
 
 use crate::fiat_shamir::domain_separator::DomainSeparator;
-use crate::parameters::{FoldingFactor, ProtocolParameters, errors::SecurityAssumption};
+use crate::parameters::{errors::SecurityAssumption, FoldingFactor, ProtocolParameters};
 use crate::poly::evals::EvaluationsList;
 use crate::spartan::r1cs::{R1CSInstance, R1CSShape, SparseMatEntry};
 use crate::spartan::r1cs_prover::{R1CSProver, R1CSVerifier};

@@ -1,6 +1,7 @@
 #![no_std]
 extern crate alloc;
 
+pub mod accumulation;
 pub mod constant;
 pub mod fiat_shamir;
 pub mod parameters;

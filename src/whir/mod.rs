@@ -14,13 +14,13 @@ mod test {
     use p3_baby_bear::{BabyBear, Poseidon2BabyBear};
     use p3_challenger::{DuplexChallenger, FieldChallenger};
     use p3_dft::Radix2DFTSmallBatch;
-    use p3_field::{Field, extension::BinomialExtensionField};
+    use p3_field::{extension::BinomialExtensionField, Field};
     use p3_symmetric::{PaddingFreeSponge, TruncatedPermutation};
-    use rand::{RngExt, SeedableRng, rngs::SmallRng};
+    use rand::{rngs::SmallRng, RngExt, SeedableRng};
 
     use crate::{
         fiat_shamir::domain_separator::DomainSeparator,
-        parameters::{FoldingFactor, ProtocolParameters, errors::SecurityAssumption},
+        parameters::{errors::SecurityAssumption, FoldingFactor, ProtocolParameters},
         poly::{evals::EvaluationsList, multilinear::MultilinearPoint},
         whir::{
             committer::{reader::CommitmentReader, writer::CommitmentWriter},
@@ -245,7 +245,7 @@ mod test {
         use p3_keccak::{Keccak256Hash, KeccakF};
         use p3_koala_bear::KoalaBear;
         use p3_symmetric::{CompressionFunctionFromHasher, PaddingFreeSponge, SerializingHasher};
-        use rand::{RngExt, SeedableRng, rngs::SmallRng};
+        use rand::{rngs::SmallRng, RngExt, SeedableRng};
 
         use super::*;
         use crate::whir::parameters::WhirConfig;

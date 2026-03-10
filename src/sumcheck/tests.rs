@@ -2,20 +2,20 @@ use alloc::{vec, vec::Vec};
 
 use p3_baby_bear::{BabyBear, Poseidon2BabyBear};
 use p3_challenger::{DuplexChallenger, FieldChallenger, GrindingChallenger};
-use p3_field::{PrimeCharacteristicRing, TwoAdicField, extension::BinomialExtensionField};
+use p3_field::{extension::BinomialExtensionField, PrimeCharacteristicRing, TwoAdicField};
 use p3_symmetric::{PaddingFreeSponge, TruncatedPermutation};
-use rand::{RngExt, SeedableRng, rngs::SmallRng};
+use rand::{rngs::SmallRng, RngExt, SeedableRng};
 
 use crate::{
     fiat_shamir::domain_separator::DomainSeparator,
-    parameters::{FoldingFactor, ProtocolParameters, errors::SecurityAssumption},
+    parameters::{errors::SecurityAssumption, FoldingFactor, ProtocolParameters},
     poly::{evals::EvaluationsList, multilinear::MultilinearPoint},
     sumcheck::sumcheck_prover::Sumcheck,
     whir::{
         constraints::{
-            Constraint,
             evaluator::ConstraintPolyEvaluator,
-            statement::{EqStatement, SelectStatement, initial::InitialStatement},
+            statement::{initial::InitialStatement, EqStatement, LinearStatement, SelectStatement},
+            Constraint,
         },
         parameters::SumcheckStrategy,
         proof::{SumcheckData, WhirProof},
@@ -131,7 +131,12 @@ where
     // Return the constructed constraint with the alpha used for linear combination.
     let alpha: EF = challenger.sample_algebra_element();
 
-    Constraint::new(alpha, eq_statement, sel_statement)
+    Constraint::new(
+        alpha,
+        eq_statement,
+        sel_statement,
+        LinearStatement::<F, EF>::initialize(num_vars),
+    )
 }
 
 fn make_constraint_ext<Challenger>(
@@ -202,7 +207,12 @@ where
     // Return the constructed constraint with the alpha used for linear combination.
     let alpha: EF = challenger.sample_algebra_element();
 
-    Constraint::new(alpha, eq_statement, sel_statement)
+    Constraint::new(
+        alpha,
+        eq_statement,
+        sel_statement,
+        LinearStatement::<F, EF>::initialize(num_vars),
+    )
 }
 
 fn read_constraint<Challenger>(
@@ -258,6 +268,7 @@ where
         challenger.sample_algebra_element(),
         eq_statement,
         sel_statement,
+        LinearStatement::<F, EF>::initialize(num_vars),
     )
 }
 

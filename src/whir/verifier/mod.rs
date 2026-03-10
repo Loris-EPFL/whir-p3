@@ -19,9 +19,9 @@ use crate::{
     poly::{evals::EvaluationsList, multilinear::MultilinearPoint},
     whir::{
         constraints::{
-            Constraint,
             evaluator::ConstraintPolyEvaluator,
-            statement::{EqStatement, SelectStatement},
+            statement::{initial::InitialClaim, EqStatement, LinearStatement, SelectStatement},
+            Constraint,
         },
         parameters::WhirConfig,
         proof::{QueryOpening, WhirProof},
@@ -62,7 +62,40 @@ where
         proof: &WhirProof<F, EF, W, DIGEST_ELEMS>,
         challenger: &mut Challenger,
         parsed_commitment: &ParsedCommitment<EF, Hash<F, W, DIGEST_ELEMS>>,
-        mut statement: EqStatement<EF>,
+        statement: EqStatement<EF>,
+    ) -> Result<MultilinearPoint<EF>, VerifierError>
+    where
+        P: PackedValue<Value = F> + Eq + Send + Sync,
+        W: PackedValue<Value = W> + Eq + Send + Sync + Copy,
+        PW: PackedValue<Value = W> + Eq + Send + Sync,
+        H: CryptographicHasher<F, [W; DIGEST_ELEMS]>
+            + CryptographicHasher<P, [PW; DIGEST_ELEMS]>
+            + Sync,
+        C: PseudoCompressionFunction<[W; DIGEST_ELEMS], 2>
+            + PseudoCompressionFunction<[PW; DIGEST_ELEMS], 2>
+            + Sync,
+        Challenger: CanObserve<Hash<F, W, DIGEST_ELEMS>>,
+        [W; DIGEST_ELEMS]: Serialize + for<'de> Deserialize<'de>,
+    {
+        self.verify_with_initial_claim::<P, W, PW, DIGEST_ELEMS>(
+            proof,
+            challenger,
+            parsed_commitment,
+            InitialClaim {
+                eq_statement: statement,
+                linear_statement: LinearStatement::<F, EF>::initialize(self.num_variables),
+            },
+        )
+    }
+
+    #[instrument(skip_all)]
+    #[allow(clippy::too_many_lines)]
+    pub fn verify_with_initial_claim<P, W, PW, const DIGEST_ELEMS: usize>(
+        &self,
+        proof: &WhirProof<F, EF, W, DIGEST_ELEMS>,
+        challenger: &mut Challenger,
+        parsed_commitment: &ParsedCommitment<EF, Hash<F, W, DIGEST_ELEMS>>,
+        mut initial_claim: InitialClaim<F, EF>,
     ) -> Result<MultilinearPoint<EF>, VerifierError>
     where
         P: PackedValue<Value = F> + Eq + Send + Sync,
@@ -84,12 +117,15 @@ where
         let mut claimed_eval = EF::ZERO;
         let mut prev_commitment = parsed_commitment.clone();
 
-        statement.concatenate(&prev_commitment.ood_statement);
+        initial_claim
+            .eq_statement
+            .concatenate(&prev_commitment.ood_statement);
 
         let constraint = Constraint::new(
             challenger.sample_algebra_element(),
-            statement,
+            initial_claim.eq_statement,
             SelectStatement::initialize(self.num_variables),
+            initial_claim.linear_statement,
         );
         // Combine claimed evals with combination randomness
         constraint.combine_evals(&mut claimed_eval);
@@ -131,6 +167,7 @@ where
                 challenger.sample_algebra_element(),
                 new_commitment.ood_statement.clone(),
                 stir_statement,
+                LinearStatement::<F, EF>::initialize(round_params.num_variables),
             );
             constraint.combine_evals(&mut claimed_eval);
             constraints.push(constraint);

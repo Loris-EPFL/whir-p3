@@ -105,14 +105,14 @@ mod tests {
 
     use p3_baby_bear::{BabyBear, Poseidon2BabyBear};
     use p3_challenger::DuplexChallenger;
-    use p3_field::{PrimeCharacteristicRing, extension::BinomialExtensionField};
+    use p3_field::{extension::BinomialExtensionField, PrimeCharacteristicRing};
     use p3_symmetric::{PaddingFreeSponge, TruncatedPermutation};
-    use rand::{SeedableRng, rngs::SmallRng};
+    use rand::{rngs::SmallRng, SeedableRng};
 
     use super::*;
     use crate::{
         fiat_shamir::domain_separator::{DomainSeparator, SumcheckParams},
-        parameters::{FoldingFactor, ProtocolParameters, errors::SecurityAssumption},
+        parameters::{errors::SecurityAssumption, FoldingFactor, ProtocolParameters},
         poly::evals::EvaluationsList,
         sumcheck::sumcheck_prover::Sumcheck,
         whir::{

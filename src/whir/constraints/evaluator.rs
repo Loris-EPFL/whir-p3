@@ -27,7 +27,12 @@ fn eval_round<F: Field, EF: ExtensionField<F> + TwoAdicField>(
         })
         .sum::<EF>();
 
-    eq_contribution + sel_contribution
+    let linear_contribution = constraint
+        .iter_linears()
+        .map(|(weights, coeff)| coeff * weights.evaluate_hypercube_ext::<F>(&point))
+        .sum::<EF>();
+
+    eq_contribution + sel_contribution + linear_contribution
 }
 
 /// Lightweight evaluator for the combined constraint polynomial W(r).
@@ -67,15 +72,15 @@ mod tests {
     use alloc::{vec, vec::Vec};
 
     use p3_baby_bear::BabyBear;
-    use p3_field::{PrimeCharacteristicRing, extension::BinomialExtensionField};
+    use p3_field::{extension::BinomialExtensionField, PrimeCharacteristicRing};
     use proptest::prelude::*;
-    use rand::{RngExt, SeedableRng, rngs::SmallRng};
+    use rand::{rngs::SmallRng, RngExt, SeedableRng};
 
     use super::*;
     use crate::{
         parameters::FoldingFactor,
         poly::evals::EvaluationsList,
-        whir::constraints::statement::{EqStatement, SelectStatement},
+        whir::constraints::statement::{EqStatement, LinearStatement, SelectStatement},
     };
 
     type F = BabyBear;
@@ -125,7 +130,12 @@ mod tests {
             // Create select statement for the current domain size (20, then 15, then 10).
             let mut sel_statement = SelectStatement::<F, EF>::initialize(num_vars_at_round);
             (0..num_sel).for_each(|_| sel_statement.add_constraint(rng.random(), rng.random()));
-            constraints.push(Constraint::new(gamma, eq_statement, sel_statement));
+            constraints.push(Constraint::new(
+                gamma,
+                eq_statement,
+                sel_statement,
+                LinearStatement::<F, EF>::initialize(num_vars_at_round),
+            ));
 
             // Shrink the number of variables for the next round.
             num_vars_at_round -= folding_factor.at_round(round_idx);
@@ -225,7 +235,12 @@ mod tests {
                 // Create select statement for the current domain size (20, then 15, then 10).
                 let mut sel_statement = SelectStatement::<F, EF>::initialize(num_vars_current);
                 (0..num_sel).for_each(|_| sel_statement.add_constraint(rng.random(), rng.random()));
-                constraints.push(Constraint::new(gamma, eq_statement, sel_statement));
+                constraints.push(Constraint::new(
+                    gamma,
+                    eq_statement,
+                    sel_statement,
+                    LinearStatement::<F, EF>::initialize(num_vars_current),
+                ));
 
                 // Shrink the number of variables for the next round.
                 num_vars_current -= folding_factors_vec[round_idx];

@@ -5,9 +5,9 @@ use p3_challenger::{FieldChallenger, GrindingChallenger};
 use p3_field::{ExtensionField, Field, TwoAdicField};
 
 use crate::{
-    parameters::{FoldingFactor, ProtocolParameters, errors::SecurityAssumption},
+    parameters::{errors::SecurityAssumption, FoldingFactor, ProtocolParameters},
     poly::evals::EvaluationsList,
-    whir::constraints::statement::initial::InitialStatement,
+    whir::constraints::statement::{initial::InitialStatement, LinearStatement},
 };
 
 /// Configuration for the initial phase of the WHIR protocol.
@@ -428,6 +428,16 @@ where
             sumcheck_strategy,
         )
     }
+
+    #[must_use]
+    pub fn initial_statement_with_linear(
+        &self,
+        polynomial: EvaluationsList<F>,
+        linear_statement: LinearStatement<F, EF>,
+    ) -> InitialStatement<F, EF> {
+        self.initial_statement(polynomial, SumcheckStrategy::Classic)
+            .with_linear_statement(linear_statement)
+    }
 }
 
 #[cfg(test)]
@@ -448,8 +458,8 @@ mod tests {
     type MyChallenger = DuplexChallenger<F, Perm, 16, 8>;
 
     /// Generates default WHIR parameters
-    const fn default_whir_params()
-    -> ProtocolParameters<Poseidon2Sponge<u8>, Poseidon2Compression<u8>> {
+    const fn default_whir_params(
+    ) -> ProtocolParameters<Poseidon2Sponge<u8>, Poseidon2Compression<u8>> {
         ProtocolParameters {
             security_level: 100,
             pow_bits: 20,

@@ -1,7 +1,7 @@
 use alloc::vec::Vec;
 
 use p3_challenger::{FieldChallenger, GrindingChallenger};
-use p3_field::{ExtensionField, Field, PackedFieldExtension, PackedValue, dot_product};
+use p3_field::{dot_product, ExtensionField, Field, PackedFieldExtension, PackedValue};
 use p3_util::log2_strict_usize;
 
 use crate::{
@@ -12,11 +12,11 @@ use crate::{
     },
     whir::{
         constraints::{
-            Constraint,
             statement::{
-                EqStatement,
                 initial::{InitialStatement, InitialStatementInner},
+                EqStatement,
             },
+            Constraint,
         },
         proof::SumcheckData,
     },
@@ -107,21 +107,14 @@ where
         challenger: &mut Challenger,
         folding_factor: usize,
         pow_bits: usize,
-        statement: &EqStatement<EF>,
+        statement: &InitialStatement<F, EF>,
     ) -> (Self, Point<EF>)
     where
         Challenger: FieldChallenger<F> + GrindingChallenger<Witness = F>,
     {
         let alpha: EF = challenger.sample_algebra_element();
-        let k = poly.num_variables();
-        // Initialize fresh accumulators for the weight polynomial and expected evaluation.
-        // The weight polynomial needs 2^k entries for the full Boolean hypercube.
-        let mut weights = Poly::zero(k);
-        let mut sum = EF::ZERO;
-
-        // Combine equality constraints without accumulation (INITIALIZED=false).
-        // This directly writes the equality portion of W(X) to `weights`.
-        statement.combine_hypercube::<F, false>(&mut weights, &mut sum, alpha);
+        let constraint = statement.initial_constraint(alpha);
+        let (mut weights, mut sum) = constraint.combine_new();
 
         // Compute the constant (c₀) and quadratic (c₂) coefficients of h(X).
         let (c0, c2) = poly.sumcheck_coefficients(&weights);
@@ -154,22 +147,14 @@ where
         challenger: &mut Challenger,
         folding_factor: usize,
         pow_bits: usize,
-        statement: &EqStatement<EF>,
+        statement: &InitialStatement<F, EF>,
     ) -> (Self, Point<EF>)
     where
         Challenger: FieldChallenger<F> + GrindingChallenger<Witness = F>,
     {
         let alpha: EF = challenger.sample_algebra_element();
-        let k = poly.num_variables();
-        let k_pack = log2_strict_usize(F::Packing::WIDTH);
-        // Initialize fresh accumulators for the weight polynomial and expected evaluation.
-        // The weight polynomial needs 2^(k - k_pack) packed entries.
-        let mut weights = Poly::zero(k - k_pack);
-        let mut sum = EF::ZERO;
-
-        // Combine equality constraints without accumulation (INITIALIZED=false).
-        // This directly writes the equality portion of W(X) to `weights`.
-        statement.combine_hypercube_packed::<F, false>(&mut weights, &mut sum, alpha);
+        let constraint = statement.initial_constraint(alpha);
+        let (mut weights, mut sum) = constraint.combine_new_packed();
 
         let poly_packed = Poly::new(F::Packing::pack_slice(poly.as_slice()).to_vec());
         // Compute the constant (c₀) and quadratic (c₂) coefficients of h(X).
@@ -294,18 +279,40 @@ where
         let poly = &statement.poly;
         match &statement.inner {
             InitialStatementInner::Svo { split_eqs, l0 } => {
-                assert_eq!(*l0, folding_factor);
-                assert!(k > 2 * k_pack + folding_factor);
-                Self::new_svo(
-                    poly,
-                    sumcheck_data,
-                    challenger,
-                    folding_factor,
-                    pow_bits,
-                    split_eqs,
-                )
+                if statement.has_linear_constraints() {
+                    if k > k_pack {
+                        Self::new_classic_packed(
+                            poly,
+                            sumcheck_data,
+                            challenger,
+                            folding_factor,
+                            pow_bits,
+                            statement,
+                        )
+                    } else {
+                        Self::new_classic_small(
+                            poly,
+                            sumcheck_data,
+                            challenger,
+                            folding_factor,
+                            pow_bits,
+                            statement,
+                        )
+                    }
+                } else {
+                    assert_eq!(*l0, folding_factor);
+                    assert!(k > 2 * k_pack + folding_factor);
+                    Self::new_svo(
+                        poly,
+                        sumcheck_data,
+                        challenger,
+                        folding_factor,
+                        pow_bits,
+                        split_eqs,
+                    )
+                }
             }
-            InitialStatementInner::Classic(statement) => {
+            InitialStatementInner::Classic(_) => {
                 if k > k_pack {
                     Self::new_classic_packed(
                         poly,

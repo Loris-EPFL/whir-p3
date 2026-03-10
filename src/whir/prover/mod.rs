@@ -6,8 +6,8 @@ use p3_commit::{ExtensionMmcs, Mmcs};
 use p3_dft::TwoAdicSubgroupDft;
 use p3_field::{ExtensionField, Field, PackedValue, TwoAdicField};
 use p3_matrix::{
-    Matrix,
     dense::{DenseMatrix, RowMajorMatrixView},
+    Matrix,
 };
 use p3_merkle_tree::{MerkleTree, MerkleTreeMmcs};
 use p3_symmetric::{CryptographicHasher, Hash, PseudoCompressionFunction};
@@ -21,8 +21,8 @@ use crate::{
     poly::{evals::EvaluationsList, multilinear::MultilinearPoint},
     whir::{
         constraints::{
+            statement::{initial::InitialStatement, LinearStatement, SelectStatement},
             Constraint,
-            statement::{SelectStatement, initial::InitialStatement},
         },
         parameters::SumcheckStrategy,
         proof::{QueryOpening, SumcheckData, WhirProof},
@@ -359,6 +359,7 @@ where
             challenger.sample_algebra_element(),
             ood_statement,
             stir_statement,
+            LinearStatement::<F, EF>::initialize(round_params.num_variables),
         );
 
         let mut sumcheck_data: SumcheckData<F, EF> = SumcheckData::default();

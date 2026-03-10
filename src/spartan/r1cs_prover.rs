@@ -11,7 +11,7 @@ use p3_field::{ExtensionField, Field};
 use crate::poly::evals::EvaluationsList;
 
 use super::{
-    encoding::{GPoly, eq_poly, eq_poly_at_index},
+    encoding::{eq_poly, eq_poly_at_index, GPoly},
     r1cs::{R1CSInstance, R1CSShape, SparseMatPolynomial},
     spark::{SparkCompressionChallenges, SparkProof},
     sumcheck::{SumcheckProof, SumcheckVerifier},
@@ -80,7 +80,7 @@ pub struct R1CSProver<F: Field> {
 
 impl<F: Field> R1CSProver<F> {
     /// Create a new R1CS prover
-    #[must_use] 
+    #[must_use]
     pub const fn new() -> Self {
         Self {
             _phantom: core::marker::PhantomData,
@@ -279,7 +279,7 @@ pub struct R1CSVerifier<F: Field> {
 
 impl<F: Field> R1CSVerifier<F> {
     /// Create a new R1CS verifier
-    #[must_use] 
+    #[must_use]
     pub const fn new() -> Self {
         Self {
             _phantom: core::marker::PhantomData,

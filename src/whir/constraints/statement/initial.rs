@@ -24,8 +24,21 @@ use p3_util::log2_strict_usize;
 use crate::{
     poly::{evals::EvaluationsList, multilinear::MultilinearPoint},
     sumcheck::svo::SplitEq,
-    whir::{constraints::statement::EqStatement, parameters::SumcheckStrategy},
+    whir::{
+        constraints::{
+            statement::{EqStatement, LinearStatement, SelectStatement},
+            Constraint,
+        },
+        parameters::SumcheckStrategy,
+    },
 };
+
+/// Public verifier-side description of the initial WHIR claim.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InitialClaim<F: Field, EF: ExtensionField<F>> {
+    pub eq_statement: EqStatement<EF>,
+    pub linear_statement: LinearStatement<F, EF>,
+}
 
 /// Manages the polynomial and constraints during the initial phase of WHIR.
 #[derive(Clone, Debug)]
@@ -34,6 +47,9 @@ pub struct InitialStatement<F: Field, EF: ExtensionField<F>> {
     ///
     /// Stores `2^n` evaluations on the Boolean hypercube.
     pub(crate) poly: EvaluationsList<F>,
+
+    /// Generic linear constraints that should be included in the initial sumcheck.
+    pub(crate) linear_statement: LinearStatement<F, EF>,
 
     /// Inner constraint state, either classic or SVO-based.
     pub(crate) inner: InitialStatementInner<F, EF>,
@@ -76,6 +92,7 @@ impl<F: Field, EF: ExtensionField<F>> InitialStatement<F, EF> {
         let num_variables = poly.num_variables();
         Self {
             poly,
+            linear_statement: LinearStatement::initialize(num_variables),
             inner: InitialStatementInner::new_classic(num_variables),
         }
     }
@@ -84,8 +101,10 @@ impl<F: Field, EF: ExtensionField<F>> InitialStatement<F, EF> {
     ///
     /// Initializes an empty SVO state that accumulates split equality constraints.
     const fn new_svo(poly: EvaluationsList<F>, l0: usize) -> Self {
+        let num_variables = poly.num_variables();
         Self {
             poly,
+            linear_statement: LinearStatement::initialize(num_variables),
             inner: InitialStatementInner::new_svo(l0),
         }
     }
@@ -151,6 +170,17 @@ impl<F: Field, EF: ExtensionField<F>> InitialStatement<F, EF> {
         self.inner.evaluate(point, &self.poly)
     }
 
+    pub fn add_linear_constraint(&mut self, weights: EvaluationsList<EF>, evaluation: EF) {
+        self.linear_statement.add_constraint(weights, evaluation);
+    }
+
+    #[must_use]
+    pub fn with_linear_statement(mut self, linear_statement: LinearStatement<F, EF>) -> Self {
+        assert_eq!(linear_statement.num_variables(), self.num_variables());
+        self.linear_statement = linear_statement;
+        self
+    }
+
     /// Returns the number of variables in the polynomial.
     ///
     /// This is `n` where the polynomial is defined over `{0,1}^n`.
@@ -160,18 +190,25 @@ impl<F: Field, EF: ExtensionField<F>> InitialStatement<F, EF> {
 
     /// Returns true if no constraints have been added yet.
     pub(crate) const fn is_empty(&self) -> bool {
-        match &self.inner {
-            InitialStatementInner::Classic(statement) => statement.is_empty(),
-            InitialStatementInner::Svo { split_eqs, .. } => split_eqs.is_empty(),
-        }
+        self.linear_statement.is_empty()
+            && match &self.inner {
+                InitialStatementInner::Classic(statement) => statement.is_empty(),
+                InitialStatementInner::Svo { split_eqs, .. } => split_eqs.is_empty(),
+            }
     }
 
     /// Returns the number of constraints currently recorded.
     pub(crate) const fn len(&self) -> usize {
-        match &self.inner {
-            InitialStatementInner::Classic(statement) => statement.len(),
-            InitialStatementInner::Svo { split_eqs, .. } => split_eqs.len(),
-        }
+        self.linear_statement.len()
+            + match &self.inner {
+                InitialStatementInner::Classic(statement) => statement.len(),
+                InitialStatementInner::Svo { split_eqs, .. } => split_eqs.len(),
+            }
+    }
+
+    #[must_use]
+    pub const fn has_linear_constraints(&self) -> bool {
+        !self.linear_statement.is_empty()
     }
 
     /// Converts the statement to a normalized equality statement representation.
@@ -197,6 +234,24 @@ impl<F: Field, EF: ExtensionField<F>> InitialStatement<F, EF> {
                 statement
             }
         }
+    }
+
+    #[must_use]
+    pub fn normalize_claim(&self) -> InitialClaim<F, EF> {
+        InitialClaim {
+            eq_statement: self.normalize(),
+            linear_statement: self.linear_statement.clone(),
+        }
+    }
+
+    #[must_use]
+    pub fn initial_constraint(&self, challenge: EF) -> Constraint<F, EF> {
+        Constraint::new(
+            challenge,
+            self.normalize(),
+            SelectStatement::initialize(self.num_variables()),
+            self.linear_statement.clone(),
+        )
     }
 }
 
@@ -242,7 +297,7 @@ impl<F: Field, EF: ExtensionField<F>> InitialStatementInner<F, EF> {
 #[cfg(test)]
 mod tests {
     use p3_baby_bear::BabyBear;
-    use p3_field::{PrimeCharacteristicRing, extension::BinomialExtensionField};
+    use p3_field::{extension::BinomialExtensionField, PrimeCharacteristicRing};
 
     use super::*;
 

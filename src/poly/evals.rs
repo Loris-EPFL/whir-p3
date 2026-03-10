@@ -102,6 +102,12 @@ impl<F: Copy + Clone + Send + Sync> EvaluationsList<F> {
     pub fn iter(&self) -> core::slice::Iter<'_, F> {
         self.0.iter()
     }
+
+    /// Returns a mutable iterator over the evaluations.
+    #[inline]
+    pub fn iter_mut(&mut self) -> core::slice::IterMut<'_, F> {
+        self.0.iter_mut()
+    }
 }
 
 impl<A: Clone + Copy + Default + Send + Sync> EvaluationsList<A> {
@@ -786,10 +792,10 @@ mod tests {
 
     use p3_baby_bear::BabyBear;
     use p3_field::{
-        PrimeCharacteristicRing, PrimeField64, dot_product, extension::BinomialExtensionField,
+        dot_product, extension::BinomialExtensionField, PrimeCharacteristicRing, PrimeField64,
     };
     use proptest::prelude::*;
-    use rand::{RngExt, SeedableRng, rngs::SmallRng};
+    use rand::{rngs::SmallRng, RngExt, SeedableRng};
 
     use super::*;
 
@@ -1085,13 +1091,13 @@ mod tests {
         let e1 = F::from_u64(6); // increment when x_2 = 1
         let e2 = F::from_u64(7); // increment when x_1 = 1
         let e3 = F::from_u64(8); // increment when x_1 = x_2 = 1
-        //
-        // So concretely:
-        //
-        //   f(0, 0) = 5
-        //   f(0, 1) = 5 + 6 = 11
-        //   f(1, 0) = 5 + 7 = 12
-        //   f(1, 1) = 5 + 6 + 7 + 8 = 26
+                                 //
+                                 // So concretely:
+                                 //
+                                 //   f(0, 0) = 5
+                                 //   f(0, 1) = 5 + 6 = 11
+                                 //   f(1, 0) = 5 + 7 = 12
+                                 //   f(1, 1) = 5 + 6 + 7 + 8 = 26
         let evals = EvaluationsList::new(vec![e0, e0 + e1, e0 + e2, e0 + e1 + e2 + e3]);
 
         // Choose evaluation point:

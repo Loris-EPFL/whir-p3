@@ -2,11 +2,11 @@ use alloc::vec::Vec;
 
 use itertools::Itertools;
 use p3_field::{
-    ExtensionField, Field, PackedFieldExtension, PackedValue, PrimeCharacteristicRing, dot_product,
+    dot_product, ExtensionField, Field, PackedFieldExtension, PackedValue, PrimeCharacteristicRing,
 };
 use p3_matrix::{
-    Matrix,
     dense::{RowMajorMatrix, RowMajorMatrixView},
+    Matrix,
 };
 use p3_maybe_rayon::prelude::*;
 use p3_multilinear_util::eq_batch::eval_eq_batch;
@@ -358,9 +358,9 @@ mod tests {
     use alloc::vec;
 
     use p3_baby_bear::BabyBear;
-    use p3_field::{PrimeCharacteristicRing, extension::BinomialExtensionField};
+    use p3_field::{extension::BinomialExtensionField, PrimeCharacteristicRing};
     use proptest::prelude::*;
-    use rand::{RngExt, SeedableRng, rngs::SmallRng};
+    use rand::{rngs::SmallRng, RngExt, SeedableRng};
 
     use super::*;
 

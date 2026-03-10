@@ -190,14 +190,14 @@ mod tests {
     use p3_baby_bear::{BabyBear, Poseidon2BabyBear};
     use p3_challenger::DuplexChallenger;
     use p3_dft::Radix2DFTSmallBatch;
-    use p3_field::{Field, extension::BinomialExtensionField};
+    use p3_field::{extension::BinomialExtensionField, Field};
     use p3_symmetric::{PaddingFreeSponge, TruncatedPermutation};
-    use rand::{RngExt, SeedableRng, rngs::SmallRng};
+    use rand::{rngs::SmallRng, RngExt, SeedableRng};
 
     use super::*;
     use crate::{
         fiat_shamir::domain_separator::DomainSeparator,
-        parameters::{FoldingFactor, ProtocolParameters, errors::SecurityAssumption},
+        parameters::{errors::SecurityAssumption, FoldingFactor, ProtocolParameters},
         poly::evals::EvaluationsList,
         whir::{
             committer::writer::CommitmentWriter, parameters::SumcheckStrategy, proof::WhirProof,

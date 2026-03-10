@@ -8,8 +8,8 @@ use itertools::Itertools;
 use p3_field::{ExtensionField, Field};
 use p3_matrix::dense::RowMajorMatrix;
 use rand::{
-    RngExt,
     distr::{Distribution, StandardUniform},
+    RngExt,
 };
 
 /// A point `(x_1, ..., x_n)` in `F^n` for some field `F`.
@@ -230,9 +230,9 @@ mod tests {
     use alloc::vec;
 
     use p3_baby_bear::BabyBear;
-    use p3_field::{PrimeCharacteristicRing, extension::BinomialExtensionField};
+    use p3_field::{extension::BinomialExtensionField, PrimeCharacteristicRing};
     use proptest::prelude::*;
-    use rand::{SeedableRng, rngs::SmallRng};
+    use rand::{rngs::SmallRng, SeedableRng};
 
     use super::*;
 

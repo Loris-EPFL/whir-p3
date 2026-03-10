@@ -31,7 +31,7 @@
 use alloc::{vec, vec::Vec};
 
 use itertools::Itertools;
-use p3_field::{ExtensionField, Field, PackedFieldExtension, PackedValue, dot_product};
+use p3_field::{dot_product, ExtensionField, Field, PackedFieldExtension, PackedValue};
 use p3_maybe_rayon::prelude::*;
 use p3_util::log2_strict_usize;
 
@@ -563,10 +563,10 @@ impl<F: Field, EF: ExtensionField<F>> SplitEqInner<F, EF> {
 mod tests {
     use alloc::vec::Vec;
 
-    use p3_field::{PrimeCharacteristicRing, dot_product, extension::BinomialExtensionField};
+    use p3_field::{dot_product, extension::BinomialExtensionField, PrimeCharacteristicRing};
     use p3_koala_bear::KoalaBear;
     use proptest::prelude::*;
-    use rand::{RngExt, SeedableRng, rngs::SmallRng};
+    use rand::{rngs::SmallRng, RngExt, SeedableRng};
 
     use super::*;
 

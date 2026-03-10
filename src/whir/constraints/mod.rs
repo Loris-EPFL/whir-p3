@@ -3,7 +3,7 @@ use p3_util::log2_strict_usize;
 
 use crate::{
     poly::{evals::EvaluationsList, multilinear::MultilinearPoint},
-    whir::constraints::statement::{EqStatement, SelectStatement},
+    whir::constraints::statement::{EqStatement, LinearStatement, SelectStatement},
 };
 
 /// Constraint evaluation utilities.
@@ -47,6 +47,9 @@ pub struct Constraint<F: Field, EF: ExtensionField<F>> {
     /// via the power map to create a multilinear evaluation point.
     pub sel_statement: SelectStatement<F, EF>,
 
+    /// Generic linear-functional constraints over the full hypercube.
+    pub lin_statement: LinearStatement<F, EF>,
+
     /// Random challenge `γ` used for batching constraints.
     ///
     /// Powers of this challenge weight different constraints:
@@ -81,16 +84,19 @@ impl<F: Field, EF: ExtensionField<F>> Constraint<F, EF> {
         challenge: EF,
         eq_statement: EqStatement<EF>,
         sel_statement: SelectStatement<F, EF>,
+        lin_statement: LinearStatement<F, EF>,
     ) -> Self {
         // Verify that both statements have the same number of variables.
         //
         // This ensures the combined polynomial has a consistent domain.
         assert!(eq_statement.num_variables() == sel_statement.num_variables());
+        assert!(eq_statement.num_variables() == lin_statement.num_variables());
 
         // Construct the combined constraint with both statement types.
         Self {
             eq_statement,
             sel_statement,
+            lin_statement,
             challenge,
         }
     }
@@ -120,6 +126,18 @@ impl<F: Field, EF: ExtensionField<F>> Constraint<F, EF> {
             challenge,
             eq_statement,
             SelectStatement::initialize(num_variables),
+            LinearStatement::<F, EF>::initialize(num_variables),
+        )
+    }
+
+    #[must_use]
+    pub const fn new_linear_only(challenge: EF, lin_statement: LinearStatement<F, EF>) -> Self {
+        let num_variables = lin_statement.num_variables();
+        Self::new(
+            challenge,
+            EqStatement::initialize(num_variables),
+            SelectStatement::initialize(num_variables),
+            lin_statement,
         )
     }
 
@@ -167,6 +185,11 @@ impl<F: Field, EF: ExtensionField<F>> Constraint<F, EF> {
         // This adds: Σ_{j=0}^{n_sel-1} γ^{n_eq+j} · s_sel_j
         self.sel_statement
             .combine_evals(eval, self.challenge, self.eq_statement.len());
+        self.lin_statement.combine_evals(
+            eval,
+            self.challenge,
+            self.eq_statement.len() + self.sel_statement.len(),
+        );
     }
 
     /// Combines constraint polynomials into weight polynomial and expected evaluation.
@@ -204,6 +227,12 @@ impl<F: Field, EF: ExtensionField<F>> Constraint<F, EF> {
         // The shift parameter ensures select constraints use distinct challenge powers.
         self.sel_statement
             .combine(combined, eval, self.challenge, self.eq_statement.len());
+        self.lin_statement.combine::<true>(
+            combined,
+            eval,
+            self.challenge,
+            self.eq_statement.len() + self.sel_statement.len(),
+        );
     }
 
     /// Combines constraint polynomials into weight polynomial and expected evaluation.
@@ -245,6 +274,12 @@ impl<F: Field, EF: ExtensionField<F>> Constraint<F, EF> {
         // The shift parameter ensures select constraints use distinct challenge powers.
         self.sel_statement
             .combine_packed(combined, eval, self.challenge, self.eq_statement.len());
+        self.lin_statement.combine_packed::<true>(
+            combined,
+            eval,
+            self.challenge,
+            self.eq_statement.len() + self.sel_statement.len(),
+        );
     }
 
     /// Creates a new combined weight polynomial and expected evaluation.
@@ -280,6 +315,12 @@ impl<F: Field, EF: ExtensionField<F>> Constraint<F, EF> {
             &mut eval,
             self.challenge,
             self.eq_statement.len(),
+        );
+        self.lin_statement.combine::<true>(
+            &mut combined,
+            &mut eval,
+            self.challenge,
+            self.eq_statement.len() + self.sel_statement.len(),
         );
 
         // Return the completed weight polynomial and expected evaluation.
@@ -326,6 +367,12 @@ impl<F: Field, EF: ExtensionField<F>> Constraint<F, EF> {
             self.challenge,
             self.eq_statement.len(),
         );
+        self.lin_statement.combine_packed::<true>(
+            &mut combined,
+            &mut eval,
+            self.challenge,
+            self.eq_statement.len() + self.sel_statement.len(),
+        );
 
         // Return the completed weight polynomial and expected evaluation.
         (combined, eval)
@@ -368,6 +415,14 @@ impl<F: Field, EF: ExtensionField<F>> Constraint<F, EF> {
             .iter()
             .zip(self.challenge.powers().skip(self.eq_statement.len()))
     }
+
+    pub fn iter_linears(&self) -> impl Iterator<Item = (&EvaluationsList<EF>, EF)> {
+        self.lin_statement.weights.iter().zip(
+            self.challenge
+                .powers()
+                .skip(self.eq_statement.len() + self.sel_statement.len()),
+        )
+    }
 }
 
 #[cfg(test)]
@@ -375,7 +430,7 @@ mod tests {
     use alloc::{vec, vec::Vec};
 
     use p3_baby_bear::BabyBear;
-    use p3_field::{PrimeCharacteristicRing, extension::BinomialExtensionField};
+    use p3_field::{extension::BinomialExtensionField, PrimeCharacteristicRing};
 
     use super::*;
 
@@ -411,7 +466,12 @@ mod tests {
         let sel_statement = SelectStatement::new(num_variables, vec![sel_var], vec![sel_eval]);
 
         // Construct the combined constraint
-        let constraint: Constraint<F, EF> = Constraint::new(challenge, eq_statement, sel_statement);
+        let constraint: Constraint<F, EF> = Constraint::new(
+            challenge,
+            eq_statement,
+            sel_statement,
+            LinearStatement::<F, EF>::initialize(num_variables),
+        );
 
         // Verify that the constraint was constructed with correct fields
         assert_eq!(constraint.challenge, challenge);
@@ -441,7 +501,12 @@ mod tests {
         let challenge = EF::from_u64(42);
 
         // This should panic due to mismatched variable counts
-        let _constraint = Constraint::new(challenge, eq_statement, sel_statement);
+        let _constraint = Constraint::new(
+            challenge,
+            eq_statement,
+            sel_statement,
+            LinearStatement::<F, EF>::initialize(3),
+        );
     }
 
     #[test]
@@ -496,7 +561,12 @@ mod tests {
         let sel_statement = SelectStatement::initialize(num_variables);
 
         // Create constraint
-        let constraint: Constraint<F, EF> = Constraint::new(challenge, eq_statement, sel_statement);
+        let constraint: Constraint<F, EF> = Constraint::new(
+            challenge,
+            eq_statement,
+            sel_statement,
+            LinearStatement::<F, EF>::initialize(num_variables),
+        );
 
         // Verify that num_variables returns the correct value
         assert_eq!(constraint.num_variables(), num_variables);
@@ -532,7 +602,12 @@ mod tests {
         let sel_statement = SelectStatement::new(num_variables, vec![sel_var], vec![sel_eval]);
 
         // Create constraint
-        let constraint: Constraint<F, EF> = Constraint::new(gamma, eq_statement, sel_statement);
+        let constraint: Constraint<F, EF> = Constraint::new(
+            gamma,
+            eq_statement,
+            sel_statement,
+            LinearStatement::<F, EF>::initialize(num_variables),
+        );
 
         // Initialize accumulator
         let mut eval = EF::ZERO;
@@ -717,7 +792,12 @@ mod tests {
         );
 
         // Create constraint
-        let constraint: Constraint<F, EF> = Constraint::new(gamma, eq_statement, sel_statement);
+        let constraint: Constraint<F, EF> = Constraint::new(
+            gamma,
+            eq_statement,
+            sel_statement,
+            LinearStatement::<F, EF>::initialize(num_variables),
+        );
 
         // Collect iterator results
         let results: Vec<_> = constraint.iter_sels().collect();

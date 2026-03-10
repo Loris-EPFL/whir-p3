@@ -20,7 +20,7 @@
 //! over remaining variables. For quadratic sumcheck, `h(X)` is degree-2.
 
 use p3_challenger::{FieldChallenger, GrindingChallenger};
-use p3_field::{ExtensionField, Field, PackedFieldExtension, PackedValue, dot_product};
+use p3_field::{dot_product, ExtensionField, Field, PackedFieldExtension, PackedValue};
 use p3_util::log2_strict_usize;
 use tracing::instrument;
 
@@ -458,9 +458,9 @@ mod tests {
 
     use p3_baby_bear::{BabyBear, Poseidon2BabyBear};
     use p3_challenger::DuplexChallenger;
-    use p3_field::{Field, PrimeCharacteristicRing, extension::BinomialExtensionField};
+    use p3_field::{extension::BinomialExtensionField, Field, PrimeCharacteristicRing};
     use proptest::prelude::*;
-    use rand::{RngExt, SeedableRng, rngs::SmallRng};
+    use rand::{rngs::SmallRng, RngExt, SeedableRng};
 
     use super::*;
 
@@ -970,7 +970,7 @@ mod tests {
         // The combine function should:
         // 1. Update the weight polynomial with new constraint contributions
         // 2. Update the running sum accordingly
-        use crate::whir::constraints::{Constraint, statement::EqStatement};
+        use crate::whir::constraints::{statement::EqStatement, Constraint};
 
         let num_vars = 2;
         let evals = EvaluationsList::new(vec![EF::ONE; 4]);
