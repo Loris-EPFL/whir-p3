@@ -30,3 +30,9 @@ proptest-regressions/
 
 # Profile data
 profile.json
+
+*.tex
+*.txt
+*.csv
+*.pdf
+*.json

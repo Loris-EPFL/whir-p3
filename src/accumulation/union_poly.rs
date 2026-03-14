@@ -34,3 +34,30 @@ pub fn build_union_polynomial<F: Field>(polynomials: &[EvaluationsList<F>]) -> E
 
     EvaluationsList::new(union_evals)
 }
+
+/// Builds a union polynomial from borrowed evaluation tables without cloning inputs first.
+pub fn build_union_polynomial_from_refs<F: Field>(
+    polynomials: &[&EvaluationsList<F>],
+) -> EvaluationsList<F> {
+    if polynomials.is_empty() {
+        return EvaluationsList::new(vec![]);
+    }
+
+    let n = polynomials[0].num_variables();
+    let l = polynomials.len();
+
+    for poly in polynomials {
+        assert_eq!(
+            poly.num_variables(),
+            n,
+            "All polynomials must have the same number of variables"
+        );
+    }
+
+    let mut union_evals = Vec::with_capacity(l * (1 << n));
+    for poly in polynomials {
+        union_evals.extend_from_slice(poly.as_slice());
+    }
+
+    EvaluationsList::new(union_evals)
+}

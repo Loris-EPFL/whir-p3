@@ -1,4 +1,4 @@
-use alloc::{vec, vec::Vec};
+use alloc::vec::Vec;
 use core::marker::PhantomData;
 
 use p3_challenger::{CanObserve, FieldChallenger, GrindingChallenger};
@@ -11,7 +11,7 @@ use crate::{
         accumulator::{Accumulator, AccumulatorInstance, AccumulatorWitness},
         linearized::decide_linearized_accumulator,
         proof::{AccumulationProof, AccumulationTranscript},
-        union_poly::build_union_polynomial,
+        union_poly::build_union_polynomial_from_refs,
     },
     fiat_shamir::errors::FiatShamirError,
     poly::{evals::EvaluationsList, multilinear::MultilinearPoint},
@@ -59,30 +59,22 @@ fn observe_accumulator_instances<F, EF, W, Challenger, const DIGEST_ELEMS: usize
     }
 }
 
-fn public_instances<F: Field, EF: ExtensionField<F>, W, const DIGEST_ELEMS: usize>(
+fn observe_accumulators_public<F, EF, W, Challenger, const DIGEST_ELEMS: usize>(
+    challenger: &mut Challenger,
     accumulators: &[Accumulator<F, EF, W, DIGEST_ELEMS>],
-) -> Vec<AccumulatorInstance<F, EF, W, DIGEST_ELEMS>>
-where
-    W: Copy,
+) where
+    F: TwoAdicField + Ord,
+    EF: ExtensionField<F> + TwoAdicField,
+    W: PackedValue<Value = W> + Eq + Copy,
+    Challenger:
+        FieldChallenger<F> + GrindingChallenger<Witness = F> + CanObserve<Hash<F, W, DIGEST_ELEMS>>,
 {
-    accumulators
-        .iter()
-        .map(|acc| acc.public_instance.clone())
-        .collect()
-}
-
-fn extend_linear_weights<F: Field, EF: ExtensionField<F>>(
-    weights: &EvaluationsList<EF>,
-    block_index: usize,
-    num_blocks: usize,
-) -> EvaluationsList<EF> {
-    assert!(num_blocks.is_power_of_two());
-    let local_evals = weights.as_slice();
-    let local_size = local_evals.len();
-    let mut out = vec![EF::ZERO; local_size * num_blocks];
-    let start = block_index * local_size;
-    out[start..start + local_size].copy_from_slice(local_evals);
-    EvaluationsList::new(out)
+    for accumulator in accumulators {
+        challenger.observe(Hash::from(accumulator.public_instance.commitment_root));
+        for (_, &target) in accumulator.public_instance.linear_claim.iter() {
+            challenger.observe_algebra_element(target);
+        }
+    }
 }
 
 fn batched_union_linear_claim_from_instances<
@@ -104,6 +96,7 @@ fn batched_union_linear_claim_from_instances<
 
     let mut combined_weights = EvaluationsList::zero(total_vars);
     let mut combined_target = EF::ZERO;
+    let local_evals_len = 1 << local_vars;
     for (idx, accumulator) in accumulators.iter().enumerate() {
         let coeff = EF::from(batching_challenge).exp_u64(idx as u64);
         let (weights, &target) = accumulator
@@ -111,10 +104,10 @@ fn batched_union_linear_claim_from_instances<
             .iter()
             .next()
             .expect("one linear claim per accumulator");
-        let extended = extend_linear_weights(weights, idx, num_blocks);
-        combined_weights
+        let start = idx * local_evals_len;
+        combined_weights.as_mut_slice()[start..start + local_evals_len]
             .iter_mut()
-            .zip(extended.as_slice().iter())
+            .zip(weights.as_slice().iter())
             .for_each(|(acc, &value)| *acc += coeff * value);
         combined_target += coeff * target;
     }
@@ -130,12 +123,11 @@ fn union_polynomial_from_accumulators<
 >(
     accumulators: &[Accumulator<F, EF, W, DIGEST_ELEMS>],
 ) -> EvaluationsList<F> {
-    build_union_polynomial(
-        &accumulators
-            .iter()
-            .map(|acc| acc.witness.poly.clone())
-            .collect::<Vec<_>>(),
-    )
+    let polys = accumulators
+        .iter()
+        .map(|acc| &acc.witness.poly)
+        .collect::<Vec<_>>();
+    build_union_polynomial_from_refs(&polys)
 }
 
 fn build_public_initial_claim_from_transcript<
@@ -178,16 +170,45 @@ fn build_prover_initial_claim_from_transcript<
 >(
     accumulators: &[Accumulator<F, EF, W, DIGEST_ELEMS>],
     transcript: &AccumulationTranscript<F, EF>,
-) -> InitialClaim<F, EF>
-where
-    W: Copy,
-{
+) -> InitialClaim<F, EF> {
     let union_poly = union_polynomial_from_accumulators(accumulators);
-    let claim = build_public_initial_claim_from_transcript(
-        &public_instances(accumulators),
-        transcript,
-        union_poly.num_variables(),
-    );
+    let total_vars = union_poly.num_variables();
+    let mut eq_statement = EqStatement::initialize(total_vars);
+    eq_statement.add_evaluated_constraint(transcript.ood_point.clone(), transcript.ood_answer);
+    for (&index, &eval) in transcript
+        .shift_query_indices
+        .iter()
+        .zip(transcript.shift_query_answers.iter())
+    {
+        let point = boolean_point_from_index::<F, EF>(index, total_vars);
+        eq_statement.add_evaluated_constraint(point, eval);
+    }
+
+    let local_evals_len = 1 << accumulators[0].witness.poly.num_variables();
+    let mut combined_weights = EvaluationsList::zero(total_vars);
+    let mut combined_target = EF::ZERO;
+    for (idx, accumulator) in accumulators.iter().enumerate() {
+        let coeff = EF::from(transcript.batching_challenge).exp_u64(idx as u64);
+        let (weights, &target) = accumulator
+            .public_instance
+            .linear_claim
+            .iter()
+            .next()
+            .expect("one linear claim per accumulator");
+        let start = idx * local_evals_len;
+        combined_weights.as_mut_slice()[start..start + local_evals_len]
+            .iter_mut()
+            .zip(weights.as_slice().iter())
+            .for_each(|(acc, &value)| *acc += coeff * value);
+        combined_target += coeff * target;
+    }
+    let mut linear_statement = LinearStatement::<F, EF>::initialize(total_vars);
+    linear_statement.add_constraint(combined_weights, combined_target);
+
+    let claim = InitialClaim {
+        eq_statement,
+        linear_statement,
+    };
     debug_assert_eq!(
         claim.eq_statement.len(),
         1 + transcript.shift_query_indices.len()
@@ -251,7 +272,7 @@ where
             assert!(decide_linearized_accumulator(accumulator));
         }
 
-        observe_accumulator_instances(challenger, &public_instances(accumulators));
+        observe_accumulators_public(challenger, accumulators);
         let batching_challenge = challenger.sample();
         let union_poly = union_polynomial_from_accumulators(accumulators);
         let union_vars = union_poly.num_variables();

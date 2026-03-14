@@ -139,3 +139,102 @@ Main report files:
 - `output/benchmarks/accumulation/verify_times.svg`
 - `output/benchmarks/accumulation/prove_speedup.svg`
 - `output/benchmarks/accumulation/verify_speedup.svg`
+
+### Configurable Large Accumulation Benchmarks
+
+For larger matrix sizes and configurable claim counts, use the standalone benchmark runner instead of the Criterion bench.
+
+This runner supports CLI flags and has sensible defaults if you do not pass any arguments.
+
+Basic run:
+
+```bash
+cargo run --release --features cli --bin accumulation_bench
+```
+
+This defaults to:
+- `--sizes 8,10`
+- `--claims 2,4`
+- `--repeats 10`
+- `--shift-queries 2`
+- `--folding-factor 2`
+- `--folding-schedule <unset>`
+- `--starting-log-inv-rate 1`
+- `--rs-domain-initial-reduction-factor 1`
+- `--security-level 100`
+
+`--folding-schedule` supports the folding modes already available in this repo:
+- `--folding-schedule 4` means constant folding factor 4 in all rounds
+- `--folding-schedule 6,4` means first round uses 6, later rounds use 4
+
+If `--folding-schedule` is provided, it overrides `--folding-factor`.
+
+Example with larger matrices:
+
+```bash
+cargo run --release --features cli --bin accumulation_bench -- \
+  --sizes 12,14 \
+  --claims 2,4,8 \
+  --repeats 20 \
+  --folding-factor 2 \
+  --starting-log-inv-rate 1 \
+  --rs-domain-initial-reduction-factor 1 \
+  --shift-queries 2
+```
+
+Example with an even longer run for a single sweep:
+
+```bash
+cargo run --release --features cli --bin accumulation_bench -- \
+  --sizes 14 \
+  --claims 2,4,8 \
+  --repeats 50 \
+  --folding-factor 2 \
+  --starting-log-inv-rate 1 \
+  --rs-domain-initial-reduction-factor 1 \
+  --shift-queries 2
+```
+
+The runner writes a CSV file by default to:
+
+```text
+output/benchmarks/accumulation/custom_metrics.csv
+```
+
+You can override that path with:
+
+```bash
+--out output/benchmarks/accumulation/my_run.csv
+```
+
+Recommended commands for longer accumulation measurements:
+
+```bash
+cargo run --release --features cli --bin accumulation_bench -- --sizes 12 --claims 2,4,8 --repeats 20
+cargo run --release --features cli --bin accumulation_bench -- --sizes 14 --claims 2,4 --repeats 20
+cargo run --release --features cli --bin accumulation_bench -- --sizes 14 --claims 2,4,8 --repeats 50
+```
+
+Example exploring stronger WHIR folding for the folded path while keeping the same benchmark harness:
+
+```bash
+cargo run --release --features cli --bin accumulation_bench -- \
+  --sizes 14 \
+  --claims 2,4,8 \
+  --repeats 20 \
+  --folding-factor 4 \
+  --starting-log-inv-rate 1 \
+  --rs-domain-initial-reduction-factor 1
+```
+
+Example exploring a non-constant WHIR folding schedule:
+
+```bash
+cargo run --release --features cli --bin accumulation_bench -- \
+  --sizes 14 \
+  --claims 2,4,8 \
+  --repeats 20 \
+  --folding-schedule 6,4 \
+  --starting-log-inv-rate 1 \
+  --rs-domain-initial-reduction-factor 1
+```

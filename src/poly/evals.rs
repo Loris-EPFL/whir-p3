@@ -97,6 +97,12 @@ impl<F: Copy + Clone + Send + Sync> EvaluationsList<F> {
         &self.0
     }
 
+    /// Returns a mutable slice over the evaluations.
+    #[inline]
+    pub fn as_mut_slice(&mut self) -> &mut [F] {
+        &mut self.0
+    }
+
     /// Returns an iterator over the evaluations.
     #[inline]
     pub fn iter(&self) -> core::slice::Iter<'_, F> {

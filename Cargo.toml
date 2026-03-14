@@ -96,6 +96,15 @@ name = "main"
 path = "src/bin/main.rs"
 required-features = ["cli"]
 
+[[bin]]
+name = "accumulation_bench"
+path = "src/bin/accumulation_bench.rs"
+required-features = ["cli"]
+
+[[bin]]
+name = "accumulation_report"
+path = "src/bin/accumulation_report.rs"
+
 [profile.profiling]
 inherits = "release"
 debug = true
