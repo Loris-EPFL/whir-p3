@@ -35,19 +35,19 @@ cargo bench --bench spartan -- "Spartan_Prove"
 cargo bench --bench spartan -- "Spartan_Verify"
 ```
 
-### Benchmarking Regular vs Accumulated Folding
+### Benchmarking No-Fold vs Raw Fold vs Quasar+WARP
 
-To compare the regular Spartan+WHIR pipeline against the accumulated folded WARP-style path:
+The current prototype supports three benchmark modes over synthetic R1CS instances:
+
+- `no_fold`: prove and verify all fresh claims independently with Spartan+WHIR
+- `raw_fold`: send fresh claims directly into the current WARP-style folded WHIR backend
+- `quasar_warp`: first squash fresh claims with the new Quasar frontend, then feed the squashed object into the existing WARP-style folded WHIR backend
+
+For the fixed Criterion benchmark:
 
 ```bash
 cargo bench --bench accumulation
 ```
-
-This benchmark reports four families of measurements across several instance sizes and claim counts:
-- `regular_prove`
-- `regular_verify`
-- `accumulated_prove`
-- `accumulated_verify`
 
 You can filter to a specific sub-benchmark, for example:
 
@@ -201,6 +201,15 @@ The runner writes a CSV file by default to:
 output/benchmarks/accumulation/custom_metrics.csv
 ```
 
+The CSV now contains timing columns for all three modes:
+
+- `no_fold_prove_ms`
+- `no_fold_verify_ms`
+- `raw_fold_prove_ms`
+- `raw_fold_verify_ms`
+- `quasar_warp_prove_ms`
+- `quasar_warp_verify_ms`
+
 You can override that path with:
 
 ```bash
@@ -238,3 +247,14 @@ cargo run --release --features cli --bin accumulation_bench -- \
   --starting-log-inv-rate 1 \
   --rs-domain-initial-reduction-factor 1
 ```
+
+### Architecture Summary
+
+The current codebase now has a two-layer accumulation structure:
+
+1. `Quasar` frontend in `src/accumulation/quasar/`
+   - squashes many fresh linearized instances into one squashed committed object
+2. existing `WARP-style` folded WHIR backend in `src/accumulation/scheme.rs`
+   - folds committed accumulator-style objects and proves them with WHIR
+
+The new Quasar frontend is intentionally implemented as a separate layer so it can reuse the backend unchanged.

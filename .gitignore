@@ -32,7 +32,7 @@ proptest-regressions/
 profile.json
 
 *.tex
-*.txt
+
 *.csv
 *.pdf
 *.json
