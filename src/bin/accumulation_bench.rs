@@ -1,6 +1,7 @@
 use std::{
     fs::{create_dir_all, File},
     io::Write,
+    mem::size_of,
     path::Path,
     time::Instant,
 };
@@ -14,21 +15,27 @@ use p3_symmetric::{PaddingFreeSponge, TruncatedPermutation};
 use rand::{rngs::SmallRng, SeedableRng};
 use whir_p3::{
     accumulation::{
+        accumulator::{Accumulator, AccumulatorInstance},
         linearized::{
             initialize_accumulator_from_spartan, linearized_statement_from_spartan_proof,
         },
-        quasar::{FreshLinearInstance, QuasarFrontendProver, QuasarFrontendVerifier},
+        proof::{AccumulationProof, AccumulationTranscript},
+        quasar::{
+            FreshLinearInstance, FreshLinearInstancePublic, QuasarFrontendOutput,
+            QuasarFrontendProver, QuasarFrontendVerifier, QuasarTranscript,
+        },
         scheme::{LinearizedAccumulationProver, LinearizedAccumulationVerifier},
     },
     fiat_shamir::domain_separator::DomainSeparator,
     parameters::{errors::SecurityAssumption, FoldingFactor, ProtocolParameters},
+    poly::evals::EvaluationsList,
     spartan::{
-        r1cs::R1CSInstance,
+        r1cs::{R1CSInstance, R1CSShape},
         r1cs_prover::{R1CSProof, R1CSProver, R1CSVerifier},
     },
     whir::{
         committer::{reader::CommitmentReader, writer::CommitmentWriter},
-        constraints::statement::InitialClaim,
+        constraints::statement::{InitialClaim, LinearStatement},
         parameters::WhirConfig,
         proof::WhirProof,
         prover::Prover as WhirProver,
@@ -43,13 +50,27 @@ type MyHash = PaddingFreeSponge<Perm, 16, 8, 8>;
 type MyCompress = TruncatedPermutation<Perm, 2, 8, 16>;
 type MyChallenger = DuplexChallenger<F, Perm, 16, 8>;
 
+const DIGEST_ELEMS: usize = 8;
+
 #[derive(Parser, Debug)]
-#[command(author, version, about = "Configurable accumulation benchmark runner")]
+#[command(
+    author,
+    version,
+    about = "Normalized accumulation benchmark runner with size and memory proxies"
+)]
 struct Args {
-    #[arg(long, default_value = "8,10", help = "Comma-separated log2 sizes")]
+    #[arg(
+        long,
+        default_value = "8,10",
+        help = "Comma-separated witness log2 sizes"
+    )]
     sizes: String,
 
-    #[arg(long, default_value = "2,4", help = "Comma-separated claim counts")]
+    #[arg(
+        long,
+        default_value = "2,4",
+        help = "Comma-separated claim counts (batch sizes). This is the number of claims being aggregated, not the WHIR folding factor"
+    )]
     claims: String,
 
     #[arg(
@@ -59,11 +80,7 @@ struct Args {
     )]
     repeats: usize,
 
-    #[arg(
-        long,
-        default_value_t = 2,
-        help = "Shift queries for folded accumulation"
-    )]
+    #[arg(long, default_value_t = 2, help = "Shift queries for the WARP backend")]
     shift_queries: usize,
 
     #[arg(long, default_value_t = 2, help = "WHIR folding factor")]
@@ -75,11 +92,31 @@ struct Args {
     )]
     folding_schedule: Option<String>,
 
-    #[arg(long, default_value_t = 1, help = "WHIR starting log inverse rate")]
+    #[arg(
+        long,
+        default_value_t = 1,
+        help = "Default WHIR starting log inverse rate when --starting-log-inv-rates is not set"
+    )]
     starting_log_inv_rate: usize,
 
-    #[arg(long, default_value_t = 1, help = "Initial RS domain reduction factor")]
+    #[arg(
+        long,
+        help = "Comma-separated sweep for WHIR starting log inverse rate"
+    )]
+    starting_log_inv_rates: Option<String>,
+
+    #[arg(
+        long,
+        default_value_t = 1,
+        help = "Default initial RS domain reduction factor when --initial-rs-reductions is not set"
+    )]
     rs_domain_initial_reduction_factor: usize,
+
+    #[arg(
+        long,
+        help = "Comma-separated sweep for the initial RS domain reduction factor"
+    )]
+    initial_rs_reductions: Option<String>,
 
     #[arg(long, default_value_t = 100, help = "Security level in bits")]
     security_level: usize,
@@ -93,10 +130,42 @@ struct Args {
 
 #[derive(Clone)]
 struct ClaimMaterial {
-    shape: whir_p3::spartan::r1cs::R1CSShape<F>,
+    shape: R1CSShape<F>,
     instance: R1CSInstance<F>,
     spartan_proof: R1CSProof<F, EF>,
-    witness_poly: whir_p3::poly::evals::EvaluationsList<F>,
+    witness_poly: EvaluationsList<F>,
+}
+
+#[derive(Clone)]
+struct PreparedCase {
+    material: ClaimMaterial,
+    regular_linear_claims: Vec<LinearStatement<F, EF>>,
+    raw_fold_accumulators: Vec<Accumulator<F, EF, F, DIGEST_ELEMS>>,
+    raw_fold_public_inputs: Vec<AccumulatorInstance<F, EF, F, DIGEST_ELEMS>>,
+    fresh_instances: Vec<FreshLinearInstance<F, EF>>,
+    fresh_public_inputs: Vec<FreshLinearInstancePublic<F, EF>>,
+    running_accumulator: Accumulator<F, EF, F, DIGEST_ELEMS>,
+    witness_bytes: usize,
+    num_claims: usize,
+}
+
+#[derive(Clone, Copy)]
+struct SweepConfig {
+    starting_log_inv_rate: usize,
+    rs_domain_initial_reduction_factor: usize,
+}
+
+#[derive(Clone, Copy)]
+struct TimingMetrics {
+    prove_ms: f64,
+    verify_ms: f64,
+}
+
+#[derive(Clone, Copy)]
+struct ArtifactMetrics {
+    proof_bytes: usize,
+    transcript_bytes: usize,
+    explicit_poly_bytes: usize,
 }
 
 fn parse_csv_usize(input: &str) -> Vec<usize> {
@@ -124,21 +193,46 @@ fn parse_folding_factor(args: &Args) -> FoldingFactor {
     }
 }
 
+fn parse_sweep_configs(args: &Args) -> Vec<SweepConfig> {
+    let starting_rates = args
+        .starting_log_inv_rates
+        .as_deref()
+        .map(parse_csv_usize)
+        .unwrap_or_else(|| vec![args.starting_log_inv_rate]);
+    let initial_reductions = args
+        .initial_rs_reductions
+        .as_deref()
+        .map(parse_csv_usize)
+        .unwrap_or_else(|| vec![args.rs_domain_initial_reduction_factor]);
+
+    let mut out = Vec::new();
+    for &starting_log_inv_rate in &starting_rates {
+        for &rs_domain_initial_reduction_factor in &initial_reductions {
+            out.push(SweepConfig {
+                starting_log_inv_rate,
+                rs_domain_initial_reduction_factor,
+            });
+        }
+    }
+    out
+}
+
 fn make_whir_config(
     num_variables: usize,
     args: &Args,
+    sweep: SweepConfig,
 ) -> WhirConfig<EF, F, MyHash, MyCompress, MyChallenger> {
     let mut rng = SmallRng::seed_from_u64(42);
     let perm = Perm::new_from_rng_128(&mut rng);
     let params = ProtocolParameters {
         security_level: args.security_level,
         pow_bits: 0,
-        rs_domain_initial_reduction_factor: args.rs_domain_initial_reduction_factor,
+        rs_domain_initial_reduction_factor: sweep.rs_domain_initial_reduction_factor,
         folding_factor: parse_folding_factor(args),
         merkle_hash: MyHash::new(perm.clone()),
         merkle_compress: MyCompress::new(perm),
         soundness_type: SecurityAssumption::CapacityBound,
-        starting_log_inv_rate: args.starting_log_inv_rate,
+        starting_log_inv_rate: sweep.starting_log_inv_rate,
     };
     WhirConfig::new(num_variables, params)
 }
@@ -147,8 +241,8 @@ fn make_domain_sep(
     config: &WhirConfig<EF, F, MyHash, MyCompress, MyChallenger>,
 ) -> DomainSeparator<EF, F> {
     let mut domainsep = DomainSeparator::<EF, F>::new(vec![]);
-    domainsep.commit_statement::<_, _, _, 8>(config);
-    domainsep.add_whir_proof::<_, _, _, 8>(config);
+    domainsep.commit_statement::<_, _, _, DIGEST_ELEMS>(config);
+    domainsep.add_whir_proof::<_, _, _, DIGEST_ELEMS>(config);
     domainsep
 }
 
@@ -181,29 +275,98 @@ fn prepare_material(size_log2: usize) -> ClaimMaterial {
     }
 }
 
-fn prove_regular_pipeline(
-    material: &ClaimMaterial,
-    num_claims: usize,
-    args: &Args,
-) -> Vec<(WhirProof<F, EF, F, 8>, InitialClaim<F, EF>)> {
-    let config = make_whir_config(material.witness_poly.num_variables(), args);
-    let dft = Radix2DFTSmallBatch::<F>::default();
-    let domainsep = make_domain_sep(&config);
+fn witness_bytes(poly: &EvaluationsList<F>) -> usize {
+    poly.as_slice().len() * size_of::<F>()
+}
 
-    (0..num_claims)
+fn prepare_case(material: &ClaimMaterial, num_claims: usize) -> PreparedCase {
+    let regular_linear_claims = (0..num_claims)
         .map(|i| {
-            let linear_claim = linearized_statement_from_spartan_proof(
+            linearized_statement_from_spartan_proof(
                 &material.shape,
                 &material.spartan_proof,
                 EF::from(F::from_u64((i + 3) as u64)),
+            )
+        })
+        .collect::<Vec<_>>();
+
+    let raw_fold_accumulators = (0..num_claims)
+        .map(|i| {
+            initialize_accumulator_from_spartan::<F, EF, F, DIGEST_ELEMS>(
+                &material.shape,
+                &material.spartan_proof,
+                material.witness_poly.clone(),
+                [F::from_u64(i as u64); DIGEST_ELEMS],
+                EF::from(F::from_u64((i + 3) as u64)),
+            )
+        })
+        .collect::<Vec<_>>();
+    let raw_fold_public_inputs = raw_fold_accumulators
+        .iter()
+        .map(|acc| acc.public_instance.clone())
+        .collect::<Vec<_>>();
+
+    let rx = material.spartan_proof.eval_claims.rx.clone();
+    let ry = material.spartan_proof.eval_claims.ry.clone();
+    let fresh_instances = (0..num_claims)
+        .map(|_| {
+            FreshLinearInstance::from_shared_linearization_points(
+                &material.shape,
+                material.witness_poly.clone(),
+                &rx,
+                &ry,
+                EF::from(F::from_u64(3)),
+            )
+        })
+        .collect::<Vec<_>>();
+    let fresh_public_inputs = fresh_instances
+        .iter()
+        .map(FreshLinearInstance::public)
+        .collect::<Vec<_>>();
+
+    let running_accumulator = initialize_accumulator_from_spartan::<F, EF, F, DIGEST_ELEMS>(
+        &material.shape,
+        &material.spartan_proof,
+        material.witness_poly.clone(),
+        [F::from_u64(999); DIGEST_ELEMS],
+        EF::from(F::from_u64(3)),
+    );
+
+    PreparedCase {
+        material: material.clone(),
+        regular_linear_claims,
+        raw_fold_accumulators,
+        raw_fold_public_inputs,
+        fresh_instances,
+        fresh_public_inputs,
+        running_accumulator,
+        witness_bytes: witness_bytes(&material.witness_poly),
+        num_claims,
+    }
+}
+
+fn prove_regular_pipeline(
+    case: &PreparedCase,
+    args: &Args,
+    sweep: SweepConfig,
+) -> Vec<(WhirProof<F, EF, F, DIGEST_ELEMS>, InitialClaim<F, EF>)> {
+    let config = make_whir_config(case.material.witness_poly.num_variables(), args, sweep);
+    let dft = Radix2DFTSmallBatch::<F>::default();
+    let domainsep = make_domain_sep(&config);
+
+    case.regular_linear_claims
+        .iter()
+        .enumerate()
+        .map(|(i, linear_claim)| {
+            let mut statement = config.initial_statement_with_linear(
+                case.material.witness_poly.clone(),
+                linear_claim.clone(),
             );
-            let mut statement =
-                config.initial_statement_with_linear(material.witness_poly.clone(), linear_claim);
             let verifier_claim = statement.normalize_claim();
-            let mut proof = WhirProof::<F, EF, F, 8>::from_whir_config(&config);
+            let mut proof = WhirProof::<F, EF, F, DIGEST_ELEMS>::from_whir_config(&config);
             let mut challenger = seed_challenger(100 + i as u64, &domainsep);
             let commitment = CommitmentWriter::new(&config)
-                .commit::<_, <F as Field>::Packing, F, <F as Field>::Packing, 8>(
+                .commit::<_, <F as Field>::Packing, F, <F as Field>::Packing, DIGEST_ELEMS>(
                     &dft,
                     &mut proof,
                     &mut challenger,
@@ -211,7 +374,7 @@ fn prove_regular_pipeline(
                 )
                 .unwrap();
             WhirProver(&config)
-                .prove::<_, <F as Field>::Packing, F, <F as Field>::Packing, 8>(
+                .prove::<_, <F as Field>::Packing, F, <F as Field>::Packing, DIGEST_ELEMS>(
                     &dft,
                     &mut proof,
                     &mut challenger,
@@ -224,179 +387,13 @@ fn prove_regular_pipeline(
         .collect()
 }
 
-fn build_fresh_instances(
-    material: &ClaimMaterial,
-    num_claims: usize,
-) -> Vec<FreshLinearInstance<F, EF>> {
-    let rx = material.spartan_proof.eval_claims.rx.clone();
-    let ry = material.spartan_proof.eval_claims.ry.clone();
-    (0..num_claims)
-        .map(|_| {
-            FreshLinearInstance::from_shared_linearization_points(
-                &material.shape,
-                material.witness_poly.clone(),
-                &rx,
-                &ry,
-                EF::from(F::from_u64(3)),
-            )
-        })
-        .collect()
-}
-
-fn prove_raw_fold_pipeline(
-    material: &ClaimMaterial,
-    num_claims: usize,
-    args: &Args,
-) -> (
-    whir_p3::accumulation::accumulator::Accumulator<F, EF, F, 8>,
-    whir_p3::accumulation::proof::AccumulationProof<F, EF, F, 8>,
-) {
-    let accumulators = (0..num_claims)
-        .map(|i| {
-            initialize_accumulator_from_spartan::<F, EF, F, 8>(
-                &material.shape,
-                &material.spartan_proof,
-                material.witness_poly.clone(),
-                [F::from_u64(i as u64); 8],
-                EF::from(F::from_u64((i + 3) as u64)),
-            )
-        })
-        .collect::<Vec<_>>();
-    let union_num_vars =
-        material.witness_poly.num_variables() + num_claims.trailing_zeros() as usize;
-    let config = make_whir_config(union_num_vars, args);
-    let domainsep = make_domain_sep(&config);
-    let dft = Radix2DFTSmallBatch::<F>::default();
-    let mut challenger = seed_challenger(1000 + num_claims as u64, &domainsep);
-    LinearizedAccumulationProver::new(&config)
-        .accumulate::<_, F, <F as Field>::Packing, _, 8>(
-            &dft,
-            &mut challenger,
-            &accumulators,
-            args.shift_queries,
-        )
-        .unwrap()
-}
-
-fn verify_raw_fold_pipeline(
-    material: &ClaimMaterial,
-    num_claims: usize,
-    args: &Args,
-    proof: &whir_p3::accumulation::proof::AccumulationProof<F, EF, F, 8>,
-) {
-    let accumulators = (0..num_claims)
-        .map(|i| {
-            initialize_accumulator_from_spartan::<F, EF, F, 8>(
-                &material.shape,
-                &material.spartan_proof,
-                material.witness_poly.clone(),
-                [F::from_u64(i as u64); 8],
-                EF::from(F::from_u64((i + 3) as u64)),
-            )
-        })
-        .collect::<Vec<_>>();
-    let public_inputs = accumulators
-        .iter()
-        .map(|acc| acc.public_instance.clone())
-        .collect::<Vec<_>>();
-    let union_num_vars =
-        material.witness_poly.num_variables() + num_claims.trailing_zeros() as usize;
-    let config = make_whir_config(union_num_vars, args);
-    let domainsep = make_domain_sep(&config);
-    let mut challenger = seed_challenger(1000 + num_claims as u64, &domainsep);
-    LinearizedAccumulationVerifier::new(&config)
-        .verify::<<F as Field>::Packing, F, <F as Field>::Packing, 8>(
-            &mut challenger,
-            &public_inputs,
-            proof,
-        )
-        .unwrap();
-}
-
-fn prove_quasar_warp_pipeline(
-    material: &ClaimMaterial,
-    num_claims: usize,
-    args: &Args,
-) -> (
-    whir_p3::accumulation::quasar::QuasarFrontendOutput<F, EF, F, 8>,
-    whir_p3::accumulation::accumulator::Accumulator<F, EF, F, 8>,
-    whir_p3::accumulation::proof::AccumulationProof<F, EF, F, 8>,
-) {
-    let fresh_instances = build_fresh_instances(material, num_claims);
-    let quasar_config = make_whir_config(material.witness_poly.num_variables(), args);
-    let quasar_domainsep = make_domain_sep(&quasar_config);
-    let dft = Radix2DFTSmallBatch::<F>::default();
-    let mut quasar_challenger = seed_challenger(2000 + num_claims as u64, &quasar_domainsep);
-    let squashed = QuasarFrontendProver::new(&quasar_config)
-        .squash_to_accumulator::<_, F, <F as Field>::Packing, _, 8>(
-            &dft,
-            &mut quasar_challenger,
-            &fresh_instances,
-        )
-        .unwrap();
-
-    let running_acc = initialize_accumulator_from_spartan::<F, EF, F, 8>(
-        &material.shape,
-        &material.spartan_proof,
-        material.witness_poly.clone(),
-        [F::from_u64(999); 8],
-        EF::from(F::from_u64(3)),
-    );
-    let fold_config = make_whir_config(material.witness_poly.num_variables() + 1, args);
-    let fold_domainsep = make_domain_sep(&fold_config);
-    let mut fold_challenger = seed_challenger(3000 + num_claims as u64, &fold_domainsep);
-    let (folded, proof) = LinearizedAccumulationProver::new(&fold_config)
-        .accumulate::<_, F, <F as Field>::Packing, _, 8>(
-            &dft,
-            &mut fold_challenger,
-            &[running_acc.clone(), squashed.accumulator.clone()],
-            args.shift_queries,
-        )
-        .unwrap();
-    (squashed, folded, proof)
-}
-
-fn verify_quasar_warp_pipeline(
-    material: &ClaimMaterial,
-    num_claims: usize,
-    args: &Args,
-    squashed: &whir_p3::accumulation::quasar::QuasarFrontendOutput<F, EF, F, 8>,
-    fold_proof: &whir_p3::accumulation::proof::AccumulationProof<F, EF, F, 8>,
-) {
-    let fresh_public = build_fresh_instances(material, num_claims)
-        .into_iter()
-        .map(|fresh| fresh.public())
-        .collect::<Vec<_>>();
-    QuasarFrontendVerifier::verify(&fresh_public, squashed, &squashed.transcript).unwrap();
-
-    let running_acc = initialize_accumulator_from_spartan::<F, EF, F, 8>(
-        &material.shape,
-        &material.spartan_proof,
-        material.witness_poly.clone(),
-        [F::from_u64(999); 8],
-        EF::from(F::from_u64(3)),
-    );
-    let fold_config = make_whir_config(material.witness_poly.num_variables() + 1, args);
-    let fold_domainsep = make_domain_sep(&fold_config);
-    let mut fold_challenger = seed_challenger(3000 + num_claims as u64, &fold_domainsep);
-    LinearizedAccumulationVerifier::new(&fold_config)
-        .verify::<<F as Field>::Packing, F, <F as Field>::Packing, 8>(
-            &mut fold_challenger,
-            &[
-                running_acc.public_instance.clone(),
-                squashed.accumulator.public_instance.clone(),
-            ],
-            fold_proof,
-        )
-        .unwrap();
-}
-
 fn verify_regular_pipeline(
-    material: &ClaimMaterial,
-    proofs: &[(WhirProof<F, EF, F, 8>, InitialClaim<F, EF>)],
+    case: &PreparedCase,
+    proofs: &[(WhirProof<F, EF, F, DIGEST_ELEMS>, InitialClaim<F, EF>)],
     args: &Args,
+    sweep: SweepConfig,
 ) {
-    let config = make_whir_config(material.witness_poly.num_variables(), args);
+    let config = make_whir_config(case.material.witness_poly.num_variables(), args, sweep);
     let domainsep = make_domain_sep(&config);
     let spartan_verifier = R1CSVerifier::new();
 
@@ -405,25 +402,132 @@ fn verify_regular_pipeline(
         let mut spartan_challenger = MyChallenger::new(perm);
         spartan_verifier
             .verify::<EF, _>(
-                &material.shape,
-                material.instance.input(),
-                &material.spartan_proof,
+                &case.material.shape,
+                case.material.instance.input(),
+                &case.material.spartan_proof,
                 &mut spartan_challenger,
             )
             .unwrap();
 
         let mut challenger = seed_challenger(100 + i as u64, &domainsep);
-        let parsed =
-            CommitmentReader::new(&config).parse_commitment::<F, 8>(proof, &mut challenger);
+        let parsed = CommitmentReader::new(&config)
+            .parse_commitment::<F, DIGEST_ELEMS>(proof, &mut challenger);
         WhirVerifier::new(&config)
-            .verify_with_initial_claim::<<F as Field>::Packing, F, <F as Field>::Packing, 8>(
-                proof,
-                &mut challenger,
-                &parsed,
-                claim.clone(),
-            )
+            .verify_with_initial_claim::<
+                <F as Field>::Packing,
+                F,
+                <F as Field>::Packing,
+                DIGEST_ELEMS,
+            >(proof, &mut challenger, &parsed, claim.clone())
             .unwrap();
     }
+}
+
+fn prove_raw_fold_pipeline(
+    case: &PreparedCase,
+    args: &Args,
+    sweep: SweepConfig,
+) -> (
+    Accumulator<F, EF, F, DIGEST_ELEMS>,
+    AccumulationProof<F, EF, F, DIGEST_ELEMS>,
+) {
+    let union_num_vars =
+        case.material.witness_poly.num_variables() + case.num_claims.trailing_zeros() as usize;
+    let config = make_whir_config(union_num_vars, args, sweep);
+    let domainsep = make_domain_sep(&config);
+    let dft = Radix2DFTSmallBatch::<F>::default();
+    let mut challenger = seed_challenger(1000 + case.num_claims as u64, &domainsep);
+    LinearizedAccumulationProver::new(&config)
+        .accumulate::<_, F, <F as Field>::Packing, _, DIGEST_ELEMS>(
+            &dft,
+            &mut challenger,
+            &case.raw_fold_accumulators,
+            args.shift_queries,
+        )
+        .unwrap()
+}
+
+fn verify_raw_fold_pipeline(
+    case: &PreparedCase,
+    args: &Args,
+    sweep: SweepConfig,
+    proof: &AccumulationProof<F, EF, F, DIGEST_ELEMS>,
+) {
+    let union_num_vars =
+        case.material.witness_poly.num_variables() + case.num_claims.trailing_zeros() as usize;
+    let config = make_whir_config(union_num_vars, args, sweep);
+    let domainsep = make_domain_sep(&config);
+    let mut challenger = seed_challenger(1000 + case.num_claims as u64, &domainsep);
+    LinearizedAccumulationVerifier::new(&config)
+        .verify::<<F as Field>::Packing, F, <F as Field>::Packing, DIGEST_ELEMS>(
+            &mut challenger,
+            &case.raw_fold_public_inputs,
+            proof,
+        )
+        .unwrap();
+}
+
+fn prove_quasar_warp_pipeline(
+    case: &PreparedCase,
+    args: &Args,
+    sweep: SweepConfig,
+) -> (
+    QuasarFrontendOutput<F, EF, F, DIGEST_ELEMS>,
+    Accumulator<F, EF, F, DIGEST_ELEMS>,
+    AccumulationProof<F, EF, F, DIGEST_ELEMS>,
+) {
+    let quasar_config = make_whir_config(case.material.witness_poly.num_variables(), args, sweep);
+    let quasar_domainsep = make_domain_sep(&quasar_config);
+    let dft = Radix2DFTSmallBatch::<F>::default();
+    let mut quasar_challenger = seed_challenger(2000 + case.num_claims as u64, &quasar_domainsep);
+    let squashed = QuasarFrontendProver::new(&quasar_config)
+        .squash_to_accumulator::<_, F, <F as Field>::Packing, _, DIGEST_ELEMS>(
+            &dft,
+            &mut quasar_challenger,
+            &case.fresh_instances,
+        )
+        .unwrap();
+
+    let fold_config = make_whir_config(case.material.witness_poly.num_variables() + 1, args, sweep);
+    let fold_domainsep = make_domain_sep(&fold_config);
+    let mut fold_challenger = seed_challenger(3000 + case.num_claims as u64, &fold_domainsep);
+    let (folded, proof) = LinearizedAccumulationProver::new(&fold_config)
+        .accumulate::<_, F, <F as Field>::Packing, _, DIGEST_ELEMS>(
+            &dft,
+            &mut fold_challenger,
+            &[
+                case.running_accumulator.clone(),
+                squashed.accumulator.clone(),
+            ],
+            args.shift_queries,
+        )
+        .unwrap();
+    (squashed, folded, proof)
+}
+
+fn verify_quasar_warp_pipeline(
+    case: &PreparedCase,
+    args: &Args,
+    sweep: SweepConfig,
+    squashed: &QuasarFrontendOutput<F, EF, F, DIGEST_ELEMS>,
+    fold_proof: &AccumulationProof<F, EF, F, DIGEST_ELEMS>,
+) {
+    QuasarFrontendVerifier::verify(&case.fresh_public_inputs, squashed, &squashed.transcript)
+        .unwrap();
+
+    let fold_config = make_whir_config(case.material.witness_poly.num_variables() + 1, args, sweep);
+    let fold_domainsep = make_domain_sep(&fold_config);
+    let mut fold_challenger = seed_challenger(3000 + case.num_claims as u64, &fold_domainsep);
+    LinearizedAccumulationVerifier::new(&fold_config)
+        .verify::<<F as Field>::Packing, F, <F as Field>::Packing, DIGEST_ELEMS>(
+            &mut fold_challenger,
+            &[
+                case.running_accumulator.public_instance.clone(),
+                squashed.accumulator.public_instance.clone(),
+            ],
+            fold_proof,
+        )
+        .unwrap();
 }
 
 fn average_ms<FN: FnMut()>(repeats: usize, mut f: FN) -> f64 {
@@ -434,10 +538,138 @@ fn average_ms<FN: FnMut()>(repeats: usize, mut f: FN) -> f64 {
     start.elapsed().as_secs_f64() * 1000.0 / repeats as f64
 }
 
+fn accumulation_transcript_size_bytes(transcript: &AccumulationTranscript<F, EF>) -> usize {
+    size_of::<F>()
+        + transcript.ood_point.as_slice().len() * size_of::<EF>()
+        + size_of::<EF>()
+        + transcript.shift_query_indices.len() * size_of::<usize>()
+        + transcript.shift_query_answers.len() * size_of::<EF>()
+}
+
+fn quasar_transcript_size_bytes(transcript: &QuasarTranscript<F>) -> usize {
+    transcript.tau_q.len() * size_of::<F>() + transcript.weights.len() * size_of::<F>()
+}
+
+fn human_bytes(bytes: usize) -> String {
+    const KIB: f64 = 1024.0;
+    const MIB: f64 = 1024.0 * 1024.0;
+    let bytes_f = bytes as f64;
+    if bytes_f >= MIB {
+        format!("{:.2} MiB", bytes_f / MIB)
+    } else if bytes_f >= KIB {
+        format!("{:.2} KiB", bytes_f / KIB)
+    } else {
+        format!("{} B", bytes)
+    }
+}
+
+fn measure_no_fold(
+    case: &PreparedCase,
+    args: &Args,
+    sweep: SweepConfig,
+) -> (TimingMetrics, ArtifactMetrics) {
+    let prove_ms = average_ms(args.repeats, || {
+        let _ = prove_regular_pipeline(case, args, sweep);
+    });
+
+    let proofs = prove_regular_pipeline(case, args, sweep);
+    let verify_ms = average_ms(args.repeats, || {
+        verify_regular_pipeline(case, &proofs, args, sweep);
+    });
+
+    let proof_bytes = proofs
+        .iter()
+        .map(|(proof, _)| {
+            bincode::serialize(proof)
+                .expect("serialize regular proof")
+                .len()
+        })
+        .sum();
+
+    (
+        TimingMetrics {
+            prove_ms,
+            verify_ms,
+        },
+        ArtifactMetrics {
+            proof_bytes,
+            transcript_bytes: 0,
+            explicit_poly_bytes: case.num_claims * case.witness_bytes,
+        },
+    )
+}
+
+fn measure_raw_fold(
+    case: &PreparedCase,
+    args: &Args,
+    sweep: SweepConfig,
+) -> (TimingMetrics, ArtifactMetrics) {
+    let prove_ms = average_ms(args.repeats, || {
+        let _ = prove_raw_fold_pipeline(case, args, sweep);
+    });
+
+    let (_folded, proof) = prove_raw_fold_pipeline(case, args, sweep);
+    let verify_ms = average_ms(args.repeats, || {
+        verify_raw_fold_pipeline(case, args, sweep, &proof);
+    });
+
+    let transcript_bytes = accumulation_transcript_size_bytes(&proof.transcript);
+    let whir_bytes = bincode::serialize(&proof.whir_proof)
+        .expect("serialize raw-fold WHIR proof")
+        .len();
+
+    (
+        TimingMetrics {
+            prove_ms,
+            verify_ms,
+        },
+        ArtifactMetrics {
+            proof_bytes: whir_bytes + transcript_bytes,
+            transcript_bytes,
+            explicit_poly_bytes: 2 * case.num_claims * case.witness_bytes,
+        },
+    )
+}
+
+fn measure_quasar_warp(
+    case: &PreparedCase,
+    args: &Args,
+    sweep: SweepConfig,
+) -> (TimingMetrics, ArtifactMetrics) {
+    let prove_ms = average_ms(args.repeats, || {
+        let _ = prove_quasar_warp_pipeline(case, args, sweep);
+    });
+
+    let (quasar_output, _folded, fold_proof) = prove_quasar_warp_pipeline(case, args, sweep);
+    let verify_ms = average_ms(args.repeats, || {
+        verify_quasar_warp_pipeline(case, args, sweep, &quasar_output, &fold_proof);
+    });
+
+    let transcript_bytes = quasar_transcript_size_bytes(&quasar_output.transcript)
+        + accumulation_transcript_size_bytes(&fold_proof.transcript);
+    let whir_bytes = bincode::serialize(&fold_proof.whir_proof)
+        .expect("serialize quasar-warp WHIR proof")
+        .len();
+
+    (
+        TimingMetrics {
+            prove_ms,
+            verify_ms,
+        },
+        ArtifactMetrics {
+            proof_bytes: whir_bytes + transcript_bytes,
+            transcript_bytes,
+            explicit_poly_bytes: (case.num_claims + 4) * case.witness_bytes,
+        },
+    )
+}
+
 fn main() {
     let args = Args::parse();
     let sizes = parse_csv_usize(&args.sizes);
     let claims = parse_csv_usize(&args.claims);
+    let sweep_configs = parse_sweep_configs(&args);
+
     let out_path = Path::new(&args.out);
     if let Some(parent) = out_path.parent() {
         create_dir_all(parent).expect("create output directory");
@@ -445,7 +677,7 @@ fn main() {
     let mut out = File::create(out_path).expect("create output csv");
     writeln!(
         out,
-        "log_size,claims,folding_schedule,starting_log_inv_rate,rs_domain_initial_reduction_factor,no_fold_prove_ms,no_fold_verify_ms,raw_fold_prove_ms,raw_fold_verify_ms,quasar_warp_prove_ms,quasar_warp_verify_ms"
+        "log_size,claims,folding_schedule,starting_log_inv_rate,rs_domain_initial_reduction_factor,shift_queries,no_fold_prove_ms,no_fold_verify_ms,no_fold_prove_ms_per_claim,no_fold_verify_ms_per_claim,no_fold_proof_bytes,no_fold_transcript_bytes,no_fold_explicit_poly_bytes,raw_fold_prove_ms,raw_fold_verify_ms,raw_fold_prove_ms_per_claim,raw_fold_verify_ms_per_claim,raw_fold_proof_bytes,raw_fold_transcript_bytes,raw_fold_explicit_poly_bytes,raw_fold_prove_speedup_vs_no_fold,raw_fold_verify_speedup_vs_no_fold,quasar_warp_prove_ms,quasar_warp_verify_ms,quasar_warp_prove_ms_per_claim,quasar_warp_verify_ms_per_claim,quasar_warp_proof_bytes,quasar_warp_transcript_bytes,quasar_warp_explicit_poly_bytes,quasar_warp_prove_speedup_vs_no_fold,quasar_warp_verify_speedup_vs_no_fold"
     )
     .unwrap();
 
@@ -454,54 +686,85 @@ fn main() {
         None => args.folding_factor.to_string(),
     };
 
+    println!(
+        "Benchmark semantics: `claims` is batch size; `explicit_poly_bytes` is a deterministic memory proxy for materialized evaluation tables, not RSS."
+    );
+
     for size_log2 in sizes {
         let material = prepare_material(size_log2);
         println!("size=2^{size_log2}");
+
         for &num_claims in &claims {
             assert!(num_claims.is_power_of_two(), "claims must be power of two");
-            let no_fold_prove_ms = average_ms(args.repeats, || {
-                let _ = prove_regular_pipeline(&material, num_claims, &args);
-            });
+            let case = prepare_case(&material, num_claims);
 
-            let regular_proofs = prove_regular_pipeline(&material, num_claims, &args);
-            let no_fold_verify_ms = average_ms(args.repeats, || {
-                verify_regular_pipeline(&material, &regular_proofs, &args);
-            });
-            let raw_fold_prove_ms = average_ms(args.repeats, || {
-                let _ = prove_raw_fold_pipeline(&material, num_claims, &args);
-            });
-            let (_raw_folded, raw_fold_proof) =
-                prove_raw_fold_pipeline(&material, num_claims, &args);
-            let raw_fold_verify_ms = average_ms(args.repeats, || {
-                verify_raw_fold_pipeline(&material, num_claims, &args, &raw_fold_proof);
-            });
+            for sweep in &sweep_configs {
+                let (no_fold_time, no_fold_artifacts) = measure_no_fold(&case, &args, *sweep);
+                let (raw_fold_time, raw_fold_artifacts) = measure_raw_fold(&case, &args, *sweep);
+                let (quasar_time, quasar_artifacts) = measure_quasar_warp(&case, &args, *sweep);
 
-            let quasar_warp_prove_ms = average_ms(args.repeats, || {
-                let _ = prove_quasar_warp_pipeline(&material, num_claims, &args);
-            });
-            let (quasar_output, _folded, quasar_fold_proof) =
-                prove_quasar_warp_pipeline(&material, num_claims, &args);
-            let quasar_warp_verify_ms = average_ms(args.repeats, || {
-                verify_quasar_warp_pipeline(
-                    &material,
-                    num_claims,
-                    &args,
-                    &quasar_output,
-                    &quasar_fold_proof,
+                let claims_f64 = num_claims as f64;
+                let raw_fold_prove_speedup = no_fold_time.prove_ms / raw_fold_time.prove_ms;
+                let raw_fold_verify_speedup = no_fold_time.verify_ms / raw_fold_time.verify_ms;
+                let quasar_prove_speedup = no_fold_time.prove_ms / quasar_time.prove_ms;
+                let quasar_verify_speedup = no_fold_time.verify_ms / quasar_time.verify_ms;
+
+                println!(
+                    "  claims={num_claims}, rate=2^-{}, init_red={}: no_fold=({:.3},{:.3}) ms [{} proof, {} aux, {} poly] | raw_fold=({:.3},{:.3}) ms [{} proof, {} aux, {} poly] | quasar_warp=({:.3},{:.3}) ms [{} proof, {} aux, {} poly]",
+                    sweep.starting_log_inv_rate,
+                    sweep.rs_domain_initial_reduction_factor,
+                    no_fold_time.prove_ms,
+                    no_fold_time.verify_ms,
+                    human_bytes(no_fold_artifacts.proof_bytes),
+                    human_bytes(no_fold_artifacts.transcript_bytes),
+                    human_bytes(no_fold_artifacts.explicit_poly_bytes),
+                    raw_fold_time.prove_ms,
+                    raw_fold_time.verify_ms,
+                    human_bytes(raw_fold_artifacts.proof_bytes),
+                    human_bytes(raw_fold_artifacts.transcript_bytes),
+                    human_bytes(raw_fold_artifacts.explicit_poly_bytes),
+                    quasar_time.prove_ms,
+                    quasar_time.verify_ms,
+                    human_bytes(quasar_artifacts.proof_bytes),
+                    human_bytes(quasar_artifacts.transcript_bytes),
+                    human_bytes(quasar_artifacts.explicit_poly_bytes),
                 );
-            });
 
-            println!(
-                "  k={num_claims}: no_fold=({no_fold_prove_ms:.3},{no_fold_verify_ms:.3}) ms, raw_fold=({raw_fold_prove_ms:.3},{raw_fold_verify_ms:.3}) ms, quasar_warp=({quasar_warp_prove_ms:.3},{quasar_warp_verify_ms:.3}) ms"
-            );
-            writeln!(
-                out,
-                "{size_log2},{num_claims},{},{},{},{no_fold_prove_ms:.6},{no_fold_verify_ms:.6},{raw_fold_prove_ms:.6},{raw_fold_verify_ms:.6},{quasar_warp_prove_ms:.6},{quasar_warp_verify_ms:.6}",
-                folding_schedule_label,
-                args.starting_log_inv_rate,
-                args.rs_domain_initial_reduction_factor,
-            )
-            .unwrap();
+                writeln!(
+                    out,
+                    "{size_log2},{num_claims},{},{},{},{},{:.6},{:.6},{:.6},{:.6},{},{},{},{:.6},{:.6},{:.6},{:.6},{},{},{},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{},{},{},{:.6},{:.6}",
+                    folding_schedule_label,
+                    sweep.starting_log_inv_rate,
+                    sweep.rs_domain_initial_reduction_factor,
+                    args.shift_queries,
+                    no_fold_time.prove_ms,
+                    no_fold_time.verify_ms,
+                    no_fold_time.prove_ms / claims_f64,
+                    no_fold_time.verify_ms / claims_f64,
+                    no_fold_artifacts.proof_bytes,
+                    no_fold_artifacts.transcript_bytes,
+                    no_fold_artifacts.explicit_poly_bytes,
+                    raw_fold_time.prove_ms,
+                    raw_fold_time.verify_ms,
+                    raw_fold_time.prove_ms / claims_f64,
+                    raw_fold_time.verify_ms / claims_f64,
+                    raw_fold_artifacts.proof_bytes,
+                    raw_fold_artifacts.transcript_bytes,
+                    raw_fold_artifacts.explicit_poly_bytes,
+                    raw_fold_prove_speedup,
+                    raw_fold_verify_speedup,
+                    quasar_time.prove_ms,
+                    quasar_time.verify_ms,
+                    quasar_time.prove_ms / claims_f64,
+                    quasar_time.verify_ms / claims_f64,
+                    quasar_artifacts.proof_bytes,
+                    quasar_artifacts.transcript_bytes,
+                    quasar_artifacts.explicit_poly_bytes,
+                    quasar_prove_speedup,
+                    quasar_verify_speedup,
+                )
+                .unwrap();
+            }
         }
     }
 
