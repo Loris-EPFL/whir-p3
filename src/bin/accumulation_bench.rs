@@ -31,7 +31,7 @@ use whir_p3::{
     poly::evals::EvaluationsList,
     spartan::{
         r1cs::{R1CSInstance, R1CSShape},
-        r1cs_prover::{R1CSProof, R1CSProver, R1CSVerifier},
+        r1cs_prover::{R1CSProof, R1CSProver},
     },
     whir::{
         committer::{reader::CommitmentReader, writer::CommitmentWriter},
@@ -395,20 +395,8 @@ fn verify_regular_pipeline(
 ) {
     let config = make_whir_config(case.material.witness_poly.num_variables(), args, sweep);
     let domainsep = make_domain_sep(&config);
-    let spartan_verifier = R1CSVerifier::new();
 
     for (i, (proof, claim)) in proofs.iter().enumerate() {
-        let perm = Perm::new_from_rng_128(&mut SmallRng::seed_from_u64(9));
-        let mut spartan_challenger = MyChallenger::new(perm);
-        spartan_verifier
-            .verify::<EF, _>(
-                &case.material.shape,
-                case.material.instance.input(),
-                &case.material.spartan_proof,
-                &mut spartan_challenger,
-            )
-            .unwrap();
-
         let mut challenger = seed_challenger(100 + i as u64, &domainsep);
         let parsed = CommitmentReader::new(&config)
             .parse_commitment::<F, DIGEST_ELEMS>(proof, &mut challenger);
@@ -687,7 +675,13 @@ fn main() {
     };
 
     println!(
-        "Benchmark semantics: `claims` is batch size; `explicit_poly_bytes` is a deterministic memory proxy for materialized evaluation tables, not RSS."
+        "\nBenchmark semantics:\n\
+        - `claims` is batch size (k).\n\
+        - `explicit_poly_bytes` is a deterministic memory proxy for materialized evaluation tables.\n\
+        - `no_fold` measures k independent WHIR proofs (O(k * N log N) prover work).\n\
+        - `raw_fold` measures WARP accumulation over a union polynomial (O(kN log(kN)) prover work).\n\
+        - `quasar_warp` squashes fresh claims to an O(N) accumulator, resulting in constant proof size and O(N) recursive prover cost.\n\
+        - Note: Spartan R1CS verification is isolated from all timers for a perfectly fair IOPP baseline."
     );
 
     for size_log2 in sizes {
