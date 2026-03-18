@@ -1,6 +1,6 @@
-use alloc::vec::Vec;
 use core::marker::PhantomData;
 
+use alloc::vec::Vec;
 use p3_challenger::{CanObserve, FieldChallenger, GrindingChallenger};
 use p3_dft::TwoAdicSubgroupDft;
 use p3_field::{ExtensionField, Field, PackedValue, TwoAdicField};
@@ -12,16 +12,10 @@ use crate::{
         quasar::fresh::{FreshLinearInstance, FreshLinearInstancePublic},
     },
     fiat_shamir::errors::FiatShamirError,
-    parameters::ProtocolParameters,
-    poly::evals::EvaluationsList,
     spartan::encoding::eq_poly_at_index,
     whir::{
-        committer::{reader::CommitmentReader, writer::CommitmentWriter},
-        constraints::statement::{InitialClaim, LinearStatement},
-        parameters::WhirConfig,
-        proof::WhirProof,
-        prover::Prover as WhirProver,
-        verifier::{errors::VerifierError, Verifier as WhirVerifier},
+        committer::writer::CommitmentWriter, constraints::statement::LinearStatement,
+        parameters::WhirConfig, proof::WhirProof, verifier::errors::VerifierError,
     },
 };
 
@@ -29,8 +23,6 @@ use crate::{
 pub struct QuasarTranscript<F: Field> {
     pub tau_q: Vec<F>,
     pub weights: Vec<F>,
-    pub bridge_point: Vec<F>,
-    pub bridge_value: F,
 }
 
 impl<F: Field> QuasarTranscript<F> {
@@ -38,28 +30,11 @@ impl<F: Field> QuasarTranscript<F> {
     where
         Challenger: FieldChallenger<F> + GrindingChallenger<Witness = F>,
     {
-        let tau = (0..self.tau_q.len())
+        let sampled = (0..self.tau_q.len())
             .map(|_| challenger.sample())
             .collect::<Vec<_>>();
-        assert_eq!(tau, self.tau_q, "quasar tau mismatch");
-        let bridge = (0..self.bridge_point.len())
-            .map(|_| challenger.sample())
-            .collect::<Vec<_>>();
-        assert_eq!(bridge, self.bridge_point, "quasar bridge point mismatch");
+        assert_eq!(sampled, self.tau_q, "quasar transcript mismatch");
     }
-}
-
-#[derive(Clone, Debug)]
-pub struct QuasarFrontendProof<F, EF, W, const DIGEST_ELEMS: usize>
-where
-    F: Field,
-    EF: ExtensionField<F>,
-{
-    pub transcript: QuasarTranscript<F>,
-    pub union_proof: WhirProof<F, EF, W, DIGEST_ELEMS>,
-    pub union_claim: InitialClaim<F, EF>,
-    pub squashed_proof: WhirProof<F, EF, W, DIGEST_ELEMS>,
-    pub squashed_claim: InitialClaim<F, EF>,
 }
 
 #[derive(Clone, Debug)]
@@ -69,31 +44,7 @@ where
     EF: ExtensionField<F>,
 {
     pub accumulator: Accumulator<F, EF, W, DIGEST_ELEMS>,
-    pub proof: QuasarFrontendProof<F, EF, W, DIGEST_ELEMS>,
-}
-
-fn with_num_variables<EF, F, H, C, Challenger>(
-    config: &WhirConfig<EF, F, H, C, Challenger>,
-    num_variables: usize,
-) -> WhirConfig<EF, F, H, C, Challenger>
-where
-    F: TwoAdicField,
-    EF: ExtensionField<F> + TwoAdicField,
-    H: Clone,
-    C: Clone,
-    Challenger: FieldChallenger<F> + GrindingChallenger<Witness = F>,
-{
-    let params = ProtocolParameters {
-        starting_log_inv_rate: config.starting_log_inv_rate,
-        rs_domain_initial_reduction_factor: config.rs_domain_initial_reduction_factor,
-        folding_factor: config.folding_factor,
-        soundness_type: config.soundness_type,
-        security_level: config.security_level,
-        pow_bits: config.max_pow_bits,
-        merkle_hash: config.merkle_hash.clone(),
-        merkle_compress: config.merkle_compress.clone(),
-    };
-    WhirConfig::new(num_variables, params)
+    pub transcript: QuasarTranscript<F>,
 }
 
 fn sample_tau<F, Challenger>(challenger: &mut Challenger, batch_size: usize) -> Vec<F>
@@ -111,48 +62,12 @@ fn eq_weights<F: Field>(tau_q: &[F], batch_size: usize) -> Vec<F> {
         .collect()
 }
 
-fn eq_linear_claim<F: Field, EF: ExtensionField<F>>(
-    point: &[F],
-    value: F,
-) -> LinearStatement<F, EF> {
-    let mut statement = LinearStatement::<F, EF>::initialize(point.len());
-    let weights = EvaluationsList::new(
-        (0..(1usize << point.len()))
-            .map(|idx| eq_poly_at_index::<F, F>(idx, point))
-            .map(EF::from)
-            .collect(),
-    );
-    statement.add_constraint(weights, EF::from(value));
-    statement
-}
-
-fn eval_mle_at_point<F: Field>(poly: &EvaluationsList<F>, point: &[F]) -> F {
-    poly.as_slice()
-        .iter()
-        .enumerate()
-        .fold(F::ZERO, |acc, (idx, &w)| {
-            acc + w * eq_poly_at_index::<F, F>(idx, point)
-        })
-}
-
-fn build_union_witness<F: Field, EF: ExtensionField<F>>(
-    instances: &[FreshLinearInstance<F, EF>],
-) -> EvaluationsList<F> {
-    let witness_vars = instances[0].witness_poly.num_variables();
-    let batch_vars = instances.len().trailing_zeros() as usize;
-    let mut evals = Vec::with_capacity((1usize << witness_vars) * (1usize << batch_vars));
-    for instance in instances {
-        evals.extend_from_slice(instance.witness_poly.as_slice());
-    }
-    EvaluationsList::new(evals)
-}
-
 fn squash_witnesses<F: Field, EF: ExtensionField<F>>(
     instances: &[FreshLinearInstance<F, EF>],
     weights: &[F],
-) -> EvaluationsList<F> {
+) -> crate::poly::evals::EvaluationsList<F> {
     let num_variables = instances[0].witness_poly.num_variables();
-    let mut squashed = EvaluationsList::zero(num_variables);
+    let mut squashed = crate::poly::evals::EvaluationsList::zero(num_variables);
     for (instance, &coeff) in instances.iter().zip(weights.iter()) {
         squashed
             .iter_mut()
@@ -162,51 +77,36 @@ fn squash_witnesses<F: Field, EF: ExtensionField<F>>(
     squashed
 }
 
-fn build_union_linear_claim<F: Field, EF: ExtensionField<F>>(
+fn squash_linear_claims_shared_support<F: Field, EF: ExtensionField<F>>(
     instances: &[FreshLinearInstance<F, EF>],
     weights: &[F],
-    bridge_point: &[F],
-    bridge_value: F,
 ) -> LinearStatement<F, EF> {
-    let witness_vars = instances[0].linear_claim.num_variables();
-    let batch_vars = instances.len().trailing_zeros() as usize;
-    let total_vars = witness_vars + batch_vars;
-    let block_size = 1 << witness_vars;
-    let mut statement = LinearStatement::<F, EF>::initialize(total_vars);
+    let num_variables = instances[0].linear_claim.num_variables();
+    let (base_weights, _) = instances[0]
+        .linear_claim
+        .iter()
+        .next()
+        .expect("one linear claim per fresh instance");
 
-    for (idx, (instance, &coeff_f)) in instances.iter().zip(weights.iter()).enumerate() {
+    let mut combined_target = EF::ZERO;
+    for (instance, &coeff_f) in instances.iter().zip(weights.iter()) {
         let coeff = EF::from(coeff_f);
         let (claim_weights, &target) = instance
             .linear_claim
             .iter()
             .next()
             .expect("one linear claim per fresh instance");
-        let mut extended = EvaluationsList::zero(total_vars);
-        let offset = idx * block_size;
-        extended.as_mut_slice()[offset..offset + block_size]
-            .copy_from_slice(claim_weights.as_slice());
-        extended.as_mut_slice()[offset..offset + block_size]
-            .iter_mut()
-            .for_each(|w| *w *= coeff);
-        statement.add_constraint(extended, coeff * target);
+        assert_eq!(
+            claim_weights.as_slice(),
+            base_weights.as_slice(),
+            "Quasar frontend currently requires identical linear-claim support across fresh instances"
+        );
+        combined_target += coeff * target;
     }
 
-    let _ = bridge_point;
-    let _ = bridge_value;
-    statement
-}
-
-fn add_union_bridge_constraint<F: Field, EF: ExtensionField<F>>(
-    statement: &mut LinearStatement<F, EF>,
-    tau_q: &[F],
-    bridge_point: &[F],
-    bridge_value: F,
-) {
-    let mut full_point = bridge_point.to_vec();
-    full_point.extend_from_slice(tau_q);
-    let bridge_claim = eq_linear_claim::<F, EF>(&full_point, bridge_value);
-    let (weights, &target) = bridge_claim.iter().next().unwrap();
-    statement.add_constraint(weights.clone(), target);
+    let mut linear_claim = LinearStatement::<F, EF>::initialize(num_variables);
+    linear_claim.add_constraint(base_weights.clone(), combined_target);
+    linear_claim
 }
 
 #[derive(Debug)]
@@ -227,7 +127,7 @@ where
         Self(config)
     }
 
-    pub fn squash_and_prove<P, W, PW, Dft, const DIGEST_ELEMS: usize>(
+    pub fn squash_to_accumulator<P, W, PW, Dft, const DIGEST_ELEMS: usize>(
         &self,
         dft: &Dft,
         challenger: &mut Challenger,
@@ -240,12 +140,10 @@ where
         PW: PackedValue<Value = W> + Eq + Send + Sync,
         H: CryptographicHasher<F, [W; DIGEST_ELEMS]>
             + CryptographicHasher<P, [PW; DIGEST_ELEMS]>
-            + Sync
-            + Clone,
+            + Sync,
         C: PseudoCompressionFunction<[W; DIGEST_ELEMS], 2>
             + PseudoCompressionFunction<[PW; DIGEST_ELEMS], 2>
-            + Sync
-            + Clone,
+            + Sync,
         Challenger: CanObserve<Hash<F, W, DIGEST_ELEMS>>,
         [W; DIGEST_ELEMS]: serde::Serialize + for<'de> serde::Deserialize<'de>,
     {
@@ -257,63 +155,24 @@ where
 
         let tau_q = sample_tau(challenger, fresh_instances.len());
         let weights = eq_weights(&tau_q, fresh_instances.len());
-        let bridge_point = (0..fresh_instances[0].witness_poly.num_variables())
-            .map(|_| challenger.sample())
-            .collect::<Vec<_>>();
-
         let squashed_witness = squash_witnesses(fresh_instances, &weights);
-        let bridge_value = eval_mle_at_point(&squashed_witness, &bridge_point);
-        let squashed_claim = eq_linear_claim::<F, EF>(&bridge_point, bridge_value);
+        let squashed_claim = squash_linear_claims_shared_support(fresh_instances, &weights);
+        debug_assert!(squashed_claim.verify(&squashed_witness));
 
-        let union_witness = build_union_witness(fresh_instances);
-        let union_num_vars = union_witness.num_variables();
-        let mut union_claim =
-            build_union_linear_claim(fresh_instances, &weights, &bridge_point, bridge_value);
-        add_union_bridge_constraint(&mut union_claim, &tau_q, &bridge_point, bridge_value);
-
-        let union_config = with_num_variables(self.0, union_num_vars);
-        let mut union_statement =
-            union_config.initial_statement_with_linear(union_witness, union_claim.clone());
-        let union_initial_claim = union_statement.normalize_claim();
-        let mut union_proof = WhirProof::<F, EF, W, DIGEST_ELEMS>::from_whir_config(&union_config);
-        let union_commitment = CommitmentWriter::new(&union_config)
-            .commit::<_, P, W, PW, DIGEST_ELEMS>(
-                dft,
-                &mut union_proof,
-                challenger,
-                &mut union_statement,
-            )?;
-        WhirProver(&union_config).prove::<_, P, W, PW, DIGEST_ELEMS>(
-            dft,
-            &mut union_proof,
-            challenger,
-            &union_statement,
-            union_commitment,
-        )?;
-
-        let mut squashed_statement = self
+        let mut statement = self
             .0
             .initial_statement_with_linear(squashed_witness.clone(), squashed_claim.clone());
-        let squashed_initial_claim = squashed_statement.normalize_claim();
-        let mut squashed_proof = WhirProof::<F, EF, W, DIGEST_ELEMS>::from_whir_config(self.0);
-        let squashed_commitment = CommitmentWriter::new(self.0)
-            .commit::<_, P, W, PW, DIGEST_ELEMS>(
-                dft,
-                &mut squashed_proof,
-                challenger,
-                &mut squashed_statement,
-            )?;
-        WhirProver(self.0).prove::<_, P, W, PW, DIGEST_ELEMS>(
+        let mut commit_only_proof = WhirProof::<F, EF, W, DIGEST_ELEMS>::from_whir_config(self.0);
+        let _commitment = CommitmentWriter::new(self.0).commit::<_, P, W, PW, DIGEST_ELEMS>(
             dft,
-            &mut squashed_proof,
+            &mut commit_only_proof,
             challenger,
-            &squashed_statement,
-            squashed_commitment,
+            &mut statement,
         )?;
 
         let accumulator = Accumulator::new(
             AccumulatorInstance {
-                commitment_root: squashed_proof.initial_commitment,
+                commitment_root: commit_only_proof.initial_commitment,
                 linear_claim: squashed_claim,
                 _marker: PhantomData,
             },
@@ -324,131 +183,67 @@ where
 
         Ok(QuasarFrontendOutput {
             accumulator,
-            proof: QuasarFrontendProof {
-                transcript: QuasarTranscript {
-                    tau_q,
-                    weights,
-                    bridge_point,
-                    bridge_value,
-                },
-                union_proof,
-                union_claim: union_initial_claim,
-                squashed_proof,
-                squashed_claim: squashed_initial_claim,
-            },
+            transcript: QuasarTranscript { tau_q, weights },
         })
     }
 }
 
 #[derive(Debug)]
-pub struct QuasarFrontendVerifier<'a, EF, F, H, C, Challenger>(
-    &'a WhirConfig<EF, F, H, C, Challenger>,
-)
-where
-    F: Field,
-    EF: ExtensionField<F>;
+pub struct QuasarFrontendVerifier;
 
-impl<'a, EF, F, H, C, Challenger> QuasarFrontendVerifier<'a, EF, F, H, C, Challenger>
-where
-    F: TwoAdicField + Ord,
-    EF: ExtensionField<F> + TwoAdicField,
-    Challenger: FieldChallenger<F> + GrindingChallenger<Witness = F>,
-{
-    pub const fn new(config: &'a WhirConfig<EF, F, H, C, Challenger>) -> Self {
-        Self(config)
-    }
-
-    pub fn verify<P, W, PW, const DIGEST_ELEMS: usize>(
-        &self,
-        challenger: &mut Challenger,
+impl QuasarFrontendVerifier {
+    pub fn verify<F, EF, W, const DIGEST_ELEMS: usize>(
         fresh_instances: &[FreshLinearInstancePublic<F, EF>],
         output: &QuasarFrontendOutput<F, EF, W, DIGEST_ELEMS>,
+        transcript: &QuasarTranscript<F>,
     ) -> Result<AccumulatorInstance<F, EF, W, DIGEST_ELEMS>, VerifierError>
     where
-        P: PackedValue<Value = F> + Eq + Send + Sync,
-        W: PackedValue<Value = W> + Eq + Send + Sync + Copy + Default,
-        PW: PackedValue<Value = W> + Eq + Send + Sync,
-        H: CryptographicHasher<F, [W; DIGEST_ELEMS]>
-            + CryptographicHasher<P, [PW; DIGEST_ELEMS]>
-            + Sync
-            + Clone,
-        C: PseudoCompressionFunction<[W; DIGEST_ELEMS], 2>
-            + PseudoCompressionFunction<[PW; DIGEST_ELEMS], 2>
-            + Sync
-            + Clone,
-        Challenger: CanObserve<Hash<F, W, DIGEST_ELEMS>>,
-        [W; DIGEST_ELEMS]: serde::Serialize + for<'de> serde::Deserialize<'de>,
+        F: Field,
+        EF: ExtensionField<F>,
+        W: Copy,
     {
-        output.proof.transcript.replay(challenger);
-        let expected_weights = eq_weights(&output.proof.transcript.tau_q, fresh_instances.len());
-        if expected_weights != output.proof.transcript.weights {
+        let expected_weights = eq_weights(&transcript.tau_q, fresh_instances.len());
+        if expected_weights != transcript.weights {
             return Err(VerifierError::StirChallengeFailed {
                 challenge_id: 0,
                 details: "quasar weights mismatch".into(),
             });
         }
 
-        let bridge_target = output.proof.transcript.bridge_value;
-
-        let witness_vars = fresh_instances[0].linear_claim.num_variables();
-        let batch_vars = fresh_instances.len().trailing_zeros() as usize;
-        let total_vars = witness_vars + batch_vars;
-        let block_size = 1 << witness_vars;
-        let mut expected_union_claim = LinearStatement::<F, EF>::initialize(total_vars);
-        for (idx, (instance, &coeff_f)) in fresh_instances
+        let (base_weights, _) = fresh_instances[0]
+            .linear_claim
             .iter()
-            .zip(expected_weights.iter())
-            .enumerate()
-        {
+            .next()
+            .expect("one linear claim per fresh instance");
+        let mut combined_target = EF::ZERO;
+        for (instance, &coeff_f) in fresh_instances.iter().zip(expected_weights.iter()) {
             let coeff = EF::from(coeff_f);
-            let (weights, &target) = instance.linear_claim.iter().next().unwrap();
-            let mut extended = EvaluationsList::zero(total_vars);
-            let offset = idx * block_size;
-            extended.as_mut_slice()[offset..offset + block_size]
-                .copy_from_slice(weights.as_slice());
-            extended.as_mut_slice()[offset..offset + block_size]
-                .iter_mut()
-                .for_each(|w| *w *= coeff);
-            expected_union_claim.add_constraint(extended, coeff * target);
-        }
-        add_union_bridge_constraint(
-            &mut expected_union_claim,
-            &output.proof.transcript.tau_q,
-            &output.proof.transcript.bridge_point,
-            bridge_target,
-        );
-        if expected_union_claim != output.proof.union_claim.linear_statement {
-            return Err(VerifierError::StirChallengeFailed {
-                challenge_id: 0,
-                details: "quasar union claim mismatch".into(),
-            });
+            let (claim_weights, &target) = instance
+                .linear_claim
+                .iter()
+                .next()
+                .expect("one linear claim per fresh instance");
+            if claim_weights.as_slice() != base_weights.as_slice() {
+                return Err(VerifierError::StirChallengeFailed {
+                    challenge_id: 0,
+                    details: "quasar fresh supports mismatch".into(),
+                });
+            }
+            combined_target += coeff * target;
         }
 
-        let union_config = with_num_variables(self.0, total_vars);
-        let parsed_union = CommitmentReader::new(&union_config)
-            .parse_commitment::<W, DIGEST_ELEMS>(&output.proof.union_proof, challenger);
-        WhirVerifier::new(&union_config).verify_with_initial_claim::<P, W, PW, DIGEST_ELEMS>(
-            &output.proof.union_proof,
-            challenger,
-            &parsed_union,
-            output.proof.union_claim.clone(),
-        )?;
-
-        let parsed_sq = CommitmentReader::new(self.0)
-            .parse_commitment::<W, DIGEST_ELEMS>(&output.proof.squashed_proof, challenger);
-        WhirVerifier::new(self.0).verify_with_initial_claim::<P, W, PW, DIGEST_ELEMS>(
-            &output.proof.squashed_proof,
-            challenger,
-            &parsed_sq,
-            output.proof.squashed_claim.clone(),
-        )?;
-
-        let expected_sq_claim =
-            eq_linear_claim::<F, EF>(&output.proof.transcript.bridge_point, bridge_target);
-        if expected_sq_claim != output.accumulator.public_instance.linear_claim {
+        let expected_target = output
+            .accumulator
+            .public_instance
+            .linear_claim
+            .iter()
+            .next()
+            .unwrap()
+            .1;
+        if *expected_target != combined_target {
             return Err(VerifierError::StirChallengeFailed {
                 challenge_id: 0,
-                details: "quasar squashed claim mismatch".into(),
+                details: "quasar squashed target mismatch".into(),
             });
         }
 
@@ -558,38 +353,38 @@ mod tests {
         let (_, instance1) = make_shape_and_instance(16);
         let spartan = R1CSProver::new();
         let proof0 = prove_instance(&instance0, 1);
-        let proof1 = prove_instance(&instance1, 2);
-        let fresh0 = FreshLinearInstance::from_spartan_proof(
+        let _proof1 = prove_instance(&instance1, 1);
+        let fresh0 = FreshLinearInstance::from_shared_linearization_points(
             &shape,
-            &proof0,
             spartan.prepare_witness(&instance0),
+            &proof0.eval_claims.rx,
+            &proof0.eval_claims.ry,
             EF::from_u64(3),
         );
-        let fresh1 = FreshLinearInstance::from_spartan_proof(
+        let fresh1 = FreshLinearInstance::from_shared_linearization_points(
             &shape,
-            &proof1,
             spartan.prepare_witness(&instance1),
-            EF::from_u64(7),
+            &proof0.eval_claims.rx,
+            &proof0.eval_claims.ry,
+            EF::from_u64(3),
         );
 
         let config = make_whir_config(fresh0.witness_poly.num_variables());
         let dft = Radix2DFTSmallBatch::<F>::default();
         let mut prover_challenger = seed_challenger(&config, 9);
         let output = QuasarFrontendProver::new(&config)
-            .squash_and_prove::<_, F, <F as Field>::Packing, _, 8>(
+            .squash_to_accumulator::<_, F, <F as Field>::Packing, _, 8>(
                 &dft,
                 &mut prover_challenger,
                 &[fresh0.clone(), fresh1.clone()],
             )
             .unwrap();
 
-        let mut verifier_challenger = seed_challenger(&config, 9);
-        let result = QuasarFrontendVerifier::new(&config)
-            .verify::<<F as Field>::Packing, F, <F as Field>::Packing, 8>(
-                &mut verifier_challenger,
-                &[fresh0.public(), fresh1.public()],
-                &output,
-            );
+        let result = QuasarFrontendVerifier::verify(
+            &[fresh0.public(), fresh1.public()],
+            &output,
+            &output.transcript,
+        );
         assert!(result.is_ok());
     }
 
@@ -599,18 +394,20 @@ mod tests {
         let (_, instance1) = make_shape_and_instance(16);
         let spartan = R1CSProver::new();
         let proof0 = prove_instance(&instance0, 3);
-        let proof1 = prove_instance(&instance1, 4);
-        let fresh0 = FreshLinearInstance::from_spartan_proof(
+        let _proof1 = prove_instance(&instance1, 3);
+        let fresh0 = FreshLinearInstance::from_shared_linearization_points(
             &shape,
-            &proof0,
             spartan.prepare_witness(&instance0),
+            &proof0.eval_claims.rx,
+            &proof0.eval_claims.ry,
             EF::from_u64(5),
         );
-        let fresh1 = FreshLinearInstance::from_spartan_proof(
+        let fresh1 = FreshLinearInstance::from_shared_linearization_points(
             &shape,
-            &proof1,
             spartan.prepare_witness(&instance1),
-            EF::from_u64(7),
+            &proof0.eval_claims.rx,
+            &proof0.eval_claims.ry,
+            EF::from_u64(5),
         );
 
         let running_acc = initialize_accumulator_from_spartan::<F, EF, F, 8>(
@@ -625,7 +422,7 @@ mod tests {
         let dft = Radix2DFTSmallBatch::<F>::default();
         let mut quasar_challenger = seed_challenger(&config, 10);
         let squashed = QuasarFrontendProver::new(&config)
-            .squash_and_prove::<_, F, <F as Field>::Packing, _, 8>(
+            .squash_to_accumulator::<_, F, <F as Field>::Packing, _, 8>(
                 &dft,
                 &mut quasar_challenger,
                 &[fresh0, fresh1],

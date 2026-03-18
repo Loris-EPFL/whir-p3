@@ -328,7 +328,7 @@ fn prove_quasar_warp_pipeline(
     let dft = Radix2DFTSmallBatch::<F>::default();
     let mut quasar_challenger = seed_challenger(2000 + num_claims as u64, &quasar_domainsep);
     let squashed = QuasarFrontendProver::new(&quasar_config)
-        .squash_and_prove::<_, F, <F as Field>::Packing, _, 8>(
+        .squash_to_accumulator::<_, F, <F as Field>::Packing, _, 8>(
             &dft,
             &mut quasar_challenger,
             &fresh_instances,
@@ -363,20 +363,11 @@ fn verify_quasar_warp_pipeline(
     squashed: &whir_p3::accumulation::quasar::QuasarFrontendOutput<F, EF, F, 8>,
     fold_proof: &whir_p3::accumulation::proof::AccumulationProof<F, EF, F, 8>,
 ) {
-    let quasar_config = make_whir_config(material.witness_poly.num_variables(), args);
-    let quasar_domainsep = make_domain_sep(&quasar_config);
-    let mut quasar_challenger = seed_challenger(2000 + num_claims as u64, &quasar_domainsep);
     let fresh_public = build_fresh_instances(material, num_claims)
         .into_iter()
         .map(|fresh| fresh.public())
         .collect::<Vec<_>>();
-    QuasarFrontendVerifier::new(&quasar_config)
-        .verify::<<F as Field>::Packing, F, <F as Field>::Packing, 8>(
-            &mut quasar_challenger,
-            &fresh_public,
-            squashed,
-        )
-        .unwrap();
+    QuasarFrontendVerifier::verify(&fresh_public, squashed, &squashed.transcript).unwrap();
 
     let running_acc = initialize_accumulator_from_spartan::<F, EF, F, 8>(
         &material.shape,
