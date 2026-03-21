@@ -258,3 +258,106 @@ The current codebase now has a two-layer accumulation structure:
    - folds committed accumulator-style objects and proves them with WHIR
 
 The new Quasar frontend is intentionally implemented as a separate layer so it can reuse the backend unchanged.
+
+### LinearStatement vs PESAT: Design Note
+
+The academic papers (WARP, Quasar) describe accumulation over general **PESAT** (Polynomial Equation SATisfiability) relations of the form:
+
+```
+P*(β, w) = η
+```
+
+where `P*` is an arbitrary polynomial constraint map. However, this implementation uses **`LinearStatement`** which represents simpler inner-product claims:
+
+```
+⟨weights, polynomial_evaluations⟩ = target
+```
+
+**Why this is sufficient for R1CS/Spartan:**
+
+The Spartan proving system reduces R1CS satisfiability to a set of *linearized claims* after the sumcheck protocol. These linearized claims are precisely inner-product relations:
+
+1. **Witness evaluation claim**: `⟨eq(ry, ·), z⟩ = z_eval` where `z` is the extended witness
+2. **Matrix-vector claims**: `⟨Ã(rx, ·), z⟩ = a_eval`, `⟨B̃(rx, ·), z⟩ = b_eval`, `⟨C̃(rx, ·), z⟩ = c_eval`
+
+These four claims are batched into a single `LinearStatement` using a random challenge. The key insight is:
+
+- **General PESAT** → after linearization → **Inner-product claims** → `LinearStatement`
+
+Therefore, `LinearStatement` is the correct abstraction for accumulating Spartan proofs. The WARP/Quasar soundness arguments apply because:
+
+1. Inner-product claims are a special case of PESAT (degree-1 polynomial constraints)
+2. The batching and folding operations preserve the linear structure
+3. The terminal decider verifies the final inner-product claim via WHIR
+
+This design choice simplifies the implementation while maintaining full compatibility with R1CS-based proof systems. For constraint systems that produce non-linear claims after the sumcheck phase, the `LinearStatement` abstraction would need to be generalized to full PESAT.
+
+### Paper Alignment Analysis
+
+This section documents how the implementation aligns with (and deviates from) the original papers: **WARP**, **Quasar**, and **Symphony**.
+
+#### WARP Paper Alignment
+
+The WARP paper (Bünz et al.) describes an accumulation scheme using:
+
+| WARP Paper Concept | Implementation | Status |
+|---|---|---|
+| **Twin constrained codes** `C[(α, μ), (Pb, β, η)]` | `LinearStatement` (inner-product claims only) | ✅ Simplified - sufficient for R1CS |
+| **Codeword batching** (§2.4) | `union_polynomial_from_accumulators` + exponential batching | ✅ Implemented (uses `r⁰, r¹, r², ...` weights) |
+| **Twin constraint pseudo-batching** (§2.6) | Implicit via `LinearStatement` batching | ⚠️ Simplified - no explicit affine interpolation |
+| **Out-of-domain sampling** | `ood_point`, `ood_answer` in `AccumulationTranscript` | ✅ Implemented |
+| **Shift queries** (in-domain sampling) | `shift_query_indices`, `shift_query_answers` | ✅ Implemented |
+| **Straightline extraction via erasure** | Relies on WHIR's extraction | ✅ Inherited from WHIR |
+
+**Key Deviation**: The WARP paper uses **affine interpolation** `(1-γ)·f₀ + γ·f₁` for twin constraint pseudo-batching (Construction 3, §2.6). Our implementation uses **exponential batching** `Σᵢ rⁱ·fᵢ` which is equivalent in soundness but differs in the algebraic structure. This is a valid simplification for the 2-to-1 case.
+
+#### Quasar Paper Alignment
+
+The Quasar paper (Zheng et al.) describes a multi-instance accumulation scheme:
+
+| Quasar Paper Concept | Implementation | Status |
+|---|---|---|
+| **Union polynomial** `w̃∪(Y,X) = Σₖ eq̃ₖ₋₁(Y)·w̃⁽ᵏ⁾(X)` | `build_union_polynomial` (concatenation layout) | ✅ Implemented |
+| **Multi-cast reduction** (ℓ→1) | `QuasarFrontendProver::squash_to_accumulator` | ✅ Implemented |
+| **eq-polynomial weighting** `eq̃ₖ₋₁(τ)` | `eq_weights` function | ✅ Implemented |
+| **Partial evaluation check** `w̃∪(τ, rx) = w̃(rx)` | Implicit via target verification | ⚠️ Simplified |
+| **Sublinear verifier** (O(log ℓ) CRCs) | Current impl is O(ℓ) linear claims | ⚠️ Not optimized |
+| **Sumcheck over Y hypercube** | Direct target computation | ⚠️ Simplified |
+
+**Key Simplification**: The Quasar paper's full protocol runs a sumcheck over the instance-index hypercube Y to reduce to a single evaluation claim. Our `QuasarFrontendProver` simplifies this by:
+1. Computing eq-weights directly from `τ`
+2. Squashing witnesses via linear combination
+3. Verifying the target relationship algebraically
+
+This achieves the same soundness but doesn't provide the sublinear verifier complexity that Quasar optimizes for. For our use case (feeding into WARP backend), this is acceptable.
+
+#### Symphony Paper Alignment
+
+The Symphony paper (Chen) describes a CP-SNARK wrapper for avoiding Fiat-Shamir circuits:
+
+| Symphony Paper Concept | Implementation | Status |
+|---|---|---|
+| **High-arity folding** (compress ℓnp statements) | Quasar frontend | ✅ Analogous |
+| **Commit-and-prove compiler** (§6) | Not yet implemented | 🔴 Phase 4 TODO |
+| **Fiat-Shamir in circuit avoidance** | Current design uses standard FS | 🔴 Phase 4 TODO |
+| **CP-SNARK relation Rcp** (Eq. 55) | Would wrap accumulation transcript | 🔴 Phase 4 TODO |
+| **Two-layer folding** (§8) | Quasar→WARP is 2-layer | ✅ Conceptually aligned |
+
+**Phase 4 Work Required**: To complete Symphony alignment, we need:
+1. A CP-SNARK that proves the folding verifier's transcript is correctly computed
+2. Commitment to prover messages `(mᵢ)` during accumulation
+3. Final SNARK proof for the output relation `Ro`
+
+The current `TerminalDecider` uses WHIR to prove the final accumulator, but doesn't wrap the Fiat-Shamir transcript in a CP-SNARK. This is the main gap for full Symphony compliance.
+
+#### Implementation vs Paper Summary
+
+| Component | Papers | Implementation | Gap |
+|---|---|---|---|
+| **Accumulator structure** | Twin constraints (α,μ) + PESAT (β,η) | `LinearStatement` only | Acceptable for R1CS |
+| **Batching method** | Affine interpolation | Exponential batching | Equivalent soundness |
+| **Quasar reduction** | Full sumcheck over Y | Direct eq-weighting | Acceptable |
+| **Symphony wrapper** | CP-SNARK + SNARK | WHIR proof only | **Phase 4 TODO** |
+| **Extraction** | Straightline erasure-based | WHIR's extraction | Inherited |
+
+The implementation is **sound and functional** for the current use case (R1CS/Spartan accumulation), with the main remaining work being the Symphony CP-SNARK wrapper for Phase 4.
