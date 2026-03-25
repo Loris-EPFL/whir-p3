@@ -24,7 +24,8 @@ use whir_p3::{
     accumulation::warp::{
         accumulator::{FreshInstance, WarpAccumulator, WarpAccumulatorInstance, WarpAccumulatorWitness},
         decider::warp_decide_algebraic,
-        fold::{warp_fold_prove, warp_fold_verify, FreshInstancePublic, WarpFoldResult},
+        encoding::{codeword_size, merkle_commit_codeword},
+        fold::{warp_fold_prove_rs_committed, warp_fold_verify, FreshInstancePublic, RSEncodingConfig, WarpFoldResult},
     },
     fiat_shamir::domain_separator::DomainSeparator,
     parameters::{errors::SecurityAssumption, FoldingFactor, ProtocolParameters},
@@ -47,6 +48,8 @@ type MyHash = PaddingFreeSponge<Perm, 16, 8, 8>;
 type MyCompress = TruncatedPermutation<Perm, 2, 8, 16>;
 type MyChallenger = DuplexChallenger<F, Perm, 16, 8>;
 const DIGEST: usize = 8;
+const RS_FOLDING_FACTOR: usize = 2;
+const RS_LOG_INV_RATE: usize = 1; // rate = 1/2
 
 fn parse_csv(s: &str) -> Vec<usize> {
     s.split(',').map(str::trim).filter(|s| !s.is_empty())
@@ -111,7 +114,6 @@ fn make_shape(num_cons: usize, num_vars: usize, num_inputs: usize) -> R1CSShape<
 }
 
 fn make_witness_poly(num_cons: usize, num_witness: usize, seed: u64) -> EvaluationsList<F> {
-    // Pad to next power of 2 for WHIR compatibility
     let padded_len = num_witness.next_power_of_two();
     let mut w = vec![F::ZERO; padded_len];
     for i in 0..num_cons.min(num_witness / 2) {
@@ -193,30 +195,30 @@ fn run_no_fold(
 // WARP pipeline: sumcheck folds + 1 terminal WHIR proof
 // ============================================================================
 
-fn make_initial_acc(num_witness: usize, log_n: usize, log_m: usize, num_inputs: usize) -> WarpAccumulator<F, F, F, DIGEST> {
+fn make_initial_acc(num_witness: usize, log_code: usize, log_m: usize, num_inputs: usize) -> WarpAccumulator<F, F, F, DIGEST> {
     WarpAccumulator::new(
         WarpAccumulatorInstance {
             commitment_root: [F::ZERO; DIGEST],
-            eval_point: vec![F::ZERO; log_n],
+            eval_point: vec![F::ZERO; log_code],
             eval_claim: F::ZERO,
             pesat_tau: vec![F::ZERO; log_m],
             pesat_x: vec![F::ZERO; num_inputs],
             pesat_target: F::ZERO,
         },
         WarpAccumulatorWitness {
-            codeword: EvaluationsList::new(vec![F::ZERO; 1 << log_n]),
+            codeword: EvaluationsList::new(vec![F::ZERO; 1 << log_code]),
             witness: vec![F::ZERO; num_witness],
         },
     )
 }
 
-fn rebuild_acc(result: &WarpFoldResult<F>, log_n: usize) -> WarpAccumulator<F, F, F, DIGEST> {
+fn rebuild_acc(result: &WarpFoldResult<F>) -> WarpAccumulator<F, F, F, DIGEST> {
     let eval_claim = result.witness.codeword.evaluate_hypercube_base(
         &MultilinearPoint::new(result.instance.eval_point.clone()),
     );
     WarpAccumulator::new(
         WarpAccumulatorInstance {
-            commitment_root: [F::ZERO; DIGEST],
+            commitment_root: result.commitment_root,
             eval_point: result.instance.eval_point.clone(),
             eval_claim,
             pesat_tau: result.instance.pesat_tau.clone(),
@@ -236,14 +238,26 @@ fn run_warp(
     num_witness: usize,
     num_inputs: usize,
 ) -> (f64, f64, f64, usize, bool) {
-    let num_vars_y: usize = 1 << shape.num_poly_vars_y();
-    let log_n = num_vars_y.trailing_zeros() as usize;
+    let witness_num_vars = num_witness.trailing_zeros() as usize;
+    let log_code = witness_num_vars + RS_LOG_INV_RATE;
     let log_m = shape.num_cons().next_power_of_two().trailing_zeros() as usize;
 
-    let mut acc = make_initial_acc(num_witness, log_n, log_m, num_inputs);
+    let rs_config = RSEncodingConfig::new(RS_FOLDING_FACTOR, RS_LOG_INV_RATE);
+    let dft = Radix2DFTSmallBatch::<F>::default();
+    let perm = Perm::new_from_rng_128(&mut SmallRng::seed_from_u64(42));
+    let merkle_hash = MyHash::new(perm.clone());
+    let merkle_compress = MyCompress::new(perm);
+
+    let mut acc = make_initial_acc(num_witness, log_code, log_m, num_inputs);
     let initial_wit_bytes = acc.witness.witness.len() * size_of::<F>();
 
-    // FOLD STEPS (sumcheck only, no WHIR proof)
+    // Per-phase timing accumulators (only active with bench-timing feature)
+    #[cfg(feature = "bench-timing")]
+    let (mut phase_rs, mut phase_merkle, mut phase_twin, mut phase_shift,
+         mut phase_ood, mut phase_eval_batch, mut phase_clone) =
+        (0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64);
+
+    // FOLD STEPS with RS encoding + Merkle commitment
     let fold_start = Instant::now();
     for step in 0..num_steps {
         let fresh: Vec<FreshInstance<F>> = (0..batch)
@@ -257,24 +271,50 @@ fn run_warp(
         let log_l = l.trailing_zeros() as usize;
         let tau: Vec<F> = (0..log_l).map(|i| F::from_u64(step as u64 * 10 + i as u64 + 42)).collect();
 
+        let mh = merkle_hash.clone();
+        let mc = merkle_compress.clone();
         let mut ctr = step as u64 * 1000;
-        let result = warp_fold_prove(shape, &fresh, &acc, F::from_u64(7), &tau,
-            |_| { ctr += 1; F::from_u64(ctr + 500) });
-        acc = rebuild_acc(&result, log_n);
+        let result = warp_fold_prove_rs_committed(shape, &fresh, &acc, F::from_u64(7), &tau,
+            &rs_config, &dft,
+            |_| { ctr += 1; F::from_u64(ctr + 500) },
+            |codeword, folding_factor| {
+                let (root, _tree) = merkle_commit_codeword::<
+                    F, F, <F as Field>::Packing, <F as Field>::Packing,
+                    MyHash, MyCompress, DIGEST,
+                >(codeword, folding_factor, mh.clone(), mc.clone());
+                root
+            },
+        );
+        #[cfg(feature = "bench-timing")]
+        {
+            use whir_p3::accumulation::warp::fold::WarpFoldTimings;
+            let t = &result.timings;
+            phase_rs += t.rs_encode_us;
+            phase_merkle += t.merkle_fresh_us + t.merkle_folded_us;
+            phase_twin += t.twin_sumcheck_us;
+            phase_shift += t.shift_queries_us;
+            phase_ood += t.ood_sampling_us;
+            phase_eval_batch += t.eval_batch_us;
+            phase_clone += t.codeword_clone_us;
+        }
+        acc = rebuild_acc(&result);
     }
     let fold_us = fold_start.elapsed().as_micros() as f64;
 
     // TERMINAL WHIR PROOF (once at the end)
     let ds = make_domain_sep(config);
-    let dft = Radix2DFTSmallBatch::<F>::default();
 
+    // TERMINAL WHIR PROOF on the accumulated raw witness (WHIR handles RS encoding internally)
+    // Pad to power-of-2 (the folded witness may be num_vars_y - num_inputs which isn't pow2)
+    let mut witness_vec = acc.witness.witness.clone();
+    let padded_len = witness_vec.len().next_power_of_two();
+    witness_vec.resize(padded_len, F::ZERO);
+    let witness_poly = EvaluationsList::new(witness_vec);
     let decide_start = Instant::now();
-    {
-        // Build a linear claim encoding the accumulated eval claim
-        let mut linear_claim = LinearStatement::<F, EF>::initialize(log_n);
-        // The WHIR proof proves the polynomial satisfies the linear claim
+    let terminal_proof = {
+        let linear_claim = LinearStatement::<F, EF>::initialize(witness_num_vars);
         let mut statement = config.initial_statement_with_linear(
-            acc.witness.codeword.clone(),
+            witness_poly.clone(),
             linear_claim,
         );
         let mut proof = WhirProof::<F, EF, F, DIGEST>::from_whir_config(config);
@@ -289,45 +329,41 @@ fn run_warp(
             .prove::<_, <F as Field>::Packing, F, <F as Field>::Packing, DIGEST>(
                 &dft, &mut proof, &mut challenger, &statement, commitment,
             ).unwrap();
-    }
+        proof
+    };
     let decide_us = decide_start.elapsed().as_micros() as f64;
 
-    // VERIFY terminal proof
+    // VERIFY terminal proof (reuse the proof, don't re-prove)
     let verify_start = Instant::now();
     {
-        let mut linear_claim = LinearStatement::<F, EF>::initialize(log_n);
         let initial_claim = InitialClaim {
-            eq_statement: EqStatement::initialize(log_n),
-            linear_statement: linear_claim,
+            eq_statement: EqStatement::initialize(witness_num_vars),
+            linear_statement: LinearStatement::<F, EF>::initialize(witness_num_vars),
         };
-        // Re-run prove to get the proof object (in a real system the proof would be passed)
-        let mut statement = config.initial_statement_with_linear(
-            acc.witness.codeword.clone(),
-            LinearStatement::<F, EF>::initialize(log_n),
-        );
-        let mut proof = WhirProof::<F, EF, F, DIGEST>::from_whir_config(config);
-        let mut challenger = seed_challenger(999, &ds);
-        let commitment = CommitmentWriter::new(config)
-            .commit::<_, <F as Field>::Packing, F, <F as Field>::Packing, DIGEST>(
-                &dft, &mut proof, &mut challenger, &mut statement,
-            ).unwrap();
-        WhirProver(config)
-            .prove::<_, <F as Field>::Packing, F, <F as Field>::Packing, DIGEST>(
-                &dft, &mut proof, &mut challenger, &statement, commitment,
-            ).unwrap();
-
         let mut v_challenger = seed_challenger(999, &ds);
         let parsed = CommitmentReader::new(config)
-            .parse_commitment::<F, DIGEST>(&proof, &mut v_challenger);
+            .parse_commitment::<F, DIGEST>(&terminal_proof, &mut v_challenger);
         WhirVerifier::new(config)
             .verify_with_initial_claim::<<F as Field>::Packing, F, <F as Field>::Packing, DIGEST>(
-                &proof, &mut v_challenger, &parsed, initial_claim,
+                &terminal_proof, &mut v_challenger, &parsed, initial_claim,
             ).unwrap();
     }
     let verify_us = verify_start.elapsed().as_micros() as f64;
 
-    let final_wit_bytes = acc.witness.witness.len() * size_of::<F>();
+    let final_wit_bytes = acc.witness.witness.len().next_power_of_two() * size_of::<F>();
     let fixed = final_wit_bytes == initial_wit_bytes;
+
+    #[cfg(feature = "bench-timing")]
+    {
+        let total = phase_rs + phase_merkle + phase_twin + phase_shift
+            + phase_ood + phase_eval_batch + phase_clone;
+        eprintln!(
+            "  [phase breakdown] rs_encode={phase_rs}us merkle={phase_merkle}us twin_sc={phase_twin}us \
+             shift={phase_shift}us ood={phase_ood}us eval_batch={phase_eval_batch}us \
+             clone={phase_clone}us | accounted={total}us / fold={:.0}us",
+            fold_us,
+        );
+    }
 
     (fold_us, decide_us, verify_us, final_wit_bytes, fixed)
 }
@@ -362,12 +398,17 @@ fn main() {
         let num_inputs = 8;
         let shape = make_shape(num_cons.min(num_vars / 2), num_vars, num_inputs);
         let num_vars_y: usize = 1 << shape.num_poly_vars_y();
-        let num_witness = num_vars_y - num_inputs;
-        let log_n = num_vars_y.trailing_zeros() as usize;
+        // Pad witness to power of 2 for RS encoding compatibility
+        let num_witness = (num_vars_y - num_inputs).next_power_of_two();
+        let witness_num_vars = num_witness.trailing_zeros() as usize;
+        let log_code = witness_num_vars + RS_LOG_INV_RATE;
 
-        let config = make_whir_config(log_n);
+        // WHIR config uses witness dimension — WHIR handles its own RS expansion internally.
+        // No-fold: raw witness → WHIR (encodes internally)
+        // WARP: fold operates on RS codewords (2^log_code), terminal WHIR gets raw witness (2^witness_num_vars)
+        let config = make_whir_config(witness_num_vars);
 
-        println!("=== log2(witness) = {size_log2} (n={num_vars_y}, M={num_cons}) ===");
+        println!("=== log2(witness) = {size_log2} (n={num_vars_y}, M={num_cons}, code=2^{log_code}) ===");
         println!();
         println!("{:>6} | {:>10} {:>10} {:>10} {:>10} | {:>10} {:>10} {:>10} | {:>7} {:>10}",
             "steps",

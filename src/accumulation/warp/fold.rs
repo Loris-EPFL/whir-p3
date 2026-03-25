@@ -13,7 +13,7 @@
 use alloc::{vec, vec::Vec};
 
 use p3_dft::TwoAdicSubgroupDft;
-use p3_field::{Field, TwoAdicField};
+use p3_field::{Field, PrimeField64, TwoAdicField};
 
 use crate::spartan::{encoding::eq_poly_at_index, r1cs::R1CSShape};
 
@@ -55,21 +55,71 @@ impl Default for WarpFoldConfig {
     }
 }
 
+/// Per-phase timing breakdown for a single WARP fold step (in microseconds).
+#[derive(Clone, Debug, Default)]
+pub struct WarpFoldTimings {
+    /// RS encoding of fresh witnesses.
+    pub rs_encode_us: u64,
+    /// Merkle commitment of fresh codewords.
+    pub merkle_fresh_us: u64,
+    /// Twin-constraint sumcheck (log l rounds).
+    pub twin_sumcheck_us: u64,
+    /// Shift queries (proximity spot checks).
+    pub shift_queries_us: u64,
+    /// OOD sampling (MLE evaluations at random points).
+    pub ood_sampling_us: u64,
+    /// Merkle commitment of folded codeword.
+    pub merkle_folded_us: u64,
+    /// Evaluation batching sumcheck (log n rounds).
+    pub eval_batch_us: u64,
+    /// Codeword clone for shift query verification.
+    pub codeword_clone_us: u64,
+}
+
+/// A single shift query opening: position + queried row values + Merkle auth path.
+#[derive(Clone, Debug)]
+pub struct ShiftQueryOpening<F: Field, const DIGEST_ELEMS: usize = 8> {
+    /// The queried position (row index in the codeword matrix).
+    pub position: usize,
+    /// For each input codeword i: the row values at this position (width = 2^folding_factor).
+    pub input_values: Vec<Vec<F>>,
+    /// Merkle authentication paths for each input codeword (one per input).
+    pub auth_paths: Vec<Vec<[F; DIGEST_ELEMS]>>,
+    /// The expected folded value at this position: Σ_i eq(γ, i) * input_i[pos].
+    pub expected_folded: Vec<F>,
+}
+
 /// Result of a WARP fold step.
 #[derive(Clone, Debug)]
-pub struct WarpFoldResult<F: Field> {
+pub struct WarpFoldResult<F: Field, const DIGEST_ELEMS: usize = 8> {
+    /// Merkle root of the folded codeword (zero if not committed).
+    pub commitment_root: [F; DIGEST_ELEMS],
+    /// Merkle roots of the fresh input codewords (empty if not committed).
+    pub fresh_commitment_roots: Vec<[F; DIGEST_ELEMS]>,
     /// The output accumulator instance (public).
     pub instance: WarpFoldedInstance<F>,
     /// The output accumulator witness (prover only).
     pub witness: WarpAccumulatorWitness<F>,
     /// Twin-constraint sumcheck round polynomials (for the verifier).
-    pub sumcheck_round_polys: Vec<crate::accumulation::protogalaxy::UnivariatePoly<F>>,
+    pub sumcheck_round_polys: Vec<Vec<F>>,
     /// Twin-constraint sumcheck challenges (derived from transcript).
     pub sumcheck_challenges: Vec<F>,
     /// Fresh codeword evaluation claims μ_i = f_i[0] (needed by verifier for target).
     pub fresh_eval_claims: Vec<F>,
     /// Fresh PESAT targets η_i (0 for valid instances, needed by verifier).
     pub fresh_pesat_targets: Vec<F>,
+    /// Shift query openings (proximity check proof data).
+    pub shift_queries: Vec<ShiftQueryOpening<F, DIGEST_ELEMS>>,
+    /// OOD (out-of-domain) sample points (for list decoding disambiguation).
+    pub ood_points: Vec<Vec<F>>,
+    /// OOD evaluations: ν_k = f̃(ζ_k) where f̃ is the folded codeword's MLE.
+    pub ood_answers: Vec<F>,
+    /// Evaluation batching sumcheck round polynomials.
+    pub eval_batch_round_polys: Vec<Vec<F>>,
+    /// Evaluation batching sumcheck challenges.
+    pub eval_batch_challenges: Vec<F>,
+    /// Per-phase timing breakdown.
+    pub timings: WarpFoldTimings,
 }
 
 /// The folded instance produced by the WARP fold (before commitment).
@@ -310,12 +360,20 @@ pub fn warp_fold_prove<F: Field>(
         .collect();
 
     WarpFoldResult {
+        commitment_root: [F::ZERO; 8],
+        fresh_commitment_roots: vec![],
         instance,
         witness,
         sumcheck_round_polys: round_polys,
         sumcheck_challenges: challenges,
         fresh_eval_claims,
         fresh_pesat_targets,
+        shift_queries: vec![],
+        ood_points: vec![],
+        ood_answers: vec![],
+        eval_batch_round_polys: vec![],
+        eval_batch_challenges: vec![],
+        timings: WarpFoldTimings::default(),
     }
 }
 
@@ -337,7 +395,208 @@ pub fn warp_fold_prove_rs<F, Dft>(
     mut transcript_round: impl FnMut(&[F]) -> F,
 ) -> WarpFoldResult<F>
 where
-    F: TwoAdicField,
+    F: TwoAdicField + PrimeField64,
+    Dft: TwoAdicSubgroupDft<F>,
+{
+    warp_fold_prove_rs_inner(
+        shape, fresh_instances, acc, omega, tau_challenges,
+        rs_config, dft, &mut transcript_round, None::<fn(&crate::poly::evals::EvaluationsList<F>, usize) -> [F; 8]>,
+    )
+}
+
+/// WARP fold prover with RS encoding and Merkle commitment.
+///
+/// Same as `warp_fold_prove_rs` but also commits the folded codeword to a
+/// Merkle tree via the provided `commit_fn`. The root is stored in the result's
+/// `commitment_root` field.
+pub fn warp_fold_prove_rs_committed<F, Dft>(
+    shape: &R1CSShape<F>,
+    fresh_instances: &[FreshInstance<F>],
+    acc: &WarpAccumulator<F, F, F, 8>,
+    omega: F,
+    tau_challenges: &[F],
+    rs_config: &RSEncodingConfig,
+    dft: &Dft,
+    mut transcript_round: impl FnMut(&[F]) -> F,
+    commit_fn: impl Fn(&crate::poly::evals::EvaluationsList<F>, usize) -> [F; 8],
+) -> WarpFoldResult<F>
+where
+    F: TwoAdicField + PrimeField64,
+    Dft: TwoAdicSubgroupDft<F>,
+{
+    warp_fold_prove_rs_inner(
+        shape, fresh_instances, acc, omega, tau_challenges,
+        rs_config, dft, &mut transcript_round, Some(commit_fn),
+    )
+}
+
+/// Build eq(tau, ·) table for arbitrary field-element coordinates in O(n).
+///
+/// Same binary tree expansion as the Spartan prover's `compute_eq_table`,
+/// but takes `&[F]` coordinates directly instead of being hardcoded to the
+/// Spartan-specific bit ordering.
+///
+/// Convention: bit j of the boolean index maps to tau[j] (LSB-first),
+/// matching `eq_poly_at_index`.
+fn compute_eq_table_generic<F: Field>(tau: &[F]) -> Vec<F> {
+    let s = tau.len();
+    let n = 1usize << s;
+    let mut table = vec![F::ZERO; n];
+    table[0] = F::ONE;
+
+    // Process in reverse so tau[0] ends up as LSB (matching eq_poly_at_index)
+    for j in (0..s).rev() {
+        let tau_j = tau[j];
+        let one_minus = F::ONE - tau_j;
+        let half = 1usize << (s - 1 - j);
+        for i in (0..half).rev() {
+            table[2 * i + 1] = table[i] * tau_j;
+            table[2 * i] = table[i] * one_minus;
+        }
+    }
+    table
+}
+
+/// Evaluation batching sumcheck: reduces multiple eval claims on a codeword
+/// to a single `(α, μ)` claim via a degree-2 table-based sumcheck.
+///
+/// Given claims `{(p_k, v_k)}` asserting `f̃(p_k) = v_k`, this proves:
+///   Σ_{x ∈ {0,1}^{log n}} B(x) · f(x) = T
+/// where B(x) = Σ_k ρ^k · eq(p_k, x) and T = Σ_k ρ^k · v_k.
+///
+/// After the sumcheck, `f̃(α) = μ` where α is the sumcheck challenge point.
+fn evaluation_batching_sumcheck<F: Field>(
+    codeword: &[F],
+    eval_claims: &[(Vec<F>, F)], // (point, value) pairs
+    rho: F,
+    log_n: usize,
+    transcript_round: &mut impl FnMut(&[F]) -> F,
+) -> (Vec<F>, F, Vec<Vec<F>>, Vec<F>) {
+    let n = 1usize << log_n;
+    assert_eq!(codeword.len(), n);
+
+    // Build the batched eq table: B[x] = Σ_k ρ^k · eq(p_k, x)
+    //
+    // Optimization from [CBBZ23, Sec 3.8.1]: for claims at BOOLEAN points
+    // (shift queries), eq(boolean_p, x) is 1 at exactly one index and 0
+    // elsewhere, so we just add ρ^k to that single entry in O(1) instead
+    // of building a full O(n) eq table.
+    let mut b_table = vec![F::ZERO; n];
+    let mut initial_claim = F::ZERO;
+    let mut rho_pow = F::ONE;
+
+    for (point, v) in eval_claims {
+        // Check if this is a boolean point (all coordinates are 0 or 1)
+        let is_boolean = point.iter().all(|&c| c == F::ZERO || c == F::ONE);
+
+        if is_boolean {
+            // Boolean point: eq(p, x) = 1 only at x = p, so just add ρ^k at index p.
+            // Convert boolean point to index (LSB-first: point[0] = bit 0)
+            let mut idx = 0usize;
+            for (bit, &c) in point.iter().enumerate() {
+                if c == F::ONE {
+                    idx |= 1 << bit;
+                }
+            }
+            b_table[idx] += rho_pow;
+        } else {
+            // Arbitrary field point: build full eq table in O(n)
+            let eq_table = compute_eq_table_generic(point);
+            for idx in 0..n {
+                b_table[idx] += rho_pow * eq_table[idx];
+            }
+        }
+
+        initial_claim += rho_pow * *v;
+        rho_pow *= rho;
+    }
+
+    // Sanity check: Σ_x B[x] · f[x] should equal T
+    #[cfg(debug_assertions)]
+    {
+        let check: F = (0..n).map(|i| b_table[i] * codeword[i]).sum();
+        assert_eq!(check, initial_claim, "eval batching: initial claim mismatch");
+    }
+
+    // Table-based degree-2 sumcheck: Σ_x B(x) · f(x) = T
+    let mut f_table = codeword.to_vec();
+    let mut current_claim = initial_claim;
+    let mut round_polys = Vec::with_capacity(log_n);
+    let mut challenges = Vec::with_capacity(log_n);
+
+    for _round in 0..log_n {
+        let half = f_table.len() / 2;
+        let mut evals = [F::ZERO; 3];
+
+        for i in 0..half {
+            let b_lo = b_table[2 * i];
+            let b_hi = b_table[2 * i + 1];
+            let f_lo = f_table[2 * i];
+            let f_hi = f_table[2 * i + 1];
+
+            let b_d = b_hi - b_lo;
+            let f_d = f_hi - f_lo;
+
+            // t=0
+            evals[0] += b_lo * f_lo;
+            // t=1
+            evals[1] += b_hi * f_hi;
+            // t=2
+            let b_2 = b_lo + b_d.double();
+            let f_2 = f_lo + f_d.double();
+            evals[2] += b_2 * f_2;
+        }
+
+        assert_eq!(
+            evals[0] + evals[1], current_claim,
+            "eval batching sumcheck: round claim mismatch"
+        );
+
+        let round_evals = evals.to_vec();
+
+        let r = transcript_round(&round_evals);
+        // Evaluate degree-2 polynomial at r via Lagrange interpolation from evals at 0,1,2
+        let e0 = round_evals[0];
+        let e1 = round_evals[1];
+        let e2 = round_evals[2];
+        let c2 = (e2 - e1.double() + e0) * F::TWO.inverse();
+        let c1 = e1 - e0 - c2;
+        current_claim = e0 + c1 * r + c2 * r * r;
+
+        challenges.push(r);
+        round_polys.push(round_evals);
+
+        // Bind both tables
+        for i in 0..half {
+            b_table[i] = b_table[2 * i] + r * (b_table[2 * i + 1] - b_table[2 * i]);
+            f_table[i] = f_table[2 * i] + r * (f_table[2 * i + 1] - f_table[2 * i]);
+        }
+        b_table.truncate(half);
+        f_table.truncate(half);
+    }
+
+    // After all rounds: f_table[0] = f̃(α), b_table[0] = B̃(α)
+    // current_claim = B̃(α) · f̃(α) = μ_batched
+    // The new eval claim is: f̃(α) = f_table[0]
+    let new_eval_point = challenges.clone();
+    let new_eval_claim = f_table[0];
+
+    (new_eval_point, new_eval_claim, round_polys, challenges)
+}
+
+fn warp_fold_prove_rs_inner<F, Dft>(
+    shape: &R1CSShape<F>,
+    fresh_instances: &[FreshInstance<F>],
+    acc: &WarpAccumulator<F, F, F, 8>,
+    omega: F,
+    tau_challenges: &[F],
+    rs_config: &RSEncodingConfig,
+    dft: &Dft,
+    transcript_round: &mut impl FnMut(&[F]) -> F,
+    commit_fn: Option<impl Fn(&crate::poly::evals::EvaluationsList<F>, usize) -> [F; 8]>,
+) -> WarpFoldResult<F>
+where
+    F: TwoAdicField + PrimeField64,
     Dft: TwoAdicSubgroupDft<F>,
 {
     let l1 = fresh_instances.len();
@@ -355,30 +614,72 @@ where
     let code_len = acc.witness.codeword.as_slice().len();
     let log_n = code_len.trailing_zeros() as usize;
 
+    let num_shift_queries = if commit_fn.is_some() {
+        WarpFoldConfig::default().num_shift_queries
+    } else {
+        0
+    };
+
     let constraints = shape_to_sparse_constraints(shape);
 
+    #[cfg(feature = "bench-timing")]
+    let mut timings = WarpFoldTimings::default();
+    #[cfg(not(feature = "bench-timing"))]
+    let timings = WarpFoldTimings::default();
+
     // ========================================
-    // Phase 1: RS-encode fresh witnesses
+    // Phase 1: RS-encode fresh witnesses + commit
     // ========================================
-    let witness_num_vars = (fresh_instances[0].witness.len()).trailing_zeros() as usize;
+    #[cfg(feature = "bench-timing")]
+    let _phase_start = std::time::Instant::now();
+    let _witness_num_vars = (fresh_instances[0].witness.len()).trailing_zeros() as usize;
 
     let mut codewords: Vec<Vec<F>> = Vec::with_capacity(l);
     codewords.push(acc.witness.codeword.as_slice().to_vec());
+
+    let mut fresh_commitment_roots = Vec::new();
     for inst in fresh_instances {
         let witness_poly = crate::poly::evals::EvaluationsList::new(inst.witness.clone());
         let cw = rs_encode(&witness_poly, rs_config.folding_factor, rs_config.log_inv_rate, dft);
+        // Commit fresh codeword if commit function provided
+        if let Some(ref f) = commit_fn {
+            fresh_commitment_roots.push(f(&cw, rs_config.folding_factor));
+        }
         codewords.push(cw.as_slice().to_vec());
     }
     while codewords.len() < l {
         codewords.push(vec![F::ZERO; code_len]);
     }
 
+    #[cfg(feature = "bench-timing")]
+    {
+        timings.rs_encode_us = _phase_start.elapsed().as_micros() as u64;
+    }
+
+    // Save original codewords for shift query verification (before sumcheck consumes them)
+    #[cfg(feature = "bench-timing")]
+    let _phase_start = std::time::Instant::now();
+    let saved_codewords = if num_shift_queries > 0 {
+        codewords.clone()
+    } else {
+        vec![]
+    };
+    #[cfg(feature = "bench-timing")]
+    {
+        timings.codeword_clone_us = _phase_start.elapsed().as_micros() as u64;
+    }
+
     // Witness (z = x||w) table — uses raw witnesses, NOT codewords
+    // All z-vectors must have the same length (num_vars_y), padded if necessary.
     let num_vars_y = 1 << shape.num_poly_vars_y();
     let mut witnesses: Vec<Vec<F>> = Vec::with_capacity(l);
-    witnesses.push(build_z_vector(&acc.instance.pesat_x, &acc.witness.witness));
+    let mut z_acc = build_z_vector(&acc.instance.pesat_x, &acc.witness.witness);
+    z_acc.resize(num_vars_y, F::ZERO);
+    witnesses.push(z_acc);
     for inst in fresh_instances {
-        witnesses.push(build_z_vector(&inst.public_input, &inst.witness));
+        let mut z = build_z_vector(&inst.public_input, &inst.witness);
+        z.resize(num_vars_y, F::ZERO);
+        witnesses.push(z);
     }
     while witnesses.len() < l {
         witnesses.push(vec![F::ZERO; num_vars_y]);
@@ -412,12 +713,20 @@ where
     // ========================================
     // Phase 2: Twin-constraint sumcheck
     // ========================================
+    #[cfg(feature = "bench-timing")]
+    let _phase_start = std::time::Instant::now();
+
     let expected_num_coeffs = 2 + (log_n + 1).max(log_m + 2);
 
     let (round_polys, challenges) = twin_constraint::twin_constraint_sumcheck(
         &mut codewords, &mut witnesses, &mut alphas, &mut betas, &mut tau_evals,
-        &constraints, omega, log_l, expected_num_coeffs, &mut transcript_round,
+        &constraints, omega, log_l, expected_num_coeffs, &mut *transcript_round,
     );
+
+    #[cfg(feature = "bench-timing")]
+    {
+        timings.twin_sumcheck_us = _phase_start.elapsed().as_micros() as u64;
+    }
 
     // ========================================
     // Phase 3: Extract folded output
@@ -432,7 +741,8 @@ where
 
     let eta = evaluate_bundled_r1cs(shape, &folded_beta_tau, &folded_z);
 
-    let instance = WarpFoldedInstance {
+    #[allow(unused_mut)]
+    let mut instance = WarpFoldedInstance {
         eval_point: folded_alpha,
         pesat_tau: folded_beta_tau,
         pesat_x: folded_x.to_vec(),
@@ -458,13 +768,242 @@ where
         })
         .collect();
 
+    // Commit the folded codeword if a commit function was provided
+    #[cfg(feature = "bench-timing")]
+    let _phase_start = std::time::Instant::now();
+    let commitment_root = match &commit_fn {
+        Some(f) => f(&witness.codeword, rs_config.folding_factor),
+        None => [F::ZERO; 8],
+    };
+    #[cfg(feature = "bench-timing")]
+    {
+        timings.merkle_folded_us = _phase_start.elapsed().as_micros() as u64;
+    }
+
+    // ========================================
+    // Phase 4: Shift queries (proximity check)
+    // ========================================
+    #[cfg(feature = "bench-timing")]
+    let _phase_start = std::time::Instant::now();
+    // Verify that the folded codeword is consistent with the eq-weighted
+    // linear combination of the original input codewords at random positions.
+    let shift_queries = if num_shift_queries > 0 {
+        // Precompute eq(γ, i) weights from sumcheck challenges
+        let eq_weights: Vec<F> = (0..l)
+            .map(|idx| eq_poly_at_index::<F, F>(idx, &challenges))
+            .collect();
+
+        // Sample shift positions from the transcript
+        // Use transcript_round to derive deterministic positions (Fiat-Shamir)
+        let height = code_len >> rs_config.folding_factor;
+        let mut queries = Vec::with_capacity(num_shift_queries);
+
+        for q in 0..num_shift_queries {
+            // Derive position from transcript (Fiat-Shamir)
+            let pos_challenge = transcript_round(&[F::from_usize(q)]);
+            let pos = pos_challenge.as_canonical_u64() as usize % height;
+
+            let width = 1usize << rs_config.folding_factor;
+            let row_start = pos * width;
+            let row_end = row_start + width;
+
+            // Collect input codeword values at this row
+            let input_values: Vec<Vec<F>> = saved_codewords
+                .iter()
+                .map(|cw| cw[row_start..row_end].to_vec())
+                .collect();
+
+            // Compute expected folded row: Σ_i eq(γ, i) * cw_i[row]
+            let mut expected_folded = vec![F::ZERO; width];
+            for (i, row_vals) in input_values.iter().enumerate() {
+                for (j, &val) in row_vals.iter().enumerate() {
+                    expected_folded[j] += eq_weights[i] * val;
+                }
+            }
+
+            // Verify against the actual folded codeword
+            let actual_folded: Vec<F> = witness.codeword.as_slice()[row_start..row_end].to_vec();
+            assert_eq!(
+                expected_folded, actual_folded,
+                "shift query {q} at row {pos}: folded codeword inconsistent with input linear combination"
+            );
+
+            queries.push(ShiftQueryOpening {
+                position: pos,
+                input_values,
+                auth_paths: vec![], // Merkle auth paths added when verifier is implemented
+                expected_folded,
+            });
+        }
+
+        queries
+    } else {
+        vec![]
+    };
+    #[cfg(feature = "bench-timing")]
+    {
+        timings.shift_queries_us = _phase_start.elapsed().as_micros() as u64;
+    }
+
+    // ========================================
+    // Phase 5: OOD sampling (list decoding disambiguation)
+    // ========================================
+    #[cfg(feature = "bench-timing")]
+    let _phase_start = std::time::Instant::now();
+    // Evaluate the folded codeword's MLE at random out-of-domain points.
+    // This pins the prover to a unique codeword in the list-decoding regime.
+    let num_ood_samples = if commit_fn.is_some() {
+        WarpFoldConfig::default().num_ood_samples
+    } else {
+        0
+    };
+
+    let (ood_points, ood_answers) = if num_ood_samples > 0 {
+        let mut points: Vec<Vec<F>> = Vec::with_capacity(num_ood_samples);
+        let mut answers: Vec<F> = Vec::with_capacity(num_ood_samples);
+
+        for k in 0..num_ood_samples {
+            // Squeeze a univariate challenge from the transcript and expand to
+            // a multilinear point (same pattern as WHIR's CommitmentWriter).
+            let univariate_challenge = transcript_round(
+                &[F::from_usize(k + num_shift_queries + 1000)],
+            );
+            let point = crate::poly::multilinear::MultilinearPoint::expand_from_univariate(
+                univariate_challenge,
+                log_n,
+            );
+
+            // Evaluate the folded codeword's MLE at this OOD point
+            let eval = witness.codeword.evaluate_hypercube_base::<F>(&point);
+
+            // Absorb the answer into the transcript (Fiat-Shamir binding)
+            let _ = transcript_round(&[eval]);
+
+            points.push(point.into_iter().collect());
+            answers.push(eval);
+        }
+
+        (points, answers)
+    } else {
+        (vec![], vec![])
+    };
+    #[cfg(feature = "bench-timing")]
+    {
+        timings.ood_sampling_us = _phase_start.elapsed().as_micros() as u64;
+    }
+
+    // ========================================
+    // Phase 6: Evaluation batching sumcheck
+    // ========================================
+    #[cfg(feature = "bench-timing")]
+    let _phase_start = std::time::Instant::now();
+    // Batch all eval claims (folded alpha + OOD + shift queries) into one (α, μ).
+    let (eval_batch_round_polys, eval_batch_challenges) = if commit_fn.is_some()
+        && (!ood_points.is_empty() || !shift_queries.is_empty())
+    {
+        // Collect all evaluation claims on the folded codeword
+        let mut eval_claims: Vec<(Vec<F>, F)> = Vec::new();
+
+        // 1. The twin-constraint sumcheck's folded eval claim
+        // instance.eval_point is in eq_poly_at_index convention (LSB-first).
+        // evaluate_hypercube_base uses MultilinearPoint convention (MSB-first).
+        // We reverse for evaluate_hypercube_base, but keep LSB-first for eq_poly_at_index.
+        let alpha_msb: Vec<F> = instance.eval_point.iter().rev().cloned().collect();
+        let alpha_eval = witness.codeword.evaluate_hypercube_base::<F>(
+            &crate::poly::multilinear::MultilinearPoint::new(alpha_msb),
+        );
+        eval_claims.push((instance.eval_point.clone(), alpha_eval));
+
+        // 2. OOD claims
+        // OOD points were computed via MultilinearPoint (MSB-first convention) but
+        // eq_poly_at_index in the batching sumcheck uses LSB-first. Reverse to match.
+        for (point, &answer) in ood_points.iter().zip(ood_answers.iter()) {
+            let mut reversed = point.clone();
+            reversed.reverse();
+            eval_claims.push((reversed, answer));
+        }
+
+        // 3. Shift query claims (in-domain evaluation claims)
+        // Each shift query at position `pos` with row values `v` asserts:
+        // f̃(binary(pos * width + j)) = v[j] for each column j.
+        // For batching, we use a single point per query: the first column.
+        let width = 1usize << rs_config.folding_factor;
+        for sq in &shift_queries {
+            // Convert row position to a multilinear point for the first column element
+            let flat_idx = sq.position * width;
+            let point: Vec<F> = (0..log_n)
+                .map(|bit| {
+                    if (flat_idx >> bit) & 1 == 1 {
+                        F::ONE
+                    } else {
+                        F::ZERO
+                    }
+                })
+                .collect();
+            let val = witness.codeword.as_slice()[flat_idx];
+            eval_claims.push((point, val));
+        }
+
+        // Sample batching challenge ρ from transcript
+        let rho = transcript_round(&[F::from_usize(2000)]);
+
+        // Run the evaluation batching sumcheck
+        let (new_eval_point, new_eval_claim, batch_round_polys, batch_challenges) =
+            evaluation_batching_sumcheck(
+                witness.codeword.as_slice(),
+                &eval_claims,
+                rho,
+                log_n,
+                transcript_round,
+            );
+
+        // Update the instance's eval point and claim with the batched result
+        instance.eval_point = new_eval_point;
+
+        (batch_round_polys, batch_challenges)
+    } else {
+        (vec![], vec![])
+    };
+    #[cfg(feature = "bench-timing")]
+    {
+        timings.eval_batch_us = _phase_start.elapsed().as_micros() as u64;
+    }
+
     WarpFoldResult {
+        commitment_root,
+        fresh_commitment_roots,
         instance, witness,
         sumcheck_round_polys: round_polys,
         sumcheck_challenges: challenges,
         fresh_eval_claims,
         fresh_pesat_targets,
+        shift_queries,
+        ood_points,
+        ood_answers,
+        eval_batch_round_polys,
+        eval_batch_challenges,
+        timings,
     }
+}
+
+/// Evaluate a univariate polynomial given by evaluations at 0, 1, 2, ...
+/// at an arbitrary point r via Lagrange interpolation.
+fn eval_poly_from_evals<F: Field>(evals: &[F], r: F) -> F {
+    let degree = evals.len() - 1;
+    let mut result = F::ZERO;
+    for (i, &y_i) in evals.iter().enumerate() {
+        let x_i = F::from_usize(i);
+        let mut basis = F::ONE;
+        for j in 0..=degree {
+            if i == j {
+                continue;
+            }
+            let x_j = F::from_usize(j);
+            basis *= (r - x_j) * (x_i - x_j).inverse();
+        }
+        result += y_i * basis;
+    }
+    result
 }
 
 /// Verify the twin-constraint sumcheck portion of a WARP fold.
@@ -473,7 +1012,7 @@ where
 /// consecutive rounds are consistent: h_i(0)+h_i(1) == h_{i-1}(γ_{i-1}).
 pub fn warp_fold_verify_sumcheck<F: Field>(
     initial_target: F,
-    round_polys: &[crate::accumulation::protogalaxy::UnivariatePoly<F>],
+    round_polys: &[Vec<F>],
     challenges: &[F],
 ) -> Result<F, &'static str> {
     if round_polys.is_empty() {
@@ -481,15 +1020,15 @@ pub fn warp_fold_verify_sumcheck<F: Field>(
     }
 
     // Check round 0: h(0) + h(1) == initial_target
-    let sum_0 = round_polys[0].evaluate(F::ZERO) + round_polys[0].evaluate(F::ONE);
+    let sum_0 = round_polys[0][0] + round_polys[0][1];
     if sum_0 != initial_target {
         return Err("sumcheck: round 0 sum mismatch");
     }
 
     // Check subsequent rounds
     for i in 1..round_polys.len() {
-        let prev_at_challenge = round_polys[i - 1].evaluate(challenges[i - 1]);
-        let curr_sum = round_polys[i].evaluate(F::ZERO) + round_polys[i].evaluate(F::ONE);
+        let prev_at_challenge = eval_poly_from_evals(&round_polys[i - 1], challenges[i - 1]);
+        let curr_sum = round_polys[i][0] + round_polys[i][1];
         if curr_sum != prev_at_challenge {
             return Err("sumcheck: round consistency mismatch");
         }
@@ -497,7 +1036,7 @@ pub fn warp_fold_verify_sumcheck<F: Field>(
 
     // Return the final evaluation at the last challenge
     let last_idx = round_polys.len() - 1;
-    Ok(round_polys[last_idx].evaluate(challenges[last_idx]))
+    Ok(eval_poly_from_evals(&round_polys[last_idx], challenges[last_idx]))
 }
 
 /// Public input data for the WARP fold verifier.
@@ -580,7 +1119,7 @@ pub fn warp_fold_verify<F: Field>(
     acc_instance: &super::accumulator::WarpAccumulatorInstance<F, F, F, 8>,
     omega: F,
     tau_challenges: &[F],
-    sumcheck_round_polys: &[crate::accumulation::protogalaxy::UnivariatePoly<F>],
+    sumcheck_round_polys: &[Vec<F>],
     sumcheck_challenges: &[F],
     claimed_output: &WarpFoldedInstance<F>,
     fresh_eval_claims: &[F],
@@ -846,9 +1385,9 @@ mod tests {
         // Verify the sumcheck: consecutive rounds must be consistent
         for i in 1..result.sumcheck_round_polys.len() {
             let prev_at_challenge =
-                result.sumcheck_round_polys[i - 1].evaluate(result.sumcheck_challenges[i - 1]);
-            let curr_sum = result.sumcheck_round_polys[i].evaluate(F::ZERO)
-                + result.sumcheck_round_polys[i].evaluate(F::ONE);
+                eval_poly_from_evals(&result.sumcheck_round_polys[i - 1], result.sumcheck_challenges[i - 1]);
+            let curr_sum = result.sumcheck_round_polys[i][0]
+                + result.sumcheck_round_polys[i][1];
             assert_eq!(
                 prev_at_challenge, curr_sum,
                 "sumcheck relation violated at round {i}"
@@ -973,8 +1512,8 @@ mod tests {
         );
 
         // Compute initial target from the round 0 polynomial
-        let initial_target = result.sumcheck_round_polys[0].evaluate(F::ZERO)
-            + result.sumcheck_round_polys[0].evaluate(F::ONE);
+        let initial_target = result.sumcheck_round_polys[0][0]
+            + result.sumcheck_round_polys[0][1];
 
         // Verify using the dedicated function
         let final_eval = warp_fold_verify_sumcheck(
@@ -1118,7 +1657,7 @@ mod tests {
 
         // Tamper with a sumcheck round polynomial
         let mut tampered_polys = result.sumcheck_round_polys.clone();
-        tampered_polys[0].coeffs[0] += F::ONE;
+        tampered_polys[0][0] += F::ONE;
 
         let fresh_public = vec![FreshInstancePublic {
             public_input: fresh.public_input.clone(),

@@ -1,6 +1,9 @@
 #![no_std]
 extern crate alloc;
 
+#[cfg(feature = "bench-timing")]
+extern crate std;
+
 pub mod accumulation;
 pub mod constant;
 pub mod fiat_shamir;

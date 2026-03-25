@@ -1,17 +1,22 @@
-//! Reed-Solomon encoding for WARP accumulation.
+//! Reed-Solomon encoding and Merkle commitment for WARP accumulation.
 //!
-//! This module provides standalone RS encoding using WHIR's DFT infrastructure.
+//! This module provides standalone RS encoding using WHIR's DFT infrastructure
+//! and Merkle commitment of RS codewords using Plonky3's MerkleTreeMmcs.
+//!
 //! The encoding expands a witness polynomial from 2^k evaluations to
 //! 2^(k + log_inv_rate) evaluations on a smooth multiplicative coset,
 //! creating the error-correcting redundancy that makes proximity testing meaningful.
 //!
 //! The encoding follows exactly the same process as CommitmentWriter::commit
-//! (transpose → pad → DFT) but without the Merkle tree or OOD sampling,
-//! so it can be used during the fold step where we only need the codeword.
+//! (transpose → pad → DFT) but decoupled from the WHIR proof flow so it can
+//! be used during each fold step.
 
+use p3_commit::Mmcs;
 use p3_dft::TwoAdicSubgroupDft;
 use p3_field::TwoAdicField;
+use p3_matrix::dense::RowMajorMatrix;
 use p3_matrix::Matrix;
+use p3_merkle_tree::MerkleTreeMmcs;
 
 use crate::poly::evals::EvaluationsList;
 
@@ -98,6 +103,49 @@ where
 #[inline]
 pub const fn codeword_size(num_variables: usize, log_inv_rate: usize) -> usize {
     1 << (num_variables + log_inv_rate)
+}
+
+/// Commit an RS codeword to a Merkle tree.
+///
+/// Reshapes the flat codeword into a matrix with width = 2^folding_factor
+/// (matching WHIR's convention), then builds a Merkle tree over the rows.
+///
+/// Returns `(root, tree)` where root is the digest and tree is the prover data
+/// needed for opening proofs.
+pub fn merkle_commit_codeword<F, W, P, PW, H, C, const DIGEST_ELEMS: usize>(
+    codeword: &EvaluationsList<F>,
+    folding_factor: usize,
+    merkle_hash: H,
+    merkle_compress: C,
+) -> (
+    [W; DIGEST_ELEMS],
+    p3_merkle_tree::MerkleTree<F, W, RowMajorMatrix<F>, DIGEST_ELEMS>,
+)
+where
+    F: TwoAdicField,
+    W: p3_field::PackedValue<Value = W> + Eq + Send + Sync + Copy + Default,
+    P: p3_field::PackedValue<Value = F> + Eq + Send + Sync,
+    PW: p3_field::PackedValue<Value = W> + Eq + Send + Sync,
+    H: p3_symmetric::CryptographicHasher<F, [W; DIGEST_ELEMS]>
+        + p3_symmetric::CryptographicHasher<P, [PW; DIGEST_ELEMS]>
+        + Sync,
+    C: p3_symmetric::PseudoCompressionFunction<[W; DIGEST_ELEMS], 2>
+        + p3_symmetric::PseudoCompressionFunction<[PW; DIGEST_ELEMS], 2>
+        + Sync,
+    [W; DIGEST_ELEMS]: serde::Serialize + for<'de> serde::Deserialize<'de>,
+{
+    let width = 1usize << folding_factor;
+    let height = codeword.as_slice().len() / width;
+    assert_eq!(
+        height * width,
+        codeword.as_slice().len(),
+        "codeword length must be divisible by 2^folding_factor"
+    );
+
+    let matrix = RowMajorMatrix::new(codeword.as_slice().to_vec(), width);
+    let mmcs = MerkleTreeMmcs::<P, PW, H, C, DIGEST_ELEMS>::new(merkle_hash, merkle_compress);
+    let (root, tree) = mmcs.commit_matrix(matrix);
+    (*root.as_ref(), tree)
 }
 
 #[cfg(test)]
@@ -309,5 +357,54 @@ mod tests {
                 result.witness,
             );
         }
+    }
+
+    #[test]
+    fn merkle_commit_produces_nonzero_root() {
+        use p3_baby_bear::Poseidon2BabyBear;
+        use p3_symmetric::{PaddingFreeSponge, TruncatedPermutation};
+        use rand::SeedableRng;
+
+        type Perm = Poseidon2BabyBear<16>;
+        type MyHash = PaddingFreeSponge<Perm, 16, 8, 8>;
+        type MyCompress = TruncatedPermutation<Perm, 2, 8, 16>;
+        const DIGEST: usize = 8;
+
+        let perm = Perm::new_from_rng_128(&mut rand::rngs::SmallRng::seed_from_u64(42));
+        let hash = MyHash::new(perm.clone());
+        let compress = MyCompress::new(perm);
+
+        let dft = Radix2DFTSmallBatch::<F>::default();
+        let folding_factor = 2;
+        let log_inv_rate = 1;
+
+        let witness = EvaluationsList::new(
+            (0..1u64 << 6).map(|i| F::from_u64(i + 1)).collect(),
+        );
+        let codeword = rs_encode(&witness, folding_factor, log_inv_rate, &dft);
+
+        let (root, _tree) = merkle_commit_codeword::<
+            F, F, <F as p3_field::Field>::Packing, <F as p3_field::Field>::Packing,
+            MyHash, MyCompress, DIGEST,
+        >(&codeword, folding_factor, hash.clone(), compress.clone());
+
+        // Root should be non-trivial
+        assert!(root.iter().any(|&x| x != F::ZERO), "Merkle root should be non-zero");
+
+        // Same codeword → same root (deterministic)
+        let (root2, _) = merkle_commit_codeword::<
+            F, F, <F as p3_field::Field>::Packing, <F as p3_field::Field>::Packing,
+            MyHash, MyCompress, DIGEST,
+        >(&codeword, folding_factor, hash.clone(), compress.clone());
+        assert_eq!(root, root2, "Merkle commit should be deterministic");
+
+        // Different codeword → different root
+        let witness2 = EvaluationsList::new(vec![F::from_u64(99); 1 << 6]);
+        let codeword2 = rs_encode(&witness2, folding_factor, log_inv_rate, &dft);
+        let (root3, _) = merkle_commit_codeword::<
+            F, F, <F as p3_field::Field>::Packing, <F as p3_field::Field>::Packing,
+            MyHash, MyCompress, DIGEST,
+        >(&codeword2, folding_factor, hash, compress);
+        assert_ne!(root, root3, "Different codewords should have different roots");
     }
 }
