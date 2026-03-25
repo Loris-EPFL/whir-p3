@@ -1,363 +1,261 @@
 # whir-p3
 
-A version of https://github.com/WizardOfMenlo/whir/ which uses the Plonky3 library.
+A Plonky3-based implementation of [WHIR](https://eprint.iacr.org/2024/1586) (Reed-Solomon proximity testing with super-fast verification) with a [WARP](https://eprint.iacr.org/2025/753)-style accumulation scheme for fixed-size IVC.
 
-## Usage
+Built on top of [whir](https://github.com/WizardOfMenlo/whir/) and the [Plonky3](https://github.com/Plonky3/Plonky3) library.
 
-Spartan implementation on branch `feat/spartan`,  `feat/spartan-v1` and benchmarks on branch `feat/spartan-v1-benchmarks`.
+## Overview
 
-Implemented from https://github.com/Microsoft/Spartan
-## Testing and Benchmarking
+This codebase implements a complete IVC (Incrementally Verifiable Computation) pipeline:
 
-### Running Tests
-To run the full suite of unit and integration tests (including Spartan's arithmetic verification tests):
+```
+                        Spartan R1CS Prover
+                              |
+                     FreshInstance (witness + public input)
+                              |
+                   [optional: Quasar squash l instances -> 1]
+                              |
+                  +---------------------------+
+                  |     WARP Fold Prover       |
+                  |  (twin-constraint sumcheck |
+                  |   + ProtoGalaxy folding)   |
+                  +---------------------------+
+                              |
+                    WarpAccumulator (fixed size!)
+                              |
+                       [repeat N times]
+                              |
+                  +---------------------------+
+                  |    Terminal Decider        |
+                  |   (algebraic checks +     |
+                  |    WHIR proof [planned])   |
+                  +---------------------------+
+                              |
+                         Accept / Reject
+```
+
+The key property: **the accumulator witness size stays fixed regardless of how many IVC steps are performed**. This is achieved by using a twin-constraint sumcheck (from the WARP paper) that *reduces* instances rather than *concatenating* them.
+
+## Architecture
+
+### Module Layout
+
+```
+src/
+  whir/               # WHIR PCS (polynomial commitment scheme) - untouched
+  spartan/            # Spartan R1CS prover - untouched
+  sumcheck/           # Sumcheck protocol infrastructure
+  accumulation/
+    protogalaxy.rs    # ProtoGalaxy binary fold primitive (UnivariatePoly, fold)
+    warp/
+      accumulator.rs  # WARP accumulator types (fixed-size claims)
+      fold.rs         # WARP fold prover + verifier (twin-constraint sumcheck)
+      twin_constraint.rs  # Twin-constraint round polynomial computation
+      decider.rs      # Terminal decider (algebraic checks)
+      quasar_adapter.rs   # Bridge from Quasar/Spartan to WARP format
+    # Legacy (pre-WARP, witness grows with depth):
+    accumulator.rs    # Old LinearStatement-based accumulator
+    scheme.rs         # Old union-polynomial fold (WHIR proof per step)
+    linearized.rs     # Spartan -> linearized claims conversion
+    union_poly.rs     # Union polynomial concatenation (deprecated)
+    quasar/           # Quasar multi-instance squash frontend
+    decider.rs        # Old terminal decider
+  bin/
+    warp_bench.rs     # WARP fixed-size IVC benchmark
+    accumulation_bench.rs  # Legacy accumulation benchmark (requires --features cli)
+    main.rs           # WHIR PCS benchmark
+```
+
+### WARP Accumulator (Fixed-Size)
+
+The WARP accumulator carries scalar claims that do NOT grow with IVC depth:
+
+```
+WarpAccumulatorInstance:
+  commitment_root   [W; DIGEST_ELEMS]  Merkle root of codeword     (constant)
+  eval_point        Vec<F>             alpha in F^{log_n}           (fixed: log_n elements)
+  eval_claim        F                  mu = f_hat(alpha)            (fixed: 1 element)
+  pesat_tau         Vec<F>             PESAT zerocheck randomness   (fixed: log_M elements)
+  pesat_x           Vec<F>             public input                 (fixed: num_inputs elements)
+  pesat_target      F                  eta = P*(beta, z)            (fixed: 1 element)
+
+WarpAccumulatorWitness:
+  codeword          EvaluationsList<F> f = encode(w)                (fixed: n elements)
+  witness           Vec<F>             private witness w            (fixed: k elements)
+```
+
+Compare with the old accumulator which stored `LinearStatement` weight vectors of size `2^num_variables` that doubled at every fold step.
+
+### How the Fold Keeps Size Fixed
+
+The WARP fold uses a **twin-constraint sumcheck** over `log_l` rounds that simultaneously verifies:
+
+1. **Codeword proximity**: the folded codeword is consistent with evaluation claims
+2. **R1CS satisfaction**: the folded witness satisfies the bundled constraints
+
+At each sumcheck round, the `twin_constraint_round_poly` function combines:
+- `f_i(X)` = ProtoGalaxy-fold of `(alpha_evals, codeword_evals)`
+- `p_i(X)` = ProtoGalaxy-fold of `(beta_evals, Az*Bz - Cz)`
+- Combined: `h(X) = Sum_i (f_i(X) + omega * p_i(X)) * eq(tau, i, X)`
+
+After `log_l` rounds, all tables reduce to **single vectors at the original size**. No concatenation, no growth.
+
+### Terminal Decider
+
+The decider checks 3 conditions on the final accumulated instance:
+
+1. **Evaluation claim**: `f_hat(alpha) = mu`
+2. **PESAT satisfaction**: `P*(beta, z) = eta` (bundled R1CS)
+3. **Codeword validity**: `f = encode(w)` (identity encoding for now)
+
+### Research Papers
+
+This implementation draws from 14 papers. Key ones:
+
+| Paper | Role in this codebase |
+|-------|----------------------|
+| [WHIR](https://eprint.iacr.org/2024/1586) (Arnon, Chiesa, Fenzi, Yogev 2024) | PCS layer (`src/whir/`) |
+| [WARP](https://eprint.iacr.org/2025/753) (Bunz, Chiesa, Fenzi, Wang 2025) | Accumulation framework (`src/accumulation/warp/`) |
+| [ProtoGalaxy](https://eprint.iacr.org/2023/1106) (Eagen, Gabizon 2024) | Fold primitive inside sumcheck |
+| [Quasar](https://eprint.iacr.org/2025/1912) (Zheng, Gao, Guo, Xiao) | Multi-instance squash (`src/accumulation/quasar/`) |
+| [Spartan](https://eprint.iacr.org/2019/550) (Setty 2020) | R1CS prover (`src/spartan/`) |
+
+Reference implementation: [compsec-epfl/warp](https://github.com/compsec-epfl/warp/) (arkworks-based).
+
+## Testing
+
+Run the full test suite (51 tests across all modules):
+
 ```bash
 cargo test
 ```
 
-### Benchmarking Spartan
-We have implemented a native synthetic R1CS generator for benchmarking the Spartan sumcheck prover and verifier. The benchmark automatically tests multiple constraint sizes (e.g. $2^8$, $2^{10}$).
-
-To run the entire benchmark suite:
-```bash
-cargo bench --bench spartan
-```
-
-**Filtering Benchmarks:**
-If you want to run the benchmark for a specific matrix size (e.g., only $2^{10} = 1024$ constraints) without waiting for the others, you can pass a filter argument directly to the Criterion test harness:
-```bash
-cargo bench --bench spartan -- "1024"
-```
-
-To run only the prover or only the verifier benchmarks, use their respective group names:
-```bash
-cargo bench --bench spartan -- "Spartan_Prove"
-cargo bench --bench spartan -- "Spartan_Verify"
-```
-
-### Benchmarking No-Fold vs Raw Fold vs Quasar+WARP
-
-The current prototype supports three benchmark modes over synthetic R1CS instances:
-
-- `no_fold`: prove and verify all fresh claims independently with Spartan+WHIR
-- `raw_fold`: send fresh claims directly into the current WARP-style folded WHIR backend
-- `quasar_warp`: first squash fresh claims with the new Quasar frontend, then feed the squashed object into the existing WARP-style folded WHIR backend
-
-For the fixed Criterion benchmark:
+Run only the WARP accumulation tests (36 tests):
 
 ```bash
-cargo bench --bench accumulation
+cargo test --lib accumulation::warp
 ```
 
-You can filter to a specific sub-benchmark, for example:
+Run tests for specific modules:
 
 ```bash
-cargo bench --bench accumulation -- "accumulated_verify"
-cargo bench --bench accumulation -- "2^10/k=4"
+cargo test --lib accumulation::warp::fold          # Fold prover + verifier (11 tests)
+cargo test --lib accumulation::warp::decider       # Terminal decider (7 tests)
+cargo test --lib accumulation::warp::twin_constraint  # Sumcheck (6 tests)
+cargo test --lib accumulation::protogalaxy         # ProtoGalaxy fold (7 tests)
+cargo test --lib accumulation::warp::quasar_adapter   # Quasar bridge (3 tests)
 ```
 
-#### Recommended Process For Stable Results
+### Key Tests
 
-Criterion already supports command-line tuning, so you do not need to modify the code in order to run longer benchmarks.
+- `warp_fold_sequential_preserves_size` - Runs 4 sequential folds, asserts witness NEVER grows
+- `decider_fixed_size_across_ivc_steps` - 5 sequential folds + decider accepts at each step
+- `warp_fold_verifier_rejects_tampered_sumcheck` - Verifier catches tampered proof
+- `quasar_then_warp_sequential_pipeline` - Full pipeline: Spartan -> WARP fold -> decider
 
-For quick exploratory runs:
+## Benchmarking
+
+### WARP Fixed-Size IVC Benchmark
+
+The primary benchmark for the WARP accumulation pipeline:
 
 ```bash
-cargo bench --bench accumulation
+cargo run --release --bin warp_bench
 ```
 
-For more stable measurements, use a larger sample size and longer measurement window:
+This runs with defaults: `sizes=8,10`, `steps=4,8`, `repeats=3`, `batch=1`.
+
+Arguments (positional):
 
 ```bash
-cargo bench --bench accumulation -- --sample-size 30 --warm-up-time 3 --measurement-time 10
+cargo run --release --bin warp_bench -- <sizes> <steps> <repeats> <batch>
 ```
 
-For final comparison runs, use an even longer configuration:
+Examples:
 
 ```bash
-cargo bench --bench accumulation -- --sample-size 50 --warm-up-time 5 --measurement-time 20
+# Quick test: small witness, few steps
+cargo run --release --bin warp_bench -- "8" "4" 3 1
+
+# Medium: 2^10 witness, up to 16 IVC steps
+cargo run --release --bin warp_bench -- "10" "4,8,16" 5 1
+
+# Large: 2^12-2^14 witness, 8 steps, batch of 2 instances per step
+cargo run --release --bin warp_bench -- "12,14" "8" 5 2
+
+# Stress test: many IVC steps to verify size never grows
+cargo run --release --bin warp_bench -- "10" "32,64,128" 3 1
 ```
 
-You can combine those with filters. For example:
+Sample output:
 
-```bash
-cargo bench --bench accumulation -- "accumulated_verify" --sample-size 50 --warm-up-time 5 --measurement-time 20
-cargo bench --bench accumulation -- "2^10/k=4" --sample-size 50 --warm-up-time 5 --measurement-time 20
+```
+WARP Fixed-Size IVC Accumulation Benchmark
+==========================================
+Field: BabyBear (31-bit)
+Batch size per step: 1
+Repeats: 3
+
+--- log2(witness) = 10 (num_vars=2048, num_cons=1024) ---
+  steps=  4: prove=   493us  verify=     0us  decide=    26us  | witness=15.97 KiB codeword=16.00 KiB [FIXED]
+  steps= 16: prove=   496us  verify=     0us  decide=    26us  | witness=15.97 KiB codeword=16.00 KiB [FIXED]
+
+--- log2(witness) = 12 (num_vars=8192, num_cons=4096) ---
+  steps=  4: prove=  2573us  verify=     1us  decide=   168us  | witness=63.97 KiB codeword=64.00 KiB [FIXED]
+  steps= 16: prove=  2481us  verify=     1us  decide=   212us  | witness=63.97 KiB codeword=64.00 KiB [FIXED]
 ```
 
-#### How To Read Criterion Output
+Key observations:
+- `[FIXED]` confirms witness size never grows regardless of step count
+- Prove time scales with witness size, NOT number of IVC steps
+- Verify time is sub-microsecond (field ops only, no WHIR proof)
 
-- The `time: [low mid high]` line is the important line for comparing folded vs non-folded.
-- The `change:` line compares against previous saved Criterion runs of the same benchmark name; it does **not** compare regular vs folded.
-- So for the algorithmic comparison, compare:
-  - `regular_prove` vs `accumulated_prove`
-  - `regular_verify` vs `accumulated_verify`
+### Legacy Accumulation Benchmark
 
-#### Practical Benchmark Checklist
-
-For better reproducibility:
-
-- close heavy background applications
-- keep the machine plugged in
-- use a performance CPU governor if available
-- avoid running other builds during measurement
-- run the full benchmark suite at least 3 times before drawing conclusions
-
-#### Suggested Benchmark Matrix
-
-At minimum, compare these cases:
-
-- `2^8, k=2`
-- `2^8, k=4`
-- `2^10, k=2`
-- `2^10, k=4`
-
-For stronger evidence, extend to larger instances and batches:
-
-- `2^12, k=2`
-- `2^12, k=4`
-- `2^12, k=8`
-
-#### Generating A Report And Plots
-
-To generate a markdown summary and SVG speedup plots from the Criterion results:
-
-```bash
-cargo run --bin accumulation_report
-```
-
-This writes report artifacts under `output/benchmarks/accumulation/`.
-
-Generated plots now include both:
-- absolute runtime plots for regular vs folded paths
-- relative speedup plots
-
-Main report files:
-
-- `output/benchmarks/accumulation/summary.md`
-- `output/benchmarks/accumulation/prove_times.svg`
-- `output/benchmarks/accumulation/verify_times.svg`
-- `output/benchmarks/accumulation/prove_speedup.svg`
-- `output/benchmarks/accumulation/verify_speedup.svg`
-
-### Configurable Large Accumulation Benchmarks
-
-For larger matrix sizes and configurable claim counts, use the standalone benchmark runner instead of the Criterion bench.
-
-This runner supports CLI flags and has sensible defaults if you do not pass any arguments.
-
-Basic run:
+The old benchmark (requires `cli` feature) compares three modes:
 
 ```bash
 cargo run --release --features cli --bin accumulation_bench
 ```
 
-This defaults to:
-- `--sizes 8,10`
-- `--claims 2,4`
-- `--repeats 10`
-- `--shift-queries 2`
-- `--folding-factor 2`
-- `--folding-schedule <unset>`
-- `--starting-log-inv-rate 1`
-- `--rs-domain-initial-reduction-factor 1`
-- `--security-level 100`
+See `--help` for options. This benchmark uses the old union-polynomial approach where witness size grows with depth.
 
-`--folding-schedule` supports the folding modes already available in this repo:
-- `--folding-schedule 4` means constant folding factor 4 in all rounds
-- `--folding-schedule 6,4` means first round uses 6, later rounds use 4
-
-If `--folding-schedule` is provided, it overrides `--folding-factor`.
-
-Example with larger matrices:
+### Spartan Benchmark
 
 ```bash
-cargo run --release --features cli --bin accumulation_bench -- \
-  --sizes 12,14 \
-  --claims 2,4,8 \
-  --repeats 20 \
-  --folding-factor 2 \
-  --starting-log-inv-rate 1 \
-  --rs-domain-initial-reduction-factor 1 \
-  --shift-queries 2
+cargo bench --bench spartan
 ```
 
-Example with an even longer run for a single sweep:
+### WHIR PCS Benchmark
 
 ```bash
-cargo run --release --features cli --bin accumulation_bench -- \
-  --sizes 14 \
-  --claims 2,4,8 \
-  --repeats 50 \
-  --folding-factor 2 \
-  --starting-log-inv-rate 1 \
-  --rs-domain-initial-reduction-factor 1 \
-  --shift-queries 2
+cargo run --release --features cli --bin main
 ```
 
-The runner writes a CSV file by default to:
+## Current Status and Future Work
 
-```text
-output/benchmarks/accumulation/custom_metrics.csv
-```
+### Implemented
 
-The CSV now contains timing columns for all three modes:
+- [x] WHIR PCS (Reed-Solomon proximity testing)
+- [x] Spartan R1CS prover (sumcheck-based)
+- [x] WARP accumulation with fixed-size witness
+  - [x] ProtoGalaxy binary fold primitive
+  - [x] Twin-constraint sumcheck (codeword proximity + R1CS satisfaction)
+  - [x] Fold prover and verifier
+  - [x] Terminal algebraic decider
+  - [x] Quasar adapter (Spartan -> WARP bridge)
+- [x] Quasar multi-instance squash frontend
 
-- `no_fold_prove_ms`
-- `no_fold_verify_ms`
-- `raw_fold_prove_ms`
-- `raw_fold_verify_ms`
-- `quasar_warp_prove_ms`
-- `quasar_warp_verify_ms`
+### Deferred (Next Steps)
 
-You can override that path with:
+- [ ] **Reed-Solomon encoding**: Currently using identity encoding (codeword = witness). Integrate with WHIR's RS encoding for actual PCS security.
+- [ ] **WHIR succinct decider**: Generate a WHIR proof at the terminal step so the verifier doesn't need the witness. The algebraic decider infrastructure is in place.
+- [ ] **OOD/shift query codeword batching**: Phase 3 of the WARP fold (out-of-domain sampling + Merkle auth paths). Currently deferred to the terminal decider via WHIR.
+- [ ] **Fiat-Shamir integration**: Replace the `transcript_round` callback with proper Poseidon2 duplex sponge.
 
-```bash
---out output/benchmarks/accumulation/my_run.csv
-```
+### Future Extensions
 
-Recommended commands for longer accumulation measurements:
-
-```bash
-cargo run --release --features cli --bin accumulation_bench -- --sizes 12 --claims 2,4,8 --repeats 20
-cargo run --release --features cli --bin accumulation_bench -- --sizes 14 --claims 2,4 --repeats 20
-cargo run --release --features cli --bin accumulation_bench -- --sizes 14 --claims 2,4,8 --repeats 50
-```
-
-Example exploring stronger WHIR folding for the folded path while keeping the same benchmark harness:
-
-```bash
-cargo run --release --features cli --bin accumulation_bench -- \
-  --sizes 14 \
-  --claims 2,4,8 \
-  --repeats 20 \
-  --folding-factor 4 \
-  --starting-log-inv-rate 1 \
-  --rs-domain-initial-reduction-factor 1
-```
-
-Example exploring a non-constant WHIR folding schedule:
-
-```bash
-cargo run --release --features cli --bin accumulation_bench -- \
-  --sizes 14 \
-  --claims 2,4,8 \
-  --repeats 20 \
-  --folding-schedule 6,4 \
-  --starting-log-inv-rate 1 \
-  --rs-domain-initial-reduction-factor 1
-```
-
-### Architecture Summary
-
-The current codebase now has a two-layer accumulation structure:
-
-1. `Quasar` frontend in `src/accumulation/quasar/`
-   - squashes many fresh linearized instances into one squashed committed object
-2. existing `WARP-style` folded WHIR backend in `src/accumulation/scheme.rs`
-   - folds committed accumulator-style objects and proves them with WHIR
-
-The new Quasar frontend is intentionally implemented as a separate layer so it can reuse the backend unchanged.
-
-### LinearStatement vs PESAT: Design Note
-
-The academic papers (WARP, Quasar) describe accumulation over general **PESAT** (Polynomial Equation SATisfiability) relations of the form:
-
-```
-P*(β, w) = η
-```
-
-where `P*` is an arbitrary polynomial constraint map. However, this implementation uses **`LinearStatement`** which represents simpler inner-product claims:
-
-```
-⟨weights, polynomial_evaluations⟩ = target
-```
-
-**Why this is sufficient for R1CS/Spartan:**
-
-The Spartan proving system reduces R1CS satisfiability to a set of *linearized claims* after the sumcheck protocol. These linearized claims are precisely inner-product relations:
-
-1. **Witness evaluation claim**: `⟨eq(ry, ·), z⟩ = z_eval` where `z` is the extended witness
-2. **Matrix-vector claims**: `⟨Ã(rx, ·), z⟩ = a_eval`, `⟨B̃(rx, ·), z⟩ = b_eval`, `⟨C̃(rx, ·), z⟩ = c_eval`
-
-These four claims are batched into a single `LinearStatement` using a random challenge. The key insight is:
-
-- **General PESAT** → after linearization → **Inner-product claims** → `LinearStatement`
-
-Therefore, `LinearStatement` is the correct abstraction for accumulating Spartan proofs. The WARP/Quasar soundness arguments apply because:
-
-1. Inner-product claims are a special case of PESAT (degree-1 polynomial constraints)
-2. The batching and folding operations preserve the linear structure
-3. The terminal decider verifies the final inner-product claim via WHIR
-
-This design choice simplifies the implementation while maintaining full compatibility with R1CS-based proof systems. For constraint systems that produce non-linear claims after the sumcheck phase, the `LinearStatement` abstraction would need to be generalized to full PESAT.
-
-### Paper Alignment Analysis
-
-This section documents how the implementation aligns with (and deviates from) the original papers: **WARP**, **Quasar**, and **Symphony**.
-
-#### WARP Paper Alignment
-
-The WARP paper (Bünz et al.) describes an accumulation scheme using:
-
-| WARP Paper Concept | Implementation | Status |
-|---|---|---|
-| **Twin constrained codes** `C[(α, μ), (Pb, β, η)]` | `LinearStatement` (inner-product claims only) | ✅ Simplified - sufficient for R1CS |
-| **Codeword batching** (§2.4) | `union_polynomial_from_accumulators` + exponential batching | ✅ Implemented (uses `r⁰, r¹, r², ...` weights) |
-| **Twin constraint pseudo-batching** (§2.6) | Implicit via `LinearStatement` batching | ⚠️ Simplified - no explicit affine interpolation |
-| **Out-of-domain sampling** | `ood_point`, `ood_answer` in `AccumulationTranscript` | ✅ Implemented |
-| **Shift queries** (in-domain sampling) | `shift_query_indices`, `shift_query_answers` | ✅ Implemented |
-| **Straightline extraction via erasure** | Relies on WHIR's extraction | ✅ Inherited from WHIR |
-
-**Key Deviation**: The WARP paper uses **affine interpolation** `(1-γ)·f₀ + γ·f₁` for twin constraint pseudo-batching (Construction 3, §2.6). Our implementation uses **exponential batching** `Σᵢ rⁱ·fᵢ` which is equivalent in soundness but differs in the algebraic structure. This is a valid simplification for the 2-to-1 case.
-
-#### Quasar Paper Alignment
-
-The Quasar paper (Zheng et al.) describes a multi-instance accumulation scheme:
-
-| Quasar Paper Concept | Implementation | Status |
-|---|---|---|
-| **Union polynomial** `w̃∪(Y,X) = Σₖ eq̃ₖ₋₁(Y)·w̃⁽ᵏ⁾(X)` | `build_union_polynomial` (concatenation layout) | ✅ Implemented |
-| **Multi-cast reduction** (ℓ→1) | `QuasarFrontendProver::squash_to_accumulator` | ✅ Implemented |
-| **eq-polynomial weighting** `eq̃ₖ₋₁(τ)` | `eq_weights` function | ✅ Implemented |
-| **Partial evaluation check** `w̃∪(τ, rx) = w̃(rx)` | Implicit via target verification | ⚠️ Simplified |
-| **Sublinear verifier** (O(log ℓ) CRCs) | Current impl is O(ℓ) linear claims | ⚠️ Not optimized |
-| **Sumcheck over Y hypercube** | Direct target computation | ⚠️ Simplified |
-
-**Key Simplification**: The Quasar paper's full protocol runs a sumcheck over the instance-index hypercube Y to reduce to a single evaluation claim. Our `QuasarFrontendProver` simplifies this by:
-1. Computing eq-weights directly from `τ`
-2. Squashing witnesses via linear combination
-3. Verifying the target relationship algebraically
-
-This achieves the same soundness but doesn't provide the sublinear verifier complexity that Quasar optimizes for. For our use case (feeding into WARP backend), this is acceptable.
-
-#### Symphony Paper Alignment
-
-The Symphony paper (Chen) describes a CP-SNARK wrapper for avoiding Fiat-Shamir circuits:
-
-| Symphony Paper Concept | Implementation | Status |
-|---|---|---|
-| **High-arity folding** (compress ℓnp statements) | Quasar frontend | ✅ Analogous |
-| **Commit-and-prove compiler** (§6) | Not yet implemented | 🔴 Phase 4 TODO |
-| **Fiat-Shamir in circuit avoidance** | Current design uses standard FS | 🔴 Phase 4 TODO |
-| **CP-SNARK relation Rcp** (Eq. 55) | Would wrap accumulation transcript | 🔴 Phase 4 TODO |
-| **Two-layer folding** (§8) | Quasar→WARP is 2-layer | ✅ Conceptually aligned |
-
-**Phase 4 Work Required**: To complete Symphony alignment, we need:
-1. A CP-SNARK that proves the folding verifier's transcript is correctly computed
-2. Commitment to prover messages `(mᵢ)` during accumulation
-3. Final SNARK proof for the output relation `Ro`
-
-The current `TerminalDecider` uses WHIR to prove the final accumulator, but doesn't wrap the Fiat-Shamir transcript in a CP-SNARK. This is the main gap for full Symphony compliance.
-
-#### Implementation vs Paper Summary
-
-| Component | Papers | Implementation | Gap |
-|---|---|---|---|
-| **Accumulator structure** | Twin constraints (α,μ) + PESAT (β,η) | `LinearStatement` only | Acceptable for R1CS |
-| **Batching method** | Affine interpolation | Exponential batching | Equivalent soundness |
-| **Quasar reduction** | Full sumcheck over Y | Direct eq-weighting | Acceptable |
-| **Symphony wrapper** | CP-SNARK + SNARK | WHIR proof only | **Phase 4 TODO** |
-| **Extraction** | Straightline erasure-based | WHIR's extraction | Inherited |
-
-The implementation is **sound and functional** for the current use case (R1CS/Spartan accumulation), with the main remaining work being the Symphony CP-SNARK wrapper for Phase 4.
+- [ ] **Non-uniform IVC (zkVM)**: KiloNova-style holographic folding for multiple opcodes
+- [ ] **PCS upgrade**: TensorSwitch+WARP for linear-time prover and sublinear extension field cost
+- [ ] **Recursive verifier circuit**: Symphony-style CP-SNARK wrapper
+- [ ] **Sublinear accumulation verifier**: Quasar's O(sqrt(N)) technique

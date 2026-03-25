@@ -102,6 +102,10 @@ path = "src/bin/accumulation_bench.rs"
 required-features = ["cli"]
 
 [[bin]]
+name = "warp_bench"
+path = "src/bin/warp_bench.rs"
+
+[[bin]]
 name = "accumulation_report"
 path = "src/bin/accumulation_report.rs"
 
