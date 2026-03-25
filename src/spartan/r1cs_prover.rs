@@ -11,8 +11,8 @@ use p3_field::{ExtensionField, Field};
 use crate::poly::evals::EvaluationsList;
 
 use super::{
-    encoding::{eq_poly, eq_poly_at_index, GPoly},
-    r1cs::{R1CSInstance, R1CSShape, SparseMatPolynomial},
+    encoding::{eq_poly, eq_poly_at_index},
+    r1cs::{R1CSInstance, R1CSShape},
     spark::{SparkCompressionChallenges, SparkProof},
     sumcheck::{SumcheckProof, SumcheckVerifier},
 };
@@ -87,22 +87,15 @@ impl<F: Field> R1CSProver<F> {
         }
     }
 
-    /// Prove R1CS instance satisfaction
+    /// Prove R1CS instance satisfaction using table-based sumcheck.
     ///
-    /// This implements the full Spartan protocol:
-    /// 1. Compute G_io,τ polynomial from R1CS instance
-    /// 2. Run Phase 1 sum-check on G_io,τ (degree 3)
-    /// 3. Run Phase 2 sum-check over y to bind A/B/C evaluations to Z(ry)
+    /// This implements the full Spartan protocol with O(n) per-round prover:
+    /// 1. Precompute Az, Bz, Cz, eq(τ,·) tables via sparse mat-vec multiply
+    /// 2. Run Phase 1 table-based sum-check on G_io,τ (degree 3)
+    /// 3. Run Phase 2 table-based sum-check over y (degree 2)
     /// 4. Derive witness/matrix evaluation claims at r_y
     /// 5. Commit sparse matrices through SPARK commitments
-    ///
-    /// # Arguments
-    /// * `instance` - The R1CS instance with witness
-    /// * `challenger` - Fiat-Shamir challenger for randomness
-    ///
-    /// # Returns
     #[allow(clippy::too_many_lines)]
-    /// The R1CS proof
     pub fn prove<EF, Challenger>(
         &self,
         instance: &R1CSInstance<F>,
@@ -112,60 +105,69 @@ impl<F: Field> R1CSProver<F> {
         EF: ExtensionField<F>,
         Challenger: FieldChallenger<F> + CanObserve<F> + GrindingChallenger<Witness = F>,
     {
-        // Step 1: Generate challenge τ and compute G_io,τ
-        let num_cons_vars = instance.shape().num_cons().trailing_zeros() as usize;
+        let num_cons = instance.shape().num_cons();
+        let num_cons_vars = num_cons.trailing_zeros() as usize;
         let tau: Vec<F> = (0..num_cons_vars).map(|_| challenger.sample()).collect();
 
-        // Compute G_io,τ polynomial
-        let g_poly = GPoly::from_r1cs_instance(instance, tau.clone());
-
-        // Verify that sum is zero (sanity check)
-        assert!(
-            g_poly.verify_sum_is_zero(),
-            "Witness does not satisfy R1CS constraints"
-        );
-
-        // Step 2: Run Phase 1 sum-check on G_io,τ with faithful round polynomials.
-        // Round i polynomial: h_i(t) = Σ_{b∈{0,1}^{s-i-1}} G_io,τ(r_1..r_{i-1}, t, b)
+        // Step 1: Precompute dense tables — O(nnz + 2^s)
         let z = instance.build_z_vector();
-        let phase1_sumcheck_proof = prove_sumcheck_from_oracle(
+        let size_z = z.len();
+        let mut az_table = vec![F::ZERO; num_cons];
+        let mut bz_table = vec![F::ZERO; num_cons];
+        let mut cz_table = vec![F::ZERO; num_cons];
+        for entry in instance.shape().a().entries() {
+            if entry.col < size_z {
+                az_table[entry.row] += entry.val * z[entry.col];
+            }
+        }
+        for entry in instance.shape().b().entries() {
+            if entry.col < size_z {
+                bz_table[entry.row] += entry.val * z[entry.col];
+            }
+        }
+        for entry in instance.shape().c().entries() {
+            if entry.col < size_z {
+                cz_table[entry.row] += entry.val * z[entry.col];
+            }
+        }
+        let mut eq_table = compute_eq_table(&tau);
+
+        // Sanity check: sum of G_io,τ must be zero
+        #[cfg(debug_assertions)]
+        {
+            let g_sum: F = (0..num_cons)
+                .map(|i| eq_table[i] * (az_table[i] * bz_table[i] - cz_table[i]))
+                .sum();
+            assert_eq!(g_sum, F::ZERO, "Witness does not satisfy R1CS constraints");
+        }
+
+        // Step 2: Phase 1 table-based sum-check — degree 3
+        // G(x) = eq(τ,x) · (Az(x)·Bz(x) - Cz(x))
+        let phase1_sumcheck_proof = prove_sumcheck_phase1(
             num_cons_vars,
-            3,
-            F::ZERO,
+            &mut az_table,
+            &mut bz_table,
+            &mut cz_table,
+            &mut eq_table,
             challenger,
-            |prefix: &[F], t: F| -> F {
-                let remaining = num_cons_vars - prefix.len() - 1;
-                let mut sum = F::ZERO;
-                for b in 0..(1usize << remaining) {
-                    let mut x = Vec::with_capacity(num_cons_vars);
-                    x.extend_from_slice(prefix);
-                    x.push(t);
-                    for j in 0..remaining {
-                        x.push(if ((b >> j) & 1) == 1 { F::ONE } else { F::ZERO });
-                    }
-                    sum += evaluate_g_io_tau_at_point(instance.shape(), &tau, &z, &x);
-                }
-                sum
-            },
         );
         let rx = phase1_sumcheck_proof.final_point.clone();
         let phase1_final_eval = phase1_sumcheck_proof.final_eval;
 
-        // Step 3: Compute primary claims at r_x.
-        let num_vars_y = instance.shape().num_poly_vars_y();
-        let (a_rx_y, b_rx_y, c_rx_y) = compute_matrix_evals_at_rx(instance.shape(), &rx);
-        let a_eval = a_rx_y.iter().zip(z.iter()).map(|(a, z_y)| *a * *z_y).sum();
-        let b_eval = b_rx_y.iter().zip(z.iter()).map(|(b, z_y)| *b * *z_y).sum();
-        let c_eval = c_rx_y.iter().zip(z.iter()).map(|(c, z_y)| *c * *z_y).sum();
-        let eq_tau_rx = eq_poly_base(&tau, &rx);
+        // After binding, tables are size 1: the MLE evaluations at rx
+        let a_eval = az_table[0];
+        let b_eval = bz_table[0];
+        let c_eval = cz_table[0];
+        let eq_tau_rx = eq_table[0];
+
         assert_eq!(
             phase1_final_eval,
             (a_eval * b_eval - c_eval) * eq_tau_rx,
             "internal consistency failure: phase-1 equation must hold"
         );
 
-        // Step 4: Phase-2 sum-check over y with transcript-derived coefficients.
-        // Q(y) = Z(y) * (α*A(r_x,y) + β*B(r_x,y) + γ*C(r_x,y))
+        // Step 3: Phase-2 sum-check over y with transcript-derived coefficients.
+        // Q(y) = Z(y) · (α·A(rx,y) + β·B(rx,y) + γ·C(rx,y))
         let phase2_coeffs = Phase2Coeffs {
             a: challenger.sample(),
             b: challenger.sample(),
@@ -173,35 +175,43 @@ impl<F: Field> R1CSProver<F> {
         };
         let phase2_initial_claim =
             phase2_coeffs.a * a_eval + phase2_coeffs.b * b_eval + phase2_coeffs.c * c_eval;
-        let phase2_sumcheck_proof = prove_sumcheck_from_oracle(
+
+        // Precompute lin_table[y] = α·A(rx,y) + β·B(rx,y) + γ·C(rx,y)
+        let num_vars_y = instance.shape().num_poly_vars_y();
+        let num_y = 1usize << num_vars_y;
+        let mut lin_table = vec![F::ZERO; num_y];
+        for entry in instance.shape().a().entries() {
+            if entry.col < num_y {
+                let eq_row = eq_poly_at_index::<F, F>(entry.row, &rx);
+                lin_table[entry.col] += phase2_coeffs.a * entry.val * eq_row;
+            }
+        }
+        for entry in instance.shape().b().entries() {
+            if entry.col < num_y {
+                let eq_row = eq_poly_at_index::<F, F>(entry.row, &rx);
+                lin_table[entry.col] += phase2_coeffs.b * entry.val * eq_row;
+            }
+        }
+        for entry in instance.shape().c().entries() {
+            if entry.col < num_y {
+                let eq_row = eq_poly_at_index::<F, F>(entry.row, &rx);
+                lin_table[entry.col] += phase2_coeffs.c * entry.val * eq_row;
+            }
+        }
+        let mut z_table = z.clone();
+        z_table.resize(num_y, F::ZERO);
+
+        let phase2_sumcheck_proof = prove_sumcheck_phase2(
             num_vars_y,
-            2,
             phase2_initial_claim,
+            &mut z_table,
+            &mut lin_table,
             challenger,
-            |prefix: &[F], t: F| -> F {
-                let remaining = num_vars_y - prefix.len() - 1;
-                let mut sum = F::ZERO;
-                for b in 0..(1usize << remaining) {
-                    let mut y = Vec::with_capacity(num_vars_y);
-                    y.extend_from_slice(prefix);
-                    y.push(t);
-                    for j in 0..remaining {
-                        y.push(if ((b >> j) & 1) == 1 { F::ONE } else { F::ZERO });
-                    }
-                    let z_y = eval_mle_from_hypercube::<F, F>(&z, &y);
-                    let a_y = eval_sparse_at_point(instance.shape().a(), &rx, &y);
-                    let b_y = eval_sparse_at_point(instance.shape().b(), &rx, &y);
-                    let c_y = eval_sparse_at_point(instance.shape().c(), &rx, &y);
-                    let lin = phase2_coeffs.a * a_y + phase2_coeffs.b * b_y + phase2_coeffs.c * c_y;
-                    sum += z_y * lin;
-                }
-                sum
-            },
         );
         let ry = phase2_sumcheck_proof.final_point.clone();
         let phase2_final_eval = phase2_sumcheck_proof.final_eval;
 
-        let z_eval = eval_mle_from_hypercube::<F, F>(&z, &ry);
+        let z_eval = z_table[0];
         let spark_challenges = SparkCompressionChallenges {
             gamma: challenger.sample(),
             eta: challenger.sample(),
@@ -446,72 +456,209 @@ impl<F: Field> R1CSVerifier<F> {
     }
 }
 
-fn compute_matrix_evals_at_rx<F: Field>(
-    shape: &R1CSShape<F>,
-    rx: &[F],
-) -> (Vec<F>, Vec<F>, Vec<F>) {
-    let num_y = 1usize << shape.num_poly_vars_y();
-    let mut a_vals = vec![F::ZERO; num_y];
-    let mut b_vals = vec![F::ZERO; num_y];
-    let mut c_vals = vec![F::ZERO; num_y];
+/// Precompute eq(τ, i) for all i in {0,1}^s using the binary tree expansion.
+///
+/// eq(τ, x) = ∏_j (τ_j · x_j + (1-τ_j)·(1-x_j))
+///
+/// Processes tau in reverse order so that bit j of the index maps to τ_j,
+/// matching `eq_poly_at_index`'s LSB-first convention.
+fn compute_eq_table<F: Field>(tau: &[F]) -> Vec<F> {
+    let s = tau.len();
+    let n = 1usize << s;
+    let mut table = vec![F::ZERO; n];
+    table[0] = F::ONE;
 
-    for entry in shape.a().entries() {
-        let eq_row = eq_poly_at_index::<F, F>(entry.row, rx);
-        a_vals[entry.col] += entry.val * eq_row;
+    // Process tau[s-1] first (expands 1→2), then tau[s-2] (2→4), ..., tau[0] last (n/2→n).
+    // This places tau[0] in the LSB position.
+    for j in (0..s).rev() {
+        let tau_j = tau[j];
+        let one_minus_tau_j = F::ONE - tau_j;
+        let half = 1usize << (s - 1 - j);
+        for i in (0..half).rev() {
+            table[2 * i + 1] = table[i] * tau_j;
+            table[2 * i] = table[i] * one_minus_tau_j;
+        }
     }
-    for entry in shape.b().entries() {
-        let eq_row = eq_poly_at_index::<F, F>(entry.row, rx);
-        b_vals[entry.col] += entry.val * eq_row;
-    }
-    for entry in shape.c().entries() {
-        let eq_row = eq_poly_at_index::<F, F>(entry.row, rx);
-        c_vals[entry.col] += entry.val * eq_row;
-    }
-
-    (a_vals, b_vals, c_vals)
+    table
 }
 
-fn eq_poly_base<F: Field>(t: &[F], x: &[F]) -> F {
-    assert_eq!(t.len(), x.len());
-    let mut result = F::ONE;
-    for i in 0..t.len() {
-        result *= t[i] * x[i] + (F::ONE - t[i]) * (F::ONE - x[i]);
+/// Fold a table in-place by binding the LSB variable to `challenge`.
+///
+/// Adjacent pairs (2i, 2i+1) differ in bit 0. After binding:
+///   table[i] = table[2i] + challenge · (table[2i+1] - table[2i])
+///
+/// This matches `eq_poly_at_index`'s convention where bit 0 = r[0].
+fn bind_table<F: Field>(table: &mut Vec<F>, challenge: F) {
+    let half = table.len() / 2;
+    for i in 0..half {
+        table[i] = table[2 * i] + challenge * (table[2 * i + 1] - table[2 * i]);
     }
-    result
+    table.truncate(half);
 }
 
-fn eval_sparse_at_point<F: Field>(mat: &SparseMatPolynomial<F>, rx: &[F], ry: &[F]) -> F {
-    mat.entries()
-        .iter()
-        .map(|entry| {
-            entry.val
-                * eq_poly_at_index::<F, F>(entry.row, rx)
-                * eq_poly_at_index::<F, F>(entry.col, ry)
-        })
-        .sum()
+/// Phase 1 table-based sumcheck: G(x) = eq(τ,x) · (Az(x)·Bz(x) - Cz(x)), degree 3.
+///
+/// Each round: scan pairs (i, i+half), evaluate the degree-3 univariate at points 0,1,2,3,
+/// then bind all 4 tables with the verifier challenge.
+fn prove_sumcheck_phase1<F, Challenger>(
+    num_vars: usize,
+    az: &mut Vec<F>,
+    bz: &mut Vec<F>,
+    cz: &mut Vec<F>,
+    eq_tau: &mut Vec<F>,
+    challenger: &mut Challenger,
+) -> SumcheckProof<F>
+where
+    F: Field,
+    Challenger: FieldChallenger<F> + CanObserve<F> + GrindingChallenger<Witness = F>,
+{
+    let mut current_claim = F::ZERO;
+    let mut challenges = Vec::with_capacity(num_vars);
+    let mut round_evals_all = Vec::with_capacity(num_vars);
+
+    for _round in 0..num_vars {
+        let half = az.len() / 2;
+
+        // Evaluate degree-3 univariate at points 0, 1, 2, 3
+        // Adjacent pairs (2i, 2i+1) differ in bit 0 (LSB-first convention)
+        let mut evals = [F::ZERO; 4];
+
+        for i in 0..half {
+            let eq_lo = eq_tau[2 * i];
+            let eq_hi = eq_tau[2 * i + 1];
+            let az_lo = az[2 * i];
+            let az_hi = az[2 * i + 1];
+            let bz_lo = bz[2 * i];
+            let bz_hi = bz[2 * i + 1];
+            let cz_lo = cz[2 * i];
+            let cz_hi = cz[2 * i + 1];
+
+            // Deltas for linear interpolation: f(t) = f_lo + t · delta
+            let eq_d = eq_hi - eq_lo;
+            let az_d = az_hi - az_lo;
+            let bz_d = bz_hi - bz_lo;
+            let cz_d = cz_hi - cz_lo;
+
+            // t=0: use lo values
+            evals[0] += eq_lo * (az_lo * bz_lo - cz_lo);
+
+            // t=1: use hi values
+            evals[1] += eq_hi * (az_hi * bz_hi - cz_hi);
+
+            // t=2: f_lo + 2·delta
+            let eq_2 = eq_lo + eq_d.double();
+            let az_2 = az_lo + az_d.double();
+            let bz_2 = bz_lo + bz_d.double();
+            let cz_2 = cz_lo + cz_d.double();
+            evals[2] += eq_2 * (az_2 * bz_2 - cz_2);
+
+            // t=3: f_lo + 3·delta
+            let eq_3 = eq_2 + eq_d;
+            let az_3 = az_2 + az_d;
+            let bz_3 = bz_2 + bz_d;
+            let cz_3 = cz_2 + cz_d;
+            evals[3] += eq_3 * (az_3 * bz_3 - cz_3);
+        }
+
+        let round_evals = evals.to_vec();
+
+        assert_eq!(
+            round_evals[0] + round_evals[1],
+            current_claim,
+            "phase-1 table sumcheck: round claim mismatch"
+        );
+
+        challenger.observe_algebra_slice(&round_evals);
+        let r = challenger.sample();
+        current_claim = evaluate_univariate_from_samples(&round_evals, r);
+        challenges.push(r);
+        round_evals_all.push(round_evals);
+
+        // Bind all tables
+        bind_table(az, r);
+        bind_table(bz, r);
+        bind_table(cz, r);
+        bind_table(eq_tau, r);
+    }
+
+    SumcheckProof {
+        polynomials: round_evals_all,
+        challenges: challenges.clone(),
+        final_point: challenges,
+        final_eval: current_claim,
+    }
 }
 
-fn evaluate_g_io_tau_at_point<F: Field>(shape: &R1CSShape<F>, tau: &[F], z: &[F], x: &[F]) -> F {
-    let a_x = shape
-        .a()
-        .entries()
-        .iter()
-        .map(|entry| entry.val * eq_poly_at_index::<F, F>(entry.row, x) * z[entry.col])
-        .sum::<F>();
-    let b_x = shape
-        .b()
-        .entries()
-        .iter()
-        .map(|entry| entry.val * eq_poly_at_index::<F, F>(entry.row, x) * z[entry.col])
-        .sum::<F>();
-    let c_x = shape
-        .c()
-        .entries()
-        .iter()
-        .map(|entry| entry.val * eq_poly_at_index::<F, F>(entry.row, x) * z[entry.col])
-        .sum::<F>();
-    let f_x = a_x * b_x - c_x;
-    f_x * eq_poly_base(tau, x)
+/// Phase 2 table-based sumcheck: Q(y) = Z(y) · L(y), degree 2.
+///
+/// L(y) = α·A(rx,y) + β·B(rx,y) + γ·C(rx,y) is precomputed in lin_table.
+fn prove_sumcheck_phase2<F, Challenger>(
+    num_vars: usize,
+    initial_claim: F,
+    z_table: &mut Vec<F>,
+    lin_table: &mut Vec<F>,
+    challenger: &mut Challenger,
+) -> SumcheckProof<F>
+where
+    F: Field,
+    Challenger: FieldChallenger<F> + CanObserve<F> + GrindingChallenger<Witness = F>,
+{
+    let mut current_claim = initial_claim;
+    let mut challenges = Vec::with_capacity(num_vars);
+    let mut round_evals_all = Vec::with_capacity(num_vars);
+
+    for _round in 0..num_vars {
+        let half = z_table.len() / 2;
+
+        // Evaluate degree-2 univariate at points 0, 1, 2
+        // Adjacent pairs (2i, 2i+1) differ in bit 0 (LSB-first convention)
+        let mut evals = [F::ZERO; 3];
+
+        for i in 0..half {
+            let z_lo = z_table[2 * i];
+            let z_hi = z_table[2 * i + 1];
+            let l_lo = lin_table[2 * i];
+            let l_hi = lin_table[2 * i + 1];
+
+            let z_d = z_hi - z_lo;
+            let l_d = l_hi - l_lo;
+
+            // t=0
+            evals[0] += z_lo * l_lo;
+
+            // t=1
+            evals[1] += z_hi * l_hi;
+
+            // t=2
+            let z_2 = z_lo + z_d.double();
+            let l_2 = l_lo + l_d.double();
+            evals[2] += z_2 * l_2;
+        }
+
+        let round_evals = evals.to_vec();
+
+        assert_eq!(
+            round_evals[0] + round_evals[1],
+            current_claim,
+            "phase-2 table sumcheck: round claim mismatch"
+        );
+
+        challenger.observe_algebra_slice(&round_evals);
+        let r = challenger.sample();
+        current_claim = evaluate_univariate_from_samples(&round_evals, r);
+        challenges.push(r);
+        round_evals_all.push(round_evals);
+
+        bind_table(z_table, r);
+        bind_table(lin_table, r);
+    }
+
+    SumcheckProof {
+        polynomials: round_evals_all,
+        challenges: challenges.clone(),
+        final_point: challenges,
+        final_eval: current_claim,
+    }
 }
 
 fn evaluate_univariate_from_samples<F: Field>(samples: &[F], r: F) -> F {
@@ -532,66 +679,6 @@ fn evaluate_univariate_from_samples<F: Field>(samples: &[F], r: F) -> F {
     }
 
     result
-}
-
-fn prove_sumcheck_from_oracle<F, Challenger, RoundEvalFn>(
-    num_vars: usize,
-    degree: usize,
-    initial_claim: F,
-    challenger: &mut Challenger,
-    mut round_eval_fn: RoundEvalFn,
-) -> SumcheckProof<F>
-where
-    F: Field,
-    Challenger: FieldChallenger<F> + CanObserve<F> + GrindingChallenger<Witness = F>,
-    RoundEvalFn: FnMut(&[F], F) -> F,
-{
-    let mut current_claim = initial_claim;
-    let mut challenges = Vec::with_capacity(num_vars);
-    let mut round_evals_all = Vec::with_capacity(num_vars);
-
-    for _round in 0..num_vars {
-        let prefix = challenges.as_slice();
-        let round_evals: Vec<F> = (0..=degree)
-            .map(|j| round_eval_fn(prefix, F::from_usize(j)))
-            .collect();
-        // Prover-side sanity check mirrors verifier recurrence.
-        assert_eq!(
-            round_evals[0] + round_evals[1],
-            current_claim,
-            "sumcheck oracle produced inconsistent round claim"
-        );
-
-        challenger.observe_algebra_slice(&round_evals);
-        let r = challenger.sample();
-        current_claim = evaluate_univariate_from_samples(&round_evals, r);
-        challenges.push(r);
-        round_evals_all.push(round_evals);
-    }
-
-    SumcheckProof {
-        polynomials: round_evals_all,
-        challenges: challenges.clone(),
-        final_point: challenges,
-        final_eval: current_claim,
-    }
-}
-
-fn eval_mle_from_hypercube<EF: ExtensionField<F>, F: Field>(values: &[F], point: &[F]) -> EF {
-    assert_eq!(
-        values.len(),
-        1usize << point.len(),
-        "values must match hypercube size for point dimension"
-    );
-
-    let point_ef: Vec<EF> = point.iter().copied().map(EF::from).collect();
-    values
-        .iter()
-        .enumerate()
-        .map(|(idx, &val)| {
-            super::encoding::eq_poly_at_index::<EF, F>(idx, &point_ef) * EF::from(val)
-        })
-        .sum()
 }
 
 impl<F: Field> Default for R1CSVerifier<F> {
