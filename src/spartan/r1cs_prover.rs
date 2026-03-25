@@ -259,6 +259,148 @@ impl<F: Field> R1CSProver<F> {
         }
     }
 
+    /// Prove R1CS instance satisfaction using the naive oracle-based sumcheck.
+    ///
+    /// This is the original O(2^s · nnz)-per-round prover kept for benchmarking
+    /// comparisons against the table-based `prove`. The protocol and proof
+    /// format are identical; only the prover's internal algorithm differs.
+    #[allow(clippy::too_many_lines)]
+    pub fn prove_oracle<EF, Challenger>(
+        &self,
+        instance: &R1CSInstance<F>,
+        challenger: &mut Challenger,
+    ) -> R1CSProof<F, EF>
+    where
+        EF: ExtensionField<F>,
+        Challenger: FieldChallenger<F> + CanObserve<F> + GrindingChallenger<Witness = F>,
+    {
+        let num_cons_vars = instance.shape().num_cons().trailing_zeros() as usize;
+        let tau: Vec<F> = (0..num_cons_vars).map(|_| challenger.sample()).collect();
+
+        let z = instance.build_z_vector();
+
+        // Phase 1: oracle-based sumcheck on G_io,τ (degree 3)
+        let phase1_sumcheck_proof = prove_sumcheck_from_oracle(
+            num_cons_vars,
+            3,
+            F::ZERO,
+            challenger,
+            |prefix: &[F], t: F| -> F {
+                let remaining = num_cons_vars - prefix.len() - 1;
+                let mut sum = F::ZERO;
+                for b in 0..(1usize << remaining) {
+                    let mut x = Vec::with_capacity(num_cons_vars);
+                    x.extend_from_slice(prefix);
+                    x.push(t);
+                    for j in 0..remaining {
+                        x.push(if ((b >> j) & 1) == 1 { F::ONE } else { F::ZERO });
+                    }
+                    sum += evaluate_g_io_tau_at_point(instance.shape(), &tau, &z, &x);
+                }
+                sum
+            },
+        );
+        let rx = phase1_sumcheck_proof.final_point.clone();
+        let phase1_final_eval = phase1_sumcheck_proof.final_eval;
+
+        // Compute primary claims at r_x.
+        let num_vars_y = instance.shape().num_poly_vars_y();
+        let (a_rx_y, b_rx_y, c_rx_y) = compute_matrix_evals_at_rx(instance.shape(), &rx);
+        let a_eval = a_rx_y.iter().zip(z.iter()).map(|(a, z_y)| *a * *z_y).sum();
+        let b_eval = b_rx_y.iter().zip(z.iter()).map(|(b, z_y)| *b * *z_y).sum();
+        let c_eval = c_rx_y.iter().zip(z.iter()).map(|(c, z_y)| *c * *z_y).sum();
+        let eq_tau_rx = eq_poly_base(&tau, &rx);
+        assert_eq!(
+            phase1_final_eval,
+            (a_eval * b_eval - c_eval) * eq_tau_rx,
+            "internal consistency failure: phase-1 equation must hold"
+        );
+
+        // Phase-2 sum-check over y
+        let phase2_coeffs = Phase2Coeffs {
+            a: challenger.sample(),
+            b: challenger.sample(),
+            c: challenger.sample(),
+        };
+        let phase2_initial_claim =
+            phase2_coeffs.a * a_eval + phase2_coeffs.b * b_eval + phase2_coeffs.c * c_eval;
+        let phase2_sumcheck_proof = prove_sumcheck_from_oracle(
+            num_vars_y,
+            2,
+            phase2_initial_claim,
+            challenger,
+            |prefix: &[F], t: F| -> F {
+                let remaining = num_vars_y - prefix.len() - 1;
+                let mut sum = F::ZERO;
+                for b in 0..(1usize << remaining) {
+                    let mut y = Vec::with_capacity(num_vars_y);
+                    y.extend_from_slice(prefix);
+                    y.push(t);
+                    for j in 0..remaining {
+                        y.push(if ((b >> j) & 1) == 1 { F::ONE } else { F::ZERO });
+                    }
+                    let z_y: F = eval_mle_from_hypercube::<F, F>(&z, &y);
+                    let a_y = eval_sparse_at_point(instance.shape().a(), &rx, &y);
+                    let b_y = eval_sparse_at_point(instance.shape().b(), &rx, &y);
+                    let c_y = eval_sparse_at_point(instance.shape().c(), &rx, &y);
+                    let lin =
+                        phase2_coeffs.a * a_y + phase2_coeffs.b * b_y + phase2_coeffs.c * c_y;
+                    sum += z_y * lin;
+                }
+                sum
+            },
+        );
+        let ry = phase2_sumcheck_proof.final_point.clone();
+        let phase2_final_eval = phase2_sumcheck_proof.final_eval;
+
+        let z_eval: F = eval_mle_from_hypercube::<F, F>(&z, &ry);
+        let spark_challenges = SparkCompressionChallenges {
+            gamma: challenger.sample(),
+            eta: challenger.sample(),
+        };
+        let spark_proof = SparkProof::from_matrices(
+            instance.shape().a(),
+            instance.shape().b(),
+            instance.shape().c(),
+            &rx,
+            &ry,
+            spark_challenges,
+        );
+
+        let a_matrix_eval = spark_proof.batch_opening.a_eval;
+        let b_matrix_eval = spark_proof.batch_opening.b_eval;
+        let c_matrix_eval = spark_proof.batch_opening.c_eval;
+        let phase2_terminal_rhs = z_eval
+            * (phase2_coeffs.a * a_matrix_eval
+                + phase2_coeffs.b * b_matrix_eval
+                + phase2_coeffs.c * c_matrix_eval);
+        assert_eq!(
+            phase2_final_eval, phase2_terminal_rhs,
+            "internal consistency failure: phase-2 terminal relation must hold"
+        );
+
+        R1CSProof {
+            public_input: instance.input().to_vec(),
+            tau,
+            phase1_sumcheck_proof,
+            phase2_sumcheck_proof,
+            phase2_coeffs,
+            eval_claims: R1CSEvalClaims {
+                a_eval,
+                b_eval,
+                c_eval,
+                rx,
+                ry,
+                z_eval,
+                a_matrix_eval,
+                b_matrix_eval,
+                c_matrix_eval,
+            },
+            spark_proof: Some(spark_proof),
+            _phantom: core::marker::PhantomData,
+        }
+    }
+
     /// Commit to witness polynomial using WHIR
     ///
     /// This prepares the witness for the WHIR commitment scheme.
@@ -679,6 +821,141 @@ fn evaluate_univariate_from_samples<F: Field>(samples: &[F], r: F) -> F {
     }
 
     result
+}
+
+// ============================================================================
+// Oracle-based sumcheck helpers (used by `prove_oracle`)
+// ============================================================================
+
+fn compute_matrix_evals_at_rx<F: Field>(
+    shape: &R1CSShape<F>,
+    rx: &[F],
+) -> (Vec<F>, Vec<F>, Vec<F>) {
+    let num_y = 1usize << shape.num_poly_vars_y();
+    let mut a_vals = vec![F::ZERO; num_y];
+    let mut b_vals = vec![F::ZERO; num_y];
+    let mut c_vals = vec![F::ZERO; num_y];
+
+    for entry in shape.a().entries() {
+        let eq_row = eq_poly_at_index::<F, F>(entry.row, rx);
+        a_vals[entry.col] += entry.val * eq_row;
+    }
+    for entry in shape.b().entries() {
+        let eq_row = eq_poly_at_index::<F, F>(entry.row, rx);
+        b_vals[entry.col] += entry.val * eq_row;
+    }
+    for entry in shape.c().entries() {
+        let eq_row = eq_poly_at_index::<F, F>(entry.row, rx);
+        c_vals[entry.col] += entry.val * eq_row;
+    }
+
+    (a_vals, b_vals, c_vals)
+}
+
+fn eq_poly_base<F: Field>(t: &[F], x: &[F]) -> F {
+    assert_eq!(t.len(), x.len());
+    let mut result = F::ONE;
+    for i in 0..t.len() {
+        result *= t[i] * x[i] + (F::ONE - t[i]) * (F::ONE - x[i]);
+    }
+    result
+}
+
+fn eval_sparse_at_point<F: Field>(
+    mat: &super::r1cs::SparseMatPolynomial<F>,
+    rx: &[F],
+    ry: &[F],
+) -> F {
+    mat.entries()
+        .iter()
+        .map(|entry| {
+            entry.val
+                * eq_poly_at_index::<F, F>(entry.row, rx)
+                * eq_poly_at_index::<F, F>(entry.col, ry)
+        })
+        .sum()
+}
+
+fn evaluate_g_io_tau_at_point<F: Field>(shape: &R1CSShape<F>, tau: &[F], z: &[F], x: &[F]) -> F {
+    let a_x = shape
+        .a()
+        .entries()
+        .iter()
+        .map(|entry| entry.val * eq_poly_at_index::<F, F>(entry.row, x) * z[entry.col])
+        .sum::<F>();
+    let b_x = shape
+        .b()
+        .entries()
+        .iter()
+        .map(|entry| entry.val * eq_poly_at_index::<F, F>(entry.row, x) * z[entry.col])
+        .sum::<F>();
+    let c_x = shape
+        .c()
+        .entries()
+        .iter()
+        .map(|entry| entry.val * eq_poly_at_index::<F, F>(entry.row, x) * z[entry.col])
+        .sum::<F>();
+    let f_x = a_x * b_x - c_x;
+    f_x * eq_poly_base(tau, x)
+}
+
+fn prove_sumcheck_from_oracle<F, Challenger, RoundEvalFn>(
+    num_vars: usize,
+    degree: usize,
+    initial_claim: F,
+    challenger: &mut Challenger,
+    mut round_eval_fn: RoundEvalFn,
+) -> SumcheckProof<F>
+where
+    F: Field,
+    Challenger: FieldChallenger<F> + CanObserve<F> + GrindingChallenger<Witness = F>,
+    RoundEvalFn: FnMut(&[F], F) -> F,
+{
+    let mut current_claim = initial_claim;
+    let mut challenges = Vec::with_capacity(num_vars);
+    let mut round_evals_all = Vec::with_capacity(num_vars);
+
+    for _round in 0..num_vars {
+        let prefix = challenges.as_slice();
+        let round_evals: Vec<F> = (0..=degree)
+            .map(|j| round_eval_fn(prefix, F::from_usize(j)))
+            .collect();
+        assert_eq!(
+            round_evals[0] + round_evals[1],
+            current_claim,
+            "sumcheck oracle produced inconsistent round claim"
+        );
+
+        challenger.observe_algebra_slice(&round_evals);
+        let r = challenger.sample();
+        current_claim = evaluate_univariate_from_samples(&round_evals, r);
+        challenges.push(r);
+        round_evals_all.push(round_evals);
+    }
+
+    SumcheckProof {
+        polynomials: round_evals_all,
+        challenges: challenges.clone(),
+        final_point: challenges,
+        final_eval: current_claim,
+    }
+}
+
+fn eval_mle_from_hypercube<EF: ExtensionField<F>, F: Field>(values: &[F], point: &[F]) -> EF {
+    assert_eq!(
+        values.len(),
+        1usize << point.len(),
+        "values must match hypercube size for point dimension"
+    );
+
+    let point_ef: Vec<EF> = point.iter().copied().map(EF::from).collect();
+    values
+        .iter()
+        .enumerate()
+        .map(|(idx, &val)| {
+            super::encoding::eq_poly_at_index::<EF, F>(idx, &point_ef) * EF::from(val)
+        })
+        .sum()
 }
 
 impl<F: Field> Default for R1CSVerifier<F> {
@@ -1239,6 +1516,66 @@ mod tests {
             result.is_ok(),
             "non-symmetric instance should verify, got {:?}",
             result.err()
+        );
+    }
+
+    #[test]
+    fn test_table_and_oracle_provers_produce_identical_proofs() {
+        let (shape, instance, _input) = make_square_instance(4);
+        let prover = super::R1CSProver::new();
+
+        let perm = Perm::new_from_rng_128(&mut rand::rngs::SmallRng::seed_from_u64(42));
+
+        // Table-based proof
+        let mut ch1 = Challenger::new(perm.clone());
+        let proof_table = prover.prove::<p3_field::extension::BinomialExtensionField<F, 4>, _>(
+            &instance,
+            &mut ch1,
+        );
+
+        // Oracle-based proof (same seed → same challenger state)
+        let mut ch2 = Challenger::new(perm);
+        let proof_oracle =
+            prover.prove_oracle::<p3_field::extension::BinomialExtensionField<F, 4>, _>(
+                &instance,
+                &mut ch2,
+            );
+
+        // Both must produce bit-identical proofs
+        assert_eq!(proof_table.tau, proof_oracle.tau);
+        assert_eq!(
+            proof_table.phase1_sumcheck_proof.polynomials,
+            proof_oracle.phase1_sumcheck_proof.polynomials,
+            "Phase 1 round polynomials differ"
+        );
+        assert_eq!(
+            proof_table.phase1_sumcheck_proof.challenges,
+            proof_oracle.phase1_sumcheck_proof.challenges,
+        );
+        assert_eq!(
+            proof_table.eval_claims.a_eval,
+            proof_oracle.eval_claims.a_eval,
+        );
+        assert_eq!(
+            proof_table.eval_claims.b_eval,
+            proof_oracle.eval_claims.b_eval,
+        );
+        assert_eq!(
+            proof_table.eval_claims.c_eval,
+            proof_oracle.eval_claims.c_eval,
+        );
+        assert_eq!(
+            proof_table.phase2_sumcheck_proof.polynomials,
+            proof_oracle.phase2_sumcheck_proof.polynomials,
+            "Phase 2 round polynomials differ"
+        );
+        assert_eq!(
+            proof_table.eval_claims.z_eval,
+            proof_oracle.eval_claims.z_eval,
+        );
+        assert_eq!(
+            proof_table.eval_claims.a_matrix_eval,
+            proof_oracle.eval_claims.a_matrix_eval,
         );
     }
 }

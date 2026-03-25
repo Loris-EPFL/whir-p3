@@ -264,6 +264,102 @@ macro_rules! bench_field_impl {
                 (prover_ms / repeats as f64, verifier_ms / repeats as f64)
             }
 
+            /// Benchmark table-based vs oracle-based prover side by side.
+            /// Returns (table_prover_ms, oracle_prover_ms, verifier_ms).
+            pub(crate) fn bench_table_vs_oracle(
+                material: &ScenarioMaterial<$F>,
+                repeats: usize,
+            ) -> (f64, f64, f64) {
+                let prover = R1CSProver::<$F>::new();
+                let verifier = R1CSVerifier::<$F>::new();
+
+                let mut table_ms = 0.0;
+                let mut oracle_ms = 0.0;
+                let mut verifier_ms = 0.0;
+
+                for i in 0..repeats {
+                    let seed = 0x5eed_u64 + i as u64;
+                    let perm =
+                        <$Perm>::new_from_rng_128(&mut rand::rngs::SmallRng::seed_from_u64(seed));
+
+                    // Table-based prover
+                    let mut ch = <$Challenger>::new(perm.clone());
+                    let t0 = Instant::now();
+                    let proof_table = prover.prove::<$EF, _>(&material.instance, &mut ch);
+                    table_ms += t0.elapsed().as_secs_f64() * 1_000.0;
+                    let _ = black_box(&proof_table);
+
+                    // Oracle-based prover (same seed = same transcript)
+                    let mut ch = <$Challenger>::new(perm.clone());
+                    let t0 = Instant::now();
+                    let proof_oracle = prover.prove_oracle::<$EF, _>(&material.instance, &mut ch);
+                    oracle_ms += t0.elapsed().as_secs_f64() * 1_000.0;
+                    let _ = black_box(&proof_oracle);
+
+                    // Verify once (same proof either way)
+                    let mut ch = <$Challenger>::new(perm);
+                    let t0 = Instant::now();
+                    verifier
+                        .verify::<$EF, _>(
+                            &material.shape,
+                            material.instance.input(),
+                            &proof_table,
+                            &mut ch,
+                        )
+                        .expect("verifier should accept benchmark proof");
+                    verifier_ms += t0.elapsed().as_secs_f64() * 1_000.0;
+                }
+
+                (
+                    table_ms / repeats as f64,
+                    oracle_ms / repeats as f64,
+                    verifier_ms / repeats as f64,
+                )
+            }
+
+            /// Run the table-vs-oracle comparison for given log_m sizes.
+            pub(crate) fn run_compare(log_ms: &[usize], repeats: usize) {
+                println!("Spartan Prover: Table vs Oracle — {} ({})", $field_name, stringify!($F));
+                println!("================================================================");
+                println!(
+                    "{:>6} {:>6} {:>5} | {:>10} {:>10} {:>10} | {:>7}",
+                    "log_m", "shape", "nnz/r",
+                    "table_ms", "oracle_ms", "verify_ms",
+                    "speedup",
+                );
+                println!("{}", "-".repeat(72));
+
+                for shape in ShapeKind::all() {
+                    for &log_m in log_ms {
+                        let num_cons = 1usize << log_m;
+                        let num_vars = shape.num_vars(num_cons);
+                        let nnz_per_row = 4usize.min(num_vars.max(1));
+
+                        let scenario = Scenario { shape, log_m, nnz_per_row };
+                        let material = build_scenario::<$F>(&scenario);
+
+                        // Warm up
+                        let _ = bench_table_vs_oracle(&material, 1);
+
+                        let (table_ms, oracle_ms, verifier_ms) =
+                            bench_table_vs_oracle(&material, repeats);
+
+                        let speedup = oracle_ms / table_ms;
+                        println!(
+                            "{:>6} {:>6} {:>5} | {:>10.3} {:>10.3} {:>10.3} | {:>6.2}x",
+                            log_m,
+                            shape.as_str(),
+                            nnz_per_row,
+                            table_ms,
+                            oracle_ms,
+                            verifier_ms,
+                            speedup,
+                        );
+                    }
+                }
+                println!();
+            }
+
             fn bench_opening_pair(
                 material: &ScenarioMaterial<$F>,
                 queries: usize,
@@ -606,8 +702,71 @@ bench_field_impl!(
     32
 );
 
+fn parse_csv_sizes(s: &str) -> Vec<usize> {
+    s.split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.parse().expect("invalid log_m size"))
+        .collect()
+}
+
+fn print_compare_usage() {
+    eprintln!("Usage:");
+    eprintln!("  spartan_spark_bench compare <log_m_sizes> <repeats> [--field babybear|m31|koalabear|goldilocks|all]");
+    eprintln!("  spartan_spark_bench [--quick]              (original CSV benchmark)");
+    eprintln!();
+    eprintln!("Examples:");
+    eprintln!("  spartan_spark_bench compare \"4,6,8,10\" 5");
+    eprintln!("  spartan_spark_bench compare \"6,8,10,12\" 10 --field babybear");
+    eprintln!("  spartan_spark_bench --quick");
+}
+
 fn main() {
-    let quick = std::env::args().any(|a| a == "--quick");
+    let args: Vec<String> = std::env::args().collect();
+
+    // ---- compare mode: table vs oracle side-by-side ----
+    if args.get(1).map(|s| s.as_str()) == Some("compare") {
+        let sizes_str = args.get(2).map(|s| s.as_str()).unwrap_or_else(|| {
+            print_compare_usage();
+            std::process::exit(1);
+        });
+        let repeats: usize = args
+            .get(3)
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(5);
+        let field_flag = args.iter().position(|a| a == "--field")
+            .and_then(|i| args.get(i + 1))
+            .map(|s| s.to_lowercase());
+        let field = field_flag.as_deref().unwrap_or("babybear");
+
+        let log_ms = parse_csv_sizes(sizes_str);
+
+        println!("Table-based vs Oracle-based Spartan Prover");
+        println!("==========================================");
+        println!("log_m sizes: {:?}  |  repeats: {}  |  field: {}", log_ms, repeats, field);
+        println!();
+
+        match field {
+            "babybear" => bench_babybear::run_compare(&log_ms, repeats),
+            "m31" => bench_m31::run_compare(&log_ms, repeats),
+            "koalabear" => bench_koalabear::run_compare(&log_ms, repeats),
+            "goldilocks" => bench_goldilocks::run_compare(&log_ms, repeats),
+            "all" => {
+                bench_babybear::run_compare(&log_ms, repeats);
+                bench_m31::run_compare(&log_ms, repeats);
+                bench_koalabear::run_compare(&log_ms, repeats);
+                bench_goldilocks::run_compare(&log_ms, repeats);
+            }
+            _ => {
+                eprintln!("Unknown field: {field}. Use babybear, m31, koalabear, goldilocks, or all.");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+
+    // ---- original CSV benchmark mode ----
+    let quick = args.iter().any(|a| a == "--quick");
     let repeats = if quick { 2 } else { 6 };
 
     let out_dir = Path::new("output/benchmarks/spartan_spark");
