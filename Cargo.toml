@@ -90,6 +90,7 @@ default = ["parallel"]
 parallel = ["dep:rayon", "p3-maybe-rayon/parallel", "p3-util/parallel"]
 rayon = ["dep:rayon"]
 cli = ["dep:clap", "dep:tracing-subscriber", "dep:tracing-forest", "dep:bincode", "rand/default"]
+bench-timing = []
 
 [[bin]]
 name = "main"
