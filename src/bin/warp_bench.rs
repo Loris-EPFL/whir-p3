@@ -21,16 +21,24 @@ use p3_symmetric::{PaddingFreeSponge, TruncatedPermutation};
 use rand::{rngs::SmallRng, SeedableRng};
 
 use whir_p3::{
-    accumulation::warp::{
-        accumulator::{FreshInstance, WarpAccumulator, WarpAccumulatorInstance, WarpAccumulatorWitness},
-        decider::warp_decide_algebraic,
-        encoding::{codeword_size, merkle_commit_codeword},
-        fold::{warp_fold_prove_rs_committed, warp_fold_verify, FreshInstancePublic, RSEncodingConfig, WarpFoldResult},
+    accumulation::{
+        constraint_batch::constraint_batch_prove,
+        linearized::linearized_statement_from_spartan_proof,
+        random_lc::random_linear_combination,
+        warp::{
+            accumulator::{FreshInstance, WarpAccumulator, WarpAccumulatorInstance, WarpAccumulatorWitness},
+            decider::warp_decide_algebraic,
+            encoding::{codeword_size, merkle_commit_codeword},
+            fold::{warp_fold_prove_rs_committed, warp_fold_verify, FreshInstancePublic, RSEncodingConfig, WarpFoldResult},
+        },
     },
     fiat_shamir::domain_separator::DomainSeparator,
     parameters::{errors::SecurityAssumption, FoldingFactor, ProtocolParameters},
     poly::{evals::EvaluationsList, multilinear::MultilinearPoint},
-    spartan::r1cs::{R1CSShape, SparseMatEntry},
+    spartan::{
+        r1cs::{R1CSInstance, R1CSShape, SparseMatEntry},
+        r1cs_prover::R1CSProver,
+    },
     whir::{
         committer::{reader::CommitmentReader, writer::CommitmentWriter},
         constraints::statement::{EqStatement, InitialClaim, LinearStatement},
@@ -369,6 +377,165 @@ fn run_warp(
 }
 
 // ============================================================================
+// FULL PIPELINE: Spartan → Quasar multicast → WARP fold → 1 terminal WHIR
+// ============================================================================
+
+fn run_full_pipeline(
+    shape: &R1CSShape<F>,
+    config: &WhirConfig<EF, F, MyHash, MyCompress, MyChallenger>,
+    num_steps: usize,
+    batch: usize,
+    num_cons: usize,
+    num_witness: usize,
+    num_inputs: usize,
+) -> (f64, f64, f64, f64) {
+    // Returns (spartan_us, quasar_us, fold_us, whir_us)
+    let witness_num_vars = num_witness.trailing_zeros() as usize;
+    let log_code = witness_num_vars + RS_LOG_INV_RATE;
+    let log_m = shape.num_cons().next_power_of_two().trailing_zeros() as usize;
+
+    let rs_config = RSEncodingConfig::new(RS_FOLDING_FACTOR, RS_LOG_INV_RATE);
+    let dft = Radix2DFTSmallBatch::<F>::default();
+    let perm = Perm::new_from_rng_128(&mut SmallRng::seed_from_u64(42));
+    let merkle_hash = MyHash::new(perm.clone());
+    let merkle_compress = MyCompress::new(perm);
+
+    let spartan_prover = R1CSProver::new();
+
+    // Build a satisfying synthetic R1CS instance (reuse for all steps).
+    let mut rng = SmallRng::seed_from_u64(5);
+    let (_synth_shape, synth_instance) =
+        R1CSInstance::<F>::produce_synthetic_r1cs(num_cons, shape.num_vars(), num_inputs, &mut rng);
+    debug_assert!(
+        shape.is_sat(synth_instance.witness(), synth_instance.input()),
+        "synthetic instance does not satisfy R1CS"
+    );
+
+    // ── Phase 1: Spartan linearize all instances ──
+    let spartan_start = Instant::now();
+    let total = num_steps * batch;
+    let mut all_witnesses = Vec::with_capacity(total);
+    let mut all_linears = Vec::with_capacity(total);
+    for i in 0..total {
+        let perm = Perm::new_from_rng_128(&mut SmallRng::seed_from_u64(i as u64 + 200));
+        let mut challenger = MyChallenger::new(perm);
+        let proof = spartan_prover.prove::<EF, _>(&synth_instance, &mut challenger);
+        let witness = spartan_prover.prepare_witness(&synth_instance);
+        let linear = linearized_statement_from_spartan_proof(shape, &proof, EF::from_u64(3));
+        all_witnesses.push(witness);
+        all_linears.push(linear);
+    }
+    let spartan_us = spartan_start.elapsed().as_micros() as f64;
+
+    // ── Phase 2: Quasar multicast (per step) + WARP fold ──
+    let mut acc = make_initial_acc(num_witness, log_code, log_m, num_inputs);
+
+    let mut quasar_total_us = 0f64;
+    let mut fold_total_us = 0f64;
+
+    for step in 0..num_steps {
+        let start_idx = step * batch;
+        let end_idx = start_idx + batch;
+
+        // Quasar multicast: constraint batch + random LC
+        let quasar_start = Instant::now();
+
+        let step_witnesses = &all_witnesses[start_idx..end_idx];
+        let step_linears = &all_linears[start_idx..end_idx];
+
+        // Extract weights and targets
+        let mut weights = Vec::with_capacity(batch);
+        let mut targets = Vec::with_capacity(batch);
+        for linear in step_linears {
+            let (w, &t) = linear.iter().next().unwrap();
+            weights.push(w.clone());
+            targets.push(t);
+        }
+
+        let gamma = F::from_u64(step as u64 + 42);
+        let cb_perm = Perm::new_from_rng_128(&mut SmallRng::seed_from_u64(step as u64 + 300));
+        let mut cb_challenger = MyChallenger::new(cb_perm);
+        let (_batch_proof, _reduction_point) = constraint_batch_prove(
+            gamma, &weights, &targets,
+            &step_witnesses.iter().cloned().collect::<Vec<_>>(),
+            &mut cb_challenger,
+        );
+
+        // Random LC: combine witnesses into one
+        let eta = F::from_u64(step as u64 + 13);
+        let wit_refs: Vec<&EvaluationsList<F>> = step_witnesses.iter().collect();
+        let combined = random_linear_combination(&wit_refs, eta);
+
+        quasar_total_us += quasar_start.elapsed().as_micros() as f64;
+
+        // Create FreshInstance from the combined witness.
+        // prepare_witness returns z = (public_input || witness || padding),
+        // so the combined poly includes the public input portion.
+        // FreshInstance wants separate public_input and witness fields.
+        let combined_slice = combined.as_slice();
+        let public_input = combined_slice[..num_inputs].to_vec();
+        let mut combined_witness = combined_slice[num_inputs..].to_vec();
+        combined_witness.resize(num_witness, F::ZERO);
+
+        let fresh = vec![FreshInstance {
+            public_input,
+            witness: combined_witness,
+        }];
+
+        // WARP fold
+        let fold_start = Instant::now();
+
+        let l = (1usize + 1).next_power_of_two(); // 1 acc + 1 fresh = 2
+        let log_l = l.trailing_zeros() as usize;
+        let tau: Vec<F> = (0..log_l).map(|i| F::from_u64(step as u64 * 10 + i as u64 + 42)).collect();
+
+        let mh = merkle_hash.clone();
+        let mc = merkle_compress.clone();
+        let mut ctr = step as u64 * 1000;
+        let result = warp_fold_prove_rs_committed(shape, &fresh, &acc, F::from_u64(7), &tau,
+            &rs_config, &dft,
+            |_| { ctr += 1; F::from_u64(ctr + 500) },
+            |codeword, folding_factor| {
+                let (root, _tree) = merkle_commit_codeword::<
+                    F, F, <F as Field>::Packing, <F as Field>::Packing,
+                    MyHash, MyCompress, DIGEST,
+                >(codeword, folding_factor, mh.clone(), mc.clone());
+                root
+            },
+        );
+
+        fold_total_us += fold_start.elapsed().as_micros() as f64;
+        acc = rebuild_acc(&result);
+    }
+
+    // ── Phase 3: Terminal WHIR proof ──
+    let ds = make_domain_sep(config);
+    let mut witness_vec = acc.witness.witness.clone();
+    let padded_len = witness_vec.len().next_power_of_two();
+    witness_vec.resize(padded_len, F::ZERO);
+    let witness_poly = EvaluationsList::new(witness_vec);
+
+    let whir_start = Instant::now();
+    {
+        let linear_claim = LinearStatement::<F, EF>::initialize(witness_num_vars);
+        let mut statement = config.initial_statement_with_linear(witness_poly, linear_claim);
+        let mut proof = WhirProof::<F, EF, F, DIGEST>::from_whir_config(config);
+        let mut challenger = seed_challenger(999, &ds);
+        let commitment = CommitmentWriter::new(config)
+            .commit::<_, <F as Field>::Packing, F, <F as Field>::Packing, DIGEST>(
+                &dft, &mut proof, &mut challenger, &mut statement,
+            ).unwrap();
+        WhirProver(config)
+            .prove::<_, <F as Field>::Packing, F, <F as Field>::Packing, DIGEST>(
+                &dft, &mut proof, &mut challenger, &statement, commitment,
+            ).unwrap();
+    }
+    let whir_us = whir_start.elapsed().as_micros() as f64;
+
+    (spartan_us, quasar_total_us, fold_total_us, whir_us)
+}
+
+// ============================================================================
 // Main
 // ============================================================================
 
@@ -382,14 +549,15 @@ fn main() {
     let sizes = parse_csv(sizes_str);
     let steps_list = parse_csv(steps_str);
 
-    println!("WARP vs No-Fold Benchmark (with WHIR PCS)");
-    println!("==========================================");
+    println!("3-Way Benchmark: Full Pipeline vs WARP-only vs No-Fold");
+    println!("=====================================================");
     println!("Field: BabyBear (31-bit), EF: BabyBear^4");
     println!("WHIR: folding_factor=2, rate=1/2, security=100, pow=0");
     println!("Batch per step: {batch} | Repeats: {repeats}");
     println!();
-    println!("warp  = sumcheck folds + 1 terminal WHIR commit+prove");
-    println!("no_fold = N independent WHIR commit+prove (one per instance)");
+    println!("full    = Spartan + Quasar multicast + WARP fold + 1 WHIR");
+    println!("warp    = WARP fold (no Spartan) + 1 WHIR");
+    println!("no_fold = N independent WHIR commit+prove");
     println!();
 
     for &size_log2 in &sizes {
@@ -410,13 +578,14 @@ fn main() {
 
         println!("=== log2(witness) = {size_log2} (n={num_vars_y}, M={num_cons}, code=2^{log_code}) ===");
         println!();
-        println!("{:>6} | {:>10} {:>10} {:>10} {:>10} | {:>10} {:>10} {:>10} | {:>7} {:>10}",
+        println!("{:>6} | {:>10} {:>10} {:>10} | {:>10} {:>10} {:>10} | {:>10} {:>10} | {:>7} {:>7}",
             "steps",
-            "warp_fold", "warp_whir", "warp_tot", "warp_vfy",
-            "nf_prove", "nf_verify", "nf_total",
-            "speedup", "witness",
+            "full_prov", "warp_prov", "nf_prove",
+            "full_det", "warp_det", "nf_det",
+            "full_spd", "warp_spd",
+            "f/w", "f/nf",
         );
-        println!("{}", "-".repeat(115));
+        println!("{}", "-".repeat(130));
 
         for &num_steps in &steps_list {
             let total_instances = num_steps * batch;
@@ -430,55 +599,66 @@ fn main() {
             let mut warp_verifies = Vec::new();
             let mut nf_proves = Vec::new();
             let mut nf_verifies = Vec::new();
-            let mut last_fixed = true;
-            let mut last_wit_bytes = 0;
+            let mut full_spartans = Vec::new();
+            let mut full_quasars = Vec::new();
+            let mut full_folds = Vec::new();
+            let mut full_whirs = Vec::new();
 
             for _ in 0..repeats {
-                let (fold_us, decide_us, verify_us, wit_bytes, fixed) =
+                let (fold_us, decide_us, verify_us, _wit_bytes, _fixed) =
                     run_warp(&shape, &config, num_steps, batch, num_cons, num_witness, num_inputs);
                 warp_folds.push(fold_us);
                 warp_decides.push(decide_us);
                 warp_verifies.push(verify_us);
-                last_fixed = fixed;
-                last_wit_bytes = wit_bytes;
 
                 let (nf_p, nf_v) = run_no_fold(&config, total_instances, num_cons, num_witness);
                 nf_proves.push(nf_p);
                 nf_verifies.push(nf_v);
+
+                let (sp_us, qu_us, fo_us, wh_us) =
+                    run_full_pipeline(&shape, &config, num_steps, batch, num_cons, num_witness, num_inputs);
+                full_spartans.push(sp_us);
+                full_quasars.push(qu_us);
+                full_folds.push(fo_us);
+                full_whirs.push(wh_us);
             }
 
             let wf = median(&mut warp_folds);
             let wd = median(&mut warp_decides);
             let wv = median(&mut warp_verifies);
-            let warp_total = wf + wd;
+            let warp_prove = wf + wd;
 
             let nfp = median(&mut nf_proves);
             let nfv = median(&mut nf_verifies);
             let nf_total = nfp + nfv;
 
-            let speedup = nf_total / warp_total;
-            let tag = if last_fixed { "FIXED" } else { "GREW!" };
+            let fs = median(&mut full_spartans);
+            let fq = median(&mut full_quasars);
+            let ff = median(&mut full_folds);
+            let fw = median(&mut full_whirs);
+            let full_prove = fs + fq + ff + fw;
+
+            let full_vs_nf = nf_total / full_prove;
+            let warp_vs_nf = nf_total / warp_prove;
 
             println!(
-                "{:>6} | {:>8.0}us {:>8.0}us {:>8.0}us {:>8.0}us | {:>8.0}us {:>8.0}us {:>8.0}us | {:>6.2}x  {} [{}]",
+                "{:>6} | {:>8.0}us {:>8.0}us {:>8.0}us | {:>8.0}us {:>8.0}us {:>8.0}us | {:>8.0}us {:>8.0}us | {:>6.2}x {:>6.2}x",
                 num_steps,
-                wf, wd, warp_total, wv,
-                nfp, nfv, nf_total,
-                speedup,
-                human_bytes(last_wit_bytes),
-                tag,
+                full_prove, warp_prove, nfp,
+                fs, fq, ff,
+                fw, wd,
+                full_vs_nf, warp_vs_nf,
             );
         }
         println!();
     }
 
     println!("Legend:");
-    println!("  warp_fold  = total sumcheck fold time (all steps, no WHIR proof)");
-    println!("  warp_whir  = terminal WHIR commit+prove (runs once)");
-    println!("  warp_tot   = warp_fold + warp_whir (total prover cost)");
-    println!("  warp_vfy   = terminal WHIR verify (runs once)");
-    println!("  nf_prove   = N independent WHIR commit+prove");
-    println!("  nf_verify  = N independent WHIR verify");
-    println!("  speedup    = nf_total / warp_total (>1 = WARP wins)");
-    println!("  witness    = final accumulated witness size [FIXED = never grew]");
+    println!("  full_prov  = Spartan + Quasar + WARP fold + 1 WHIR (total prover)");
+    println!("  warp_prov  = WARP fold + 1 WHIR (prover, no Spartan/Quasar)");
+    println!("  nf_prove   = N independent WHIR proofs (baseline)");
+    println!("  full_det   = Spartan time | Quasar time | WARP fold time");
+    println!("  full_spd   = terminal WHIR (full pipeline) | terminal WHIR (warp-only)");
+    println!("  f/w        = no_fold / full_pipeline speedup");
+    println!("  f/nf       = no_fold / warp_only speedup");
 }

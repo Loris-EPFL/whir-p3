@@ -15,12 +15,23 @@
 
 use alloc::{vec, vec::Vec};
 
+use p3_challenger::{CanObserve, FieldChallenger, GrindingChallenger};
 use p3_dft::TwoAdicSubgroupDft;
-use p3_field::{Field, PrimeField64, TwoAdicField};
+use p3_field::{Algebra, ExtensionField, Field, PackedValue, PrimeField64, TwoAdicField};
+use p3_symmetric::{CryptographicHasher, Hash, PseudoCompressionFunction};
 
 use crate::{
+    fiat_shamir::errors::FiatShamirError,
     poly::evals::EvaluationsList,
     spartan::encoding::eq_poly_at_index,
+    whir::{
+        committer::{reader::CommitmentReader, writer::CommitmentWriter},
+        constraints::statement::{EqStatement, InitialClaim, LinearStatement},
+        parameters::WhirConfig,
+        proof::WhirProof,
+        prover::Prover as WhirProver,
+        verifier::{errors::VerifierError, Verifier as WhirVerifier},
+    },
 };
 
 use super::encoding::rs_encode;
@@ -259,6 +270,7 @@ where
 
     // Compute folded eval claim: μ_folded = f̃_folded(α_folded)
     let folded_mu = compute_mu(&folded_codeword, &folded_alpha);
+    let folded_witness_poly = EvaluationsList::new(folded_witness);
 
     // ═══════════════════════════════════════════
     // Phase 3: RS-encode + Merkle commit folded codeword
@@ -296,41 +308,71 @@ where
     }
 
     // ═══════════════════════════════════════════
-    // Phase 5: Evaluation batching sumcheck
+    // Phase 5: Build final eval claim on WITNESS polynomial
     // ═══════════════════════════════════════════
-    // Collect all eval claims: the folded claim (α, μ) + OOD claims
-    let mut all_eval_claims: Vec<(Vec<F>, F)> = Vec::new();
-    all_eval_claims.push((folded_alpha.clone(), folded_mu));
-    for (pt, &val) in ood_points.iter().zip(ood_answers.iter()) {
-        all_eval_claims.push((pt.clone(), val));
-    }
-    // Shift queries are at boolean points — add them too
-    for (k, &pos) in shift_query_positions.iter().enumerate() {
-        let bool_point: Vec<F> = (0..log_n)
-            .map(|bit| if (pos >> bit) & 1 == 1 { F::ONE } else { F::ZERO })
-            .collect();
-        all_eval_claims.push((bool_point, shift_query_values[k][0]));
-    }
+    // The eval claims are on the WITNESS polynomial (not codeword).
+    // Codeword was only used for proximity testing (shift queries + OOD).
+    // The terminal WHIR proof will be on the witness polynomial.
+    let wit_log_n = accumulators[0].witness.witness_poly.num_variables();
 
-    let rho = transcript_round(&[]);
-    let (new_eval_point, new_eval_claim, batch_round_polys, batch_challenges) =
+    // Folded eval point in witness domain (truncate if codeword-dimensioned)
+    let folded_alpha_wit = if folded_alpha.len() > wit_log_n {
+        folded_alpha[..wit_log_n].to_vec()
+    } else {
+        folded_alpha.clone()
+    };
+
+    // Use evaluate_hypercube_base to compute the eval claim — this matches
+    // WHIR's convention (via MultilinearPoint/new_from_point).
+    let folded_mu_wit = folded_witness_poly.evaluate_hypercube_base(
+        &crate::poly::multilinear::MultilinearPoint::new(folded_alpha_wit.clone()),
+    );
+
+    // If we have OOD/shift queries, run the evaluation batching sumcheck
+    // to reduce all claims to a single point. Otherwise, just use the
+    // folded (alpha, mu) directly.
+    let has_extra_claims = num_ood_samples > 0 || num_shift_queries > 0;
+
+    let (final_eval_point, final_mu, batch_round_polys, batch_challenges) = if has_extra_claims {
+        let mut all_eval_claims: Vec<(Vec<F>, F)> = Vec::new();
+        all_eval_claims.push((folded_alpha_wit.clone(), folded_mu_wit));
+        for (pt, &val) in ood_points.iter().zip(ood_answers.iter()) {
+            // OOD claims are on the codeword — convert to witness domain
+            let wit_pt = if pt.len() > wit_log_n { pt[..wit_log_n].to_vec() } else { pt.clone() };
+            let wit_val = folded_witness_poly.evaluate_hypercube_base(
+                &crate::poly::multilinear::MultilinearPoint::new(wit_pt.clone()),
+            );
+            all_eval_claims.push((wit_pt, wit_val));
+        }
+        for (k, &pos) in shift_query_positions.iter().enumerate() {
+            let bool_point: Vec<F> = (0..wit_log_n)
+                .map(|bit| if (pos >> bit) & 1 == 1 { F::ONE } else { F::ZERO })
+                .collect();
+            let val = folded_witness_poly.evaluate_hypercube_base(
+                &crate::poly::multilinear::MultilinearPoint::new(bool_point.clone()),
+            );
+            all_eval_claims.push((bool_point, val));
+        }
+
+        let rho = transcript_round(&[]);
         eval_batching_sumcheck(
-            folded_codeword_poly.as_slice(),
+            folded_witness_poly.as_slice(),
             &all_eval_claims,
             rho,
-            log_n,
+            wit_log_n,
             &mut transcript_round,
-        );
+        )
+    } else {
+        // No extra claims — the eval claim is just the folded (alpha, mu)
+        (folded_alpha_wit.clone(), folded_mu_wit, Vec::new(), Vec::new())
+    };
 
-    // Use the eval claim directly from the sumcheck (f_table[0] = f̃(α_new))
-    let final_mu = new_eval_claim;
-
-    let folded_witness_poly = EvaluationsList::new(folded_witness);
+    let final_mu = final_mu;
 
     EvalFoldResult {
         instance: EvalAccumulatorInstance {
             commitment_root,
-            eval_point: new_eval_point,
+            eval_point: final_eval_point,
             eval_claim: final_mu,
         },
         witness: EvalAccumulatorWitness {
@@ -435,15 +477,19 @@ fn eval_batching_sumcheck<F: Field>(
 }
 
 /// Create an initial (zero) eval accumulator for the first IVC step.
+///
+/// `witness_num_vars` is the number of variables in the witness polynomial (log_k).
+/// The eval_point lives in this domain.
+/// `code_len` is the RS-encoded codeword length (k * rate).
 pub fn initial_eval_accumulator<F: Field, const DIGEST_ELEMS: usize>(
     code_len: usize,
     witness_len: usize,
-    log_n: usize,
+    witness_num_vars: usize,
 ) -> EvalAccumulator<F, DIGEST_ELEMS> {
     EvalAccumulator {
         instance: EvalAccumulatorInstance {
             commitment_root: [F::ZERO; DIGEST_ELEMS],
-            eval_point: vec![F::ZERO; log_n],
+            eval_point: vec![F::ZERO; witness_num_vars],
             eval_claim: F::ZERO,
         },
         witness: EvalAccumulatorWitness {
@@ -503,6 +549,186 @@ where
             codeword,
             witness_poly: combined_witness,
         },
+    }
+}
+
+// ── Terminal WHIR decider ────────────────────────────────────────────
+
+/// Proof produced by the terminal decider.
+#[derive(Clone, Debug)]
+pub struct EvalDeciderProof<F, EF, W, const DIGEST_ELEMS: usize>
+where
+    F: Field,
+    EF: ExtensionField<F>,
+{
+    pub whir_proof: WhirProof<F, EF, W, DIGEST_ELEMS>,
+}
+
+/// Terminal decider for the eval-only accumulation pipeline.
+///
+/// Converts the final `EvalAccumulator`'s eval claim `f(α) = μ` into a
+/// `LinearStatement` (eq-weight table), then generates a single WHIR proof
+/// that the committed polynomial satisfies this claim.
+///
+/// This is the ONLY place a WHIR proof is generated in the entire pipeline.
+#[derive(Debug)]
+pub struct EvalDecider<'a, EF, F, H, C, Challenger>(
+    &'a WhirConfig<EF, F, H, C, Challenger>,
+)
+where
+    F: Field,
+    EF: ExtensionField<F>;
+
+impl<'a, EF, F, H, C, Challenger> EvalDecider<'a, EF, F, H, C, Challenger>
+where
+    F: TwoAdicField + Ord,
+    EF: ExtensionField<F> + TwoAdicField + Algebra<EF>,
+    Challenger: FieldChallenger<F> + GrindingChallenger<Witness = F>,
+{
+    pub const fn new(config: &'a WhirConfig<EF, F, H, C, Challenger>) -> Self {
+        Self(config)
+    }
+
+    /// Convert an eval claim (α, μ) on a base-field polynomial into a
+    /// `LinearStatement<F, EF>` suitable for WHIR.
+    ///
+    /// The claim f(α) = μ becomes: Σ_b eq(α, b) · f(b) = μ
+    /// where the weight table is eq(α, ·) and the target is μ.
+    fn eval_claim_to_linear_statement(
+        eval_point: &[F],
+        eval_claim: F,
+        num_variables: usize,
+    ) -> LinearStatement<F, EF> {
+        // Lift the base-field eval point to extension field for the eq table
+        let point_ef: Vec<EF> = eval_point.iter().map(|&x| EF::from(x)).collect();
+        let eq_weights = EvaluationsList::new_from_point(&point_ef, EF::ONE);
+        let mut statement = LinearStatement::<F, EF>::initialize(num_variables);
+        statement.add_constraint(eq_weights, EF::from(eval_claim));
+        statement
+    }
+
+    /// Prove: generate a standalone WHIR proof for the final eval accumulator.
+    ///
+    /// The WHIR proof is over the **witness polynomial** (not the codeword).
+    /// WHIR handles RS encoding internally.
+    pub fn prove<P, W, PW, Dft, const DIGEST_ELEMS: usize>(
+        &self,
+        dft: &Dft,
+        challenger: &mut Challenger,
+        accumulator: &EvalAccumulator<F, DIGEST_ELEMS>,
+    ) -> Result<EvalDeciderProof<F, EF, W, DIGEST_ELEMS>, FiatShamirError>
+    where
+        Dft: TwoAdicSubgroupDft<F>,
+        P: PackedValue<Value = F> + Eq + Send + Sync,
+        W: PackedValue<Value = W> + Eq + Send + Sync + Copy + Default,
+        PW: PackedValue<Value = W> + Eq + Send + Sync,
+        H: CryptographicHasher<F, [W; DIGEST_ELEMS]>
+            + CryptographicHasher<P, [PW; DIGEST_ELEMS]>
+            + Sync,
+        C: PseudoCompressionFunction<[W; DIGEST_ELEMS], 2>
+            + PseudoCompressionFunction<[PW; DIGEST_ELEMS], 2>
+            + Sync,
+        Challenger: CanObserve<Hash<F, W, DIGEST_ELEMS>>,
+        [W; DIGEST_ELEMS]: serde::Serialize + for<'de> serde::Deserialize<'de>,
+    {
+        let witness = &accumulator.witness.witness_poly;
+        let num_vars = witness.num_variables();
+
+        // Build the linear claim from the eval point/value
+        // The eval_point is in the codeword domain (log_n dims), but WHIR
+        // operates on the witness polynomial (log_k dims where k = n / rate).
+        // We need the eval claim to be on the witness polynomial.
+        //
+        // If eval_point has more dimensions than the witness (due to RS rate),
+        // we truncate to the witness dimensions. The extra dimensions from RS
+        // encoding are handled by WHIR's own encoding.
+        let eval_point_for_whir = if accumulator.instance.eval_point.len() > num_vars {
+            &accumulator.instance.eval_point[..num_vars]
+        } else {
+            &accumulator.instance.eval_point
+        };
+
+        let linear_claim = Self::eval_claim_to_linear_statement(
+            eval_point_for_whir,
+            accumulator.instance.eval_claim,
+            num_vars,
+        );
+
+        let mut statement = self.0.initial_statement_with_linear(
+            witness.clone(),
+            linear_claim,
+        );
+
+        let mut whir_proof =
+            WhirProof::<F, EF, W, DIGEST_ELEMS>::from_whir_config(self.0);
+        let commitment = CommitmentWriter::new(self.0).commit::<_, P, W, PW, DIGEST_ELEMS>(
+            dft,
+            &mut whir_proof,
+            challenger,
+            &mut statement,
+        )?;
+        WhirProver(self.0).prove::<_, P, W, PW, DIGEST_ELEMS>(
+            dft,
+            &mut whir_proof,
+            challenger,
+            &statement,
+            commitment,
+        )?;
+
+        Ok(EvalDeciderProof { whir_proof })
+    }
+
+    /// Verify: check the standalone decider proof.
+    ///
+    /// Reconstructs the linear claim from the eval point/value and verifies
+    /// the WHIR proof against it.
+    pub fn verify<P, W, PW, const DIGEST_ELEMS: usize>(
+        &self,
+        challenger: &mut Challenger,
+        accumulator: &EvalAccumulator<F, DIGEST_ELEMS>,
+        proof: &EvalDeciderProof<F, EF, W, DIGEST_ELEMS>,
+    ) -> Result<(), VerifierError>
+    where
+        P: PackedValue<Value = F> + Eq + Send + Sync,
+        W: PackedValue<Value = W> + Eq + Send + Sync + Copy + Default,
+        PW: PackedValue<Value = W> + Eq + Send + Sync,
+        H: CryptographicHasher<F, [W; DIGEST_ELEMS]>
+            + CryptographicHasher<P, [PW; DIGEST_ELEMS]>
+            + Sync,
+        C: PseudoCompressionFunction<[W; DIGEST_ELEMS], 2>
+            + PseudoCompressionFunction<[PW; DIGEST_ELEMS], 2>
+            + Sync,
+        Challenger: CanObserve<Hash<F, W, DIGEST_ELEMS>>,
+        [W; DIGEST_ELEMS]: serde::Serialize + for<'de> serde::Deserialize<'de>,
+    {
+        let num_vars = accumulator.witness.witness_poly.num_variables();
+        let eval_point_for_whir = if accumulator.instance.eval_point.len() > num_vars {
+            &accumulator.instance.eval_point[..num_vars]
+        } else {
+            &accumulator.instance.eval_point
+        };
+
+        let linear_claim = Self::eval_claim_to_linear_statement(
+            eval_point_for_whir,
+            accumulator.instance.eval_claim,
+            num_vars,
+        );
+
+        let initial_claim = InitialClaim {
+            eq_statement: EqStatement::initialize(num_vars),
+            linear_statement: linear_claim,
+        };
+
+        let parsed_commitment = CommitmentReader::new(self.0)
+            .parse_commitment::<W, DIGEST_ELEMS>(&proof.whir_proof, challenger);
+        WhirVerifier::new(self.0).verify_with_initial_claim::<P, W, PW, DIGEST_ELEMS>(
+            &proof.whir_proof,
+            challenger,
+            &parsed_commitment,
+            initial_claim,
+        )?;
+
+        Ok(())
     }
 }
 
