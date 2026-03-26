@@ -1,6 +1,10 @@
 pub mod accumulator;
+pub mod compact_instance;
+pub mod constraint_batch;
+pub mod decider;
 pub mod linearized;
 pub mod proof;
 pub mod quasar;
+pub mod random_lc;
 pub mod scheme;
 pub mod union_poly;

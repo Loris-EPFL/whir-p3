@@ -632,7 +632,8 @@ mod tests {
             )
             .unwrap();
 
-        let fold_config = make_whir_config(running_acc.witness.poly.num_variables() + 1);
+        // With random LC codeword batching, the combined poly has the same size as inputs
+        let fold_config = make_whir_config(running_acc.witness.poly.num_variables());
         let mut fold_challenger = seed_challenger(&fold_config, 11);
         let (folded, proof) = LinearizedAccumulationProver::new(&fold_config)
             .accumulate::<_, F, <F as Field>::Packing, _, 8>(

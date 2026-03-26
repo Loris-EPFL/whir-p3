@@ -262,9 +262,8 @@ fn prove_raw_fold_pipeline(
             )
         })
         .collect::<Vec<_>>();
-    let union_num_vars =
-        material.witness_poly.num_variables() + num_claims.trailing_zeros() as usize;
-    let config = make_whir_config(union_num_vars, args);
+    // Random LC keeps the same number of variables as the inputs
+    let config = make_whir_config(material.witness_poly.num_variables(), args);
     let domainsep = make_domain_sep(&config);
     let dft = Radix2DFTSmallBatch::<F>::default();
     let mut challenger = seed_challenger(1000 + num_claims as u64, &domainsep);
@@ -299,9 +298,8 @@ fn verify_raw_fold_pipeline(
         .iter()
         .map(|acc| acc.public_instance.clone())
         .collect::<Vec<_>>();
-    let union_num_vars =
-        material.witness_poly.num_variables() + num_claims.trailing_zeros() as usize;
-    let config = make_whir_config(union_num_vars, args);
+    // Random LC keeps the same number of variables as the inputs
+    let config = make_whir_config(material.witness_poly.num_variables(), args);
     let domainsep = make_domain_sep(&config);
     let mut challenger = seed_challenger(1000 + num_claims as u64, &domainsep);
     LinearizedAccumulationVerifier::new(&config)
@@ -342,7 +340,8 @@ fn prove_quasar_warp_pipeline(
         [F::from_u64(999); 8],
         EF::from(F::from_u64(3)),
     );
-    let fold_config = make_whir_config(material.witness_poly.num_variables() + 1, args);
+    // Random LC keeps the same number of variables as the inputs
+    let fold_config = make_whir_config(material.witness_poly.num_variables(), args);
     let fold_domainsep = make_domain_sep(&fold_config);
     let mut fold_challenger = seed_challenger(3000 + num_claims as u64, &fold_domainsep);
     let (folded, proof) = LinearizedAccumulationProver::new(&fold_config)
@@ -385,7 +384,8 @@ fn verify_quasar_warp_pipeline(
         [F::from_u64(999); 8],
         EF::from(F::from_u64(3)),
     );
-    let fold_config = make_whir_config(material.witness_poly.num_variables() + 1, args);
+    // Random LC keeps the same number of variables as the inputs
+    let fold_config = make_whir_config(material.witness_poly.num_variables(), args);
     let fold_domainsep = make_domain_sep(&fold_config);
     let mut fold_challenger = seed_challenger(3000 + num_claims as u64, &fold_domainsep);
     LinearizedAccumulationVerifier::new(&fold_config)
