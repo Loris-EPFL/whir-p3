@@ -30,16 +30,12 @@ const VARIANTS: &[&str] = &[
     "no_fold_verify",
     "raw_fold_prove",
     "raw_fold_verify",
-    "quasar_warp_prove",
-    "quasar_warp_verify",
     "quasar_squash_prove",
     "quasar_squash_verify",
-    "quasar_fold_prove",
-    "quasar_fold_verify",
 ];
 
 /// Criterion group directories we scan.
-const GROUPS: &[&str] = &["spartan_whir_vs_warp", "quasar_scaling"];
+const GROUPS: &[&str] = &["accumulation", "accumulation_scaling"];
 
 fn main() {
     let criterion_root = Path::new("target/criterion");
@@ -147,7 +143,7 @@ fn write_unified_summary(root: &Path, rows: &[BenchRow]) {
     writeln!(out, "## Prover Time (ms)\n").unwrap();
     writeln!(
         out,
-        "| size | k | no_fold | raw_fold | quasar+warp | raw_fold speedup | quasar+warp speedup |"
+        "| size | k | no_fold | raw_fold | quasar_squash | raw_fold speedup | quasar speedup |"
     )
     .unwrap();
     writeln!(out, "|---|---:|---:|---:|---:|---:|---:|").unwrap();
@@ -155,25 +151,16 @@ fn write_unified_summary(root: &Path, rows: &[BenchRow]) {
     for ((log_size, claims), vals) in &table {
         let nf = vals.get("no_fold_prove");
         let rf = vals.get("raw_fold_prove");
-        // quasar+warp total = squash + fold, or the combined quasar_warp_prove
-        let qw_total: Option<f64> = vals
-            .get("quasar_warp_prove")
-            .copied()
-            .or_else(|| {
-                let sq = vals.get("quasar_squash_prove")?;
-                let fo = vals.get("quasar_fold_prove")?;
-                Some(sq + fo)
-            });
-        let qw_ref = qw_total.as_ref();
+        let qs = vals.get("quasar_squash_prove");
 
         writeln!(
             out,
             "| 2^{log_size} | {claims} | {} | {} | {} | {} | {} |",
             fmt_ms(nf),
             fmt_ms(rf),
-            fmt_ms(qw_ref),
+            fmt_ms(qs),
             fmt_speedup(nf, rf),
-            fmt_speedup(nf, qw_ref),
+            fmt_speedup(nf, qs),
         )
         .unwrap();
     }
@@ -182,7 +169,7 @@ fn write_unified_summary(root: &Path, rows: &[BenchRow]) {
     writeln!(out, "\n## Verifier Time (ms)\n").unwrap();
     writeln!(
         out,
-        "| size | k | no_fold | raw_fold | quasar+warp | raw_fold speedup | quasar+warp speedup |"
+        "| size | k | no_fold | raw_fold | quasar_squash | raw_fold speedup | quasar speedup |"
     )
     .unwrap();
     writeln!(out, "|---|---:|---:|---:|---:|---:|---:|").unwrap();
@@ -190,24 +177,16 @@ fn write_unified_summary(root: &Path, rows: &[BenchRow]) {
     for ((log_size, claims), vals) in &table {
         let nf = vals.get("no_fold_verify");
         let rf = vals.get("raw_fold_verify");
-        let qw_total: Option<f64> = vals
-            .get("quasar_warp_verify")
-            .copied()
-            .or_else(|| {
-                let sq = vals.get("quasar_squash_verify")?;
-                let fo = vals.get("quasar_fold_verify")?;
-                Some(sq + fo)
-            });
-        let qw_ref = qw_total.as_ref();
+        let qs = vals.get("quasar_squash_verify");
 
         writeln!(
             out,
             "| 2^{log_size} | {claims} | {} | {} | {} | {} | {} |",
             fmt_ms(nf),
             fmt_ms(rf),
-            fmt_ms(qw_ref),
+            fmt_ms(qs),
             fmt_speedup(nf, rf),
-            fmt_speedup(nf, qw_ref),
+            fmt_speedup(nf, qs),
         )
         .unwrap();
     }
@@ -220,11 +199,6 @@ fn write_unified_summary(root: &Path, rows: &[BenchRow]) {
     .unwrap();
     writeln!(
         out,
-        "> quasar+warp total = quasar_squash + quasar_fold (or the combined benchmark)."
-    )
-    .unwrap();
-    writeln!(
-        out,
         "\nGenerated from Criterion estimates in `target/criterion/`."
     )
     .unwrap();
@@ -232,7 +206,7 @@ fn write_unified_summary(root: &Path, rows: &[BenchRow]) {
 
 /// Detailed breakdown for the quasar_scaling group showing squash vs fold phases.
 fn write_scaling_summary(root: &Path, rows: &[BenchRow]) {
-    let scaling_rows: Vec<_> = rows.iter().filter(|r| r.group == "quasar_scaling").collect();
+    let scaling_rows: Vec<_> = rows.iter().filter(|r| r.group == "accumulation_scaling").collect();
     if scaling_rows.is_empty() {
         return;
     }
@@ -248,75 +222,65 @@ fn write_scaling_summary(root: &Path, rows: &[BenchRow]) {
     let mut out =
         File::create(root.join("scaling_breakdown.md")).expect("create scaling_breakdown.md");
 
-    writeln!(out, "# Quasar Scaling Breakdown\n").unwrap();
-    writeln!(out, "Shows how each phase scales with k at larger polynomial sizes.\n").unwrap();
+    writeln!(out, "# Accumulation Scaling\n").unwrap();
+    writeln!(out, "Compares pipelines at larger polynomial sizes and higher k.\n").unwrap();
 
-    // ── Prove breakdown ──
-    writeln!(out, "## Prover Breakdown (ms)\n").unwrap();
+    // ── Prove ──
+    writeln!(out, "## Prover Time (ms)\n").unwrap();
     writeln!(
         out,
-        "| size | k | no_fold | raw_fold | quasar_squash | quasar_fold | quasar total | best pipeline |"
+        "| size | k | no_fold | raw_fold | quasar_squash | best pipeline |"
     )
     .unwrap();
-    writeln!(out, "|---|---:|---:|---:|---:|---:|---:|---|").unwrap();
+    writeln!(out, "|---|---:|---:|---:|---:|---|").unwrap();
 
     for ((log_size, claims), vals) in &table {
         let nf = vals.get("no_fold_prove");
         let rf = vals.get("raw_fold_prove");
         let qs = vals.get("quasar_squash_prove");
-        let qf = vals.get("quasar_fold_prove");
-        let qt: Option<f64> = qs.zip(qf).map(|(s, f)| s + f);
-        let qt_ref = qt.as_ref();
 
         let best = pick_best(&[
             ("no_fold", nf),
             ("raw_fold", rf),
-            ("quasar", qt_ref),
+            ("quasar_squash", qs),
         ]);
 
         writeln!(
             out,
-            "| 2^{log_size} | {claims} | {} | {} | {} | {} | {} | **{best}** |",
+            "| 2^{log_size} | {claims} | {} | {} | {} | **{best}** |",
             fmt_ms(nf),
             fmt_ms(rf),
             fmt_ms(qs),
-            fmt_ms(qf),
-            fmt_ms(qt_ref),
         )
         .unwrap();
     }
 
-    // ── Verify breakdown ──
-    writeln!(out, "\n## Verifier Breakdown (ms)\n").unwrap();
+    // ── Verify ──
+    writeln!(out, "\n## Verifier Time (ms)\n").unwrap();
     writeln!(
         out,
-        "| size | k | no_fold | raw_fold | quasar_squash | quasar_fold | quasar total | best pipeline |"
+        "| size | k | no_fold | raw_fold | quasar_squash | best pipeline |"
     )
     .unwrap();
-    writeln!(out, "|---|---:|---:|---:|---:|---:|---:|---|").unwrap();
+    writeln!(out, "|---|---:|---:|---:|---:|---|").unwrap();
 
     for ((log_size, claims), vals) in &table {
         let nf = vals.get("no_fold_verify");
         let rf = vals.get("raw_fold_verify");
         let qs = vals.get("quasar_squash_verify");
-        let qf = vals.get("quasar_fold_verify");
-        let qt: Option<f64> = qs.zip(qf).map(|(s, f)| s + f);
-        let qt_ref = qt.as_ref();
 
         let best = pick_best(&[
             ("no_fold", nf),
             ("raw_fold", rf),
-            ("quasar", qt_ref),
+            ("quasar_squash", qs),
         ]);
 
         writeln!(
             out,
-            "| 2^{log_size} | {claims} | {} | {} | {} | {} | {} | **{best}** |",
+            "| 2^{log_size} | {claims} | {} | {} | {} | **{best}** |",
             fmt_ms(nf),
             fmt_ms(rf),
             fmt_ms(qs),
-            fmt_ms(qf),
-            fmt_ms(qt_ref),
         )
         .unwrap();
     }
@@ -324,17 +288,7 @@ fn write_scaling_summary(root: &Path, rows: &[BenchRow]) {
     writeln!(out).unwrap();
     writeln!(
         out,
-        "> quasar_fold time is constant w.r.t. k (always folds 2 accumulators)."
-    )
-    .unwrap();
-    writeln!(
-        out,
-        "> raw_fold time grows linearly with k."
-    )
-    .unwrap();
-    writeln!(
-        out,
-        "\nGenerated from Criterion estimates in `target/criterion/quasar_scaling/`."
+        "\nGenerated from Criterion estimates in `target/criterion/accumulation_scaling/`."
     )
     .unwrap();
 }

@@ -330,6 +330,7 @@ fn prove_quasar_warp_pipeline(
             &dft,
             &mut quasar_challenger,
             &fresh_instances,
+            args.shift_queries,
         )
         .unwrap();
 
