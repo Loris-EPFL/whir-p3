@@ -1,41 +1,29 @@
+use alloc::vec::Vec;
 use core::marker::PhantomData;
 
-use alloc::vec::Vec;
 use p3_challenger::{CanObserve, FieldChallenger, GrindingChallenger};
 use p3_dft::TwoAdicSubgroupDft;
-use p3_field::{ExtensionField, Field, PackedValue, TwoAdicField};
+use p3_field::{Algebra, ExtensionField, Field, PackedValue, TwoAdicField};
 use p3_symmetric::{CryptographicHasher, Hash, PseudoCompressionFunction};
 
 use crate::{
     accumulation::{
         accumulator::{Accumulator, AccumulatorInstance, AccumulatorWitness},
+        constraint_batch::{constraint_batch_prove, constraint_batch_verify},
+        proof::{AccumulationProof, AccumulationTranscript},
         quasar::fresh::{FreshLinearInstance, FreshLinearInstancePublic},
+        random_lc::random_linear_combination,
     },
     fiat_shamir::errors::FiatShamirError,
-    spartan::encoding::eq_poly_at_index,
+    poly::{evals::EvaluationsList, multilinear::MultilinearPoint},
     whir::{
-        committer::writer::CommitmentWriter, constraints::statement::LinearStatement,
-        parameters::WhirConfig, proof::WhirProof, verifier::errors::VerifierError,
+        committer::{reader::CommitmentReader, writer::CommitmentWriter},
+        constraints::statement::{EqStatement, InitialClaim, LinearStatement},
+        parameters::WhirConfig,
+        prover::Prover as WhirProver,
+        verifier::{errors::VerifierError, Verifier as WhirVerifier},
     },
 };
-
-#[derive(Clone, Debug)]
-pub struct QuasarTranscript<F: Field> {
-    pub tau_q: Vec<F>,
-    pub weights: Vec<F>,
-}
-
-impl<F: Field> QuasarTranscript<F> {
-    pub fn replay<Challenger>(&self, challenger: &mut Challenger)
-    where
-        Challenger: FieldChallenger<F> + GrindingChallenger<Witness = F>,
-    {
-        let sampled = (0..self.tau_q.len())
-            .map(|_| challenger.sample())
-            .collect::<Vec<_>>();
-        assert_eq!(sampled, self.tau_q, "quasar transcript mismatch");
-    }
-}
 
 #[derive(Clone, Debug)]
 pub struct QuasarFrontendOutput<F, EF, W, const DIGEST_ELEMS: usize>
@@ -44,69 +32,108 @@ where
     EF: ExtensionField<F>,
 {
     pub accumulator: Accumulator<F, EF, W, DIGEST_ELEMS>,
-    pub transcript: QuasarTranscript<F>,
+    pub proof: AccumulationProof<F, EF, W, DIGEST_ELEMS>,
 }
 
-fn sample_tau<F, Challenger>(challenger: &mut Challenger, batch_size: usize) -> Vec<F>
+fn boolean_point_from_index<F: Field, EF: ExtensionField<F>>(
+    index: usize,
+    num_variables: usize,
+) -> MultilinearPoint<EF> {
+    MultilinearPoint::new(
+        (0..num_variables)
+            .map(|bit| {
+                if ((index >> bit) & 1) == 1 {
+                    EF::ONE
+                } else {
+                    EF::ZERO
+                }
+            })
+            .collect(),
+    )
+}
+
+fn evaluation_claim_as_linear_statement<F: Field, EF: ExtensionField<F>>(
+    point: &MultilinearPoint<EF>,
+    value: EF,
+) -> LinearStatement<F, EF> {
+    let num_variables = point.num_variables();
+    let eq_weights = EvaluationsList::new_from_point(point.as_slice(), EF::ONE);
+    let mut statement = LinearStatement::<F, EF>::initialize(num_variables);
+    statement.add_constraint(eq_weights, value);
+    statement
+}
+
+/// Extract weight tables and target values from fresh instance linear claims.
+fn extract_fresh_claims<F, EF>(
+    instances: &[FreshLinearInstance<F, EF>],
+) -> (Vec<EvaluationsList<EF>>, Vec<EF>)
 where
     F: Field,
-    Challenger: FieldChallenger<F> + GrindingChallenger<Witness = F>,
+    EF: ExtensionField<F>,
 {
-    let log_batch = batch_size.trailing_zeros() as usize;
-    (0..log_batch).map(|_| challenger.sample()).collect()
-}
-
-fn eq_weights<F: Field>(tau_q: &[F], batch_size: usize) -> Vec<F> {
-    (0..batch_size)
-        .map(|idx| eq_poly_at_index::<F, F>(idx, tau_q))
-        .collect()
-}
-
-fn squash_witnesses<F: Field, EF: ExtensionField<F>>(
-    instances: &[FreshLinearInstance<F, EF>],
-    weights: &[F],
-) -> crate::poly::evals::EvaluationsList<F> {
-    let num_variables = instances[0].witness_poly.num_variables();
-    let mut squashed = crate::poly::evals::EvaluationsList::zero(num_variables);
-    for (instance, &coeff) in instances.iter().zip(weights.iter()) {
-        squashed
-            .iter_mut()
-            .zip(instance.witness_poly.as_slice().iter())
-            .for_each(|(acc, &value)| *acc += coeff * value);
-    }
-    squashed
-}
-
-fn squash_linear_claims_shared_support<F: Field, EF: ExtensionField<F>>(
-    instances: &[FreshLinearInstance<F, EF>],
-    weights: &[F],
-) -> LinearStatement<F, EF> {
-    let num_variables = instances[0].linear_claim.num_variables();
-    let (base_weights, _) = instances[0]
-        .linear_claim
-        .iter()
-        .next()
-        .expect("one linear claim per fresh instance");
-
-    let mut combined_target = EF::ZERO;
-    for (instance, &coeff_f) in instances.iter().zip(weights.iter()) {
-        let coeff = EF::from(coeff_f);
-        let (claim_weights, &target) = instance
+    let mut weights = Vec::with_capacity(instances.len());
+    let mut targets = Vec::with_capacity(instances.len());
+    for inst in instances {
+        let (w, &t) = inst
             .linear_claim
             .iter()
             .next()
             .expect("one linear claim per fresh instance");
-        assert_eq!(
-            claim_weights.as_slice(),
-            base_weights.as_slice(),
-            "Quasar frontend currently requires identical linear-claim support across fresh instances"
-        );
-        combined_target += coeff * target;
+        weights.push(w.clone());
+        targets.push(t);
     }
+    (weights, targets)
+}
 
-    let mut linear_claim = LinearStatement::<F, EF>::initialize(num_variables);
-    linear_claim.add_constraint(base_weights.clone(), combined_target);
-    linear_claim
+fn extract_fresh_claims_public<F, EF>(
+    instances: &[FreshLinearInstancePublic<F, EF>],
+) -> (Vec<EvaluationsList<EF>>, Vec<EF>)
+where
+    F: Field,
+    EF: ExtensionField<F>,
+{
+    let mut weights = Vec::with_capacity(instances.len());
+    let mut targets = Vec::with_capacity(instances.len());
+    for inst in instances {
+        let (w, &t) = inst
+            .linear_claim
+            .iter()
+            .next()
+            .expect("one linear claim per fresh instance");
+        weights.push(w.clone());
+        targets.push(t);
+    }
+    (weights, targets)
+}
+
+fn observe_fresh_claims<F, EF, Challenger>(
+    challenger: &mut Challenger,
+    instances: &[FreshLinearInstance<F, EF>],
+) where
+    F: TwoAdicField,
+    EF: ExtensionField<F> + TwoAdicField,
+    Challenger: FieldChallenger<F>,
+{
+    for inst in instances {
+        for (_, &target) in inst.linear_claim.iter() {
+            challenger.observe_algebra_element(target);
+        }
+    }
+}
+
+fn observe_fresh_claims_public<F, EF, Challenger>(
+    challenger: &mut Challenger,
+    instances: &[FreshLinearInstancePublic<F, EF>],
+) where
+    F: TwoAdicField,
+    EF: ExtensionField<F> + TwoAdicField,
+    Challenger: FieldChallenger<F>,
+{
+    for inst in instances {
+        for (_, &target) in inst.linear_claim.iter() {
+            challenger.observe_algebra_element(target);
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -120,18 +147,22 @@ where
 impl<'a, EF, F, H, C, Challenger> QuasarFrontendProver<'a, EF, F, H, C, Challenger>
 where
     F: TwoAdicField + Ord,
-    EF: ExtensionField<F> + TwoAdicField,
+    EF: ExtensionField<F> + TwoAdicField + Algebra<EF>,
     Challenger: FieldChallenger<F> + GrindingChallenger<Witness = F>,
 {
     pub const fn new(config: &'a WhirConfig<EF, F, H, C, Challenger>) -> Self {
         Self(config)
     }
 
-    pub fn squash_to_accumulator<P, W, PW, Dft, const DIGEST_ELEMS: usize>(
+    /// Squashes `k` fresh linear instances into a single accumulator using constraint
+    /// batching sumcheck + random linear combination + a single WHIR proof.
+    #[allow(clippy::too_many_lines)]
+    pub fn squash_and_prove<P, W, PW, Dft, const DIGEST_ELEMS: usize>(
         &self,
         dft: &Dft,
         challenger: &mut Challenger,
         fresh_instances: &[FreshLinearInstance<F, EF>],
+        num_shift_queries: usize,
     ) -> Result<QuasarFrontendOutput<F, EF, W, DIGEST_ELEMS>, FiatShamirError>
     where
         Dft: TwoAdicSubgroupDft<F>,
@@ -140,10 +171,12 @@ where
         PW: PackedValue<Value = W> + Eq + Send + Sync,
         H: CryptographicHasher<F, [W; DIGEST_ELEMS]>
             + CryptographicHasher<P, [PW; DIGEST_ELEMS]>
-            + Sync,
+            + Sync
+            + Clone,
         C: PseudoCompressionFunction<[W; DIGEST_ELEMS], 2>
             + PseudoCompressionFunction<[PW; DIGEST_ELEMS], 2>
-            + Sync,
+            + Sync
+            + Clone,
         Challenger: CanObserve<Hash<F, W, DIGEST_ELEMS>>,
         [W; DIGEST_ELEMS]: serde::Serialize + for<'de> serde::Deserialize<'de>,
     {
@@ -153,103 +186,260 @@ where
             assert!(instance.verify());
         }
 
-        let tau_q = sample_tau(challenger, fresh_instances.len());
-        let weights = eq_weights(&tau_q, fresh_instances.len());
-        let squashed_witness = squash_witnesses(fresh_instances, &weights);
-        let squashed_claim = squash_linear_claims_shared_support(fresh_instances, &weights);
-        debug_assert!(squashed_claim.verify(&squashed_witness));
+        // --- Phase 1: Observe inputs and derive constraint batching challenge ---
+        observe_fresh_claims(challenger, fresh_instances);
+        let constraint_batching_challenge: F = challenger.sample();
+
+        let (weights, targets) = extract_fresh_claims(fresh_instances);
+        let witness_polys: Vec<EvaluationsList<F>> = fresh_instances
+            .iter()
+            .map(|inst| inst.witness_poly.clone())
+            .collect();
+
+        // --- Phase 2: Constraint batching sumcheck ---
+        let (constraint_batch_proof, reduction_point) = constraint_batch_prove(
+            constraint_batching_challenge,
+            &weights,
+            &targets,
+            &witness_polys,
+            challenger,
+        );
+
+        // --- Phase 3: Codeword batching via random LC ---
+        let codeword_batching_challenge: F = challenger.sample();
+        let poly_refs: Vec<&EvaluationsList<F>> = witness_polys.iter().collect();
+        let combined_poly = random_linear_combination(&poly_refs, codeword_batching_challenge);
+        let num_vars = combined_poly.num_variables();
+
+        let combined_eval: EF = {
+            let eta_ef = EF::from(codeword_batching_challenge);
+            let mut val = EF::ZERO;
+            let mut power = EF::ONE;
+            for eval in &constraint_batch_proof.individual_evals {
+                val += power * *eval;
+                power *= eta_ef;
+            }
+            val
+        };
+
+        // --- Phase 4: OOD + shift queries on the combined polynomial ---
+        let ood_point = MultilinearPoint::new(
+            (0..num_vars)
+                .map(|_| challenger.sample_algebra_element())
+                .collect(),
+        );
+        let ood_answer = combined_poly.evaluate_hypercube_base(&ood_point);
+
+        let shift_query_indices: Vec<usize> = (0..num_shift_queries)
+            .map(|_| challenger.sample_bits(num_vars))
+            .collect();
+        let shift_query_answers: Vec<EF> = shift_query_indices
+            .iter()
+            .map(|&idx| {
+                combined_poly
+                    .evaluate_hypercube_base(&boolean_point_from_index::<F, EF>(idx, num_vars))
+            })
+            .collect();
+
+        // --- Phase 5: Build WHIR statement and prove ---
+        let output_linear_claim =
+            evaluation_claim_as_linear_statement(&reduction_point, combined_eval);
 
         let mut statement = self
             .0
-            .initial_statement_with_linear(squashed_witness.clone(), squashed_claim.clone());
-        let mut commit_only_proof = WhirProof::<F, EF, W, DIGEST_ELEMS>::from_whir_config(self.0);
-        let _commitment = CommitmentWriter::new(self.0).commit::<_, P, W, PW, DIGEST_ELEMS>(
+            .initial_statement_with_linear(combined_poly.clone(), output_linear_claim.clone());
+
+        let _ = statement.evaluate(&ood_point);
+        for (&idx, _) in shift_query_indices.iter().zip(shift_query_answers.iter()) {
+            let point = boolean_point_from_index::<F, EF>(idx, num_vars);
+            let _ = statement.evaluate(&point);
+        }
+
+        let mut whir_proof =
+            crate::whir::proof::WhirProof::<F, EF, W, DIGEST_ELEMS>::from_whir_config(self.0);
+        let commitment = CommitmentWriter::new(self.0).commit::<_, P, W, PW, DIGEST_ELEMS>(
             dft,
-            &mut commit_only_proof,
+            &mut whir_proof,
             challenger,
             &mut statement,
         )?;
+        WhirProver(self.0).prove::<_, P, W, PW, DIGEST_ELEMS>(
+            dft,
+            &mut whir_proof,
+            challenger,
+            &statement,
+            commitment,
+        )?;
+
+        // --- Build output ---
+        let transcript = AccumulationTranscript {
+            constraint_batching_challenge,
+            constraint_batch_proof,
+            codeword_batching_challenge,
+            ood_point,
+            ood_answer,
+            shift_query_indices,
+            shift_query_answers,
+        };
 
         let accumulator = Accumulator::new(
             AccumulatorInstance {
-                commitment_root: commit_only_proof.initial_commitment,
-                linear_claim: squashed_claim,
+                commitment_root: whir_proof.initial_commitment,
+                linear_claim: output_linear_claim,
                 _marker: PhantomData,
             },
             AccumulatorWitness {
-                poly: squashed_witness,
+                poly: combined_poly,
             },
         );
 
         Ok(QuasarFrontendOutput {
             accumulator,
-            transcript: QuasarTranscript { tau_q, weights },
+            proof: AccumulationProof {
+                transcript,
+                whir_proof,
+            },
         })
     }
 }
 
 #[derive(Debug)]
-pub struct QuasarFrontendVerifier;
+pub struct QuasarFrontendVerifier<'a, EF, F, H, C, Challenger>(
+    &'a WhirConfig<EF, F, H, C, Challenger>,
+)
+where
+    F: Field,
+    EF: ExtensionField<F>;
 
-impl QuasarFrontendVerifier {
-    pub fn verify<F, EF, W, const DIGEST_ELEMS: usize>(
+impl<'a, EF, F, H, C, Challenger> QuasarFrontendVerifier<'a, EF, F, H, C, Challenger>
+where
+    F: TwoAdicField + Ord,
+    EF: ExtensionField<F> + TwoAdicField + Algebra<EF>,
+    Challenger: FieldChallenger<F> + GrindingChallenger<Witness = F>,
+{
+    pub const fn new(config: &'a WhirConfig<EF, F, H, C, Challenger>) -> Self {
+        Self(config)
+    }
+
+    pub fn verify<P, W, PW, const DIGEST_ELEMS: usize>(
+        &self,
+        challenger: &mut Challenger,
         fresh_instances: &[FreshLinearInstancePublic<F, EF>],
         output: &QuasarFrontendOutput<F, EF, W, DIGEST_ELEMS>,
-        transcript: &QuasarTranscript<F>,
     ) -> Result<AccumulatorInstance<F, EF, W, DIGEST_ELEMS>, VerifierError>
     where
-        F: Field,
-        EF: ExtensionField<F>,
-        W: Copy,
+        P: PackedValue<Value = F> + Eq + Send + Sync,
+        W: PackedValue<Value = W> + Eq + Send + Sync + Copy + Default,
+        PW: PackedValue<Value = W> + Eq + Send + Sync,
+        H: CryptographicHasher<F, [W; DIGEST_ELEMS]>
+            + CryptographicHasher<P, [PW; DIGEST_ELEMS]>
+            + Sync
+            + Clone,
+        C: PseudoCompressionFunction<[W; DIGEST_ELEMS], 2>
+            + PseudoCompressionFunction<[PW; DIGEST_ELEMS], 2>
+            + Sync
+            + Clone,
+        Challenger: CanObserve<Hash<F, W, DIGEST_ELEMS>>,
+        [W; DIGEST_ELEMS]: serde::Serialize + for<'de> serde::Deserialize<'de>,
     {
-        let expected_weights = eq_weights(&transcript.tau_q, fresh_instances.len());
-        if expected_weights != transcript.weights {
+        assert!(!fresh_instances.is_empty());
+        assert!(fresh_instances.len().is_power_of_two());
+
+        let num_vars = fresh_instances[0].linear_claim.num_variables();
+        let transcript = &output.proof.transcript;
+
+        // --- Phase 1: Derive constraint batching challenge ---
+        observe_fresh_claims_public(challenger, fresh_instances);
+        let expected_constraint_batching: F = challenger.sample();
+        if expected_constraint_batching != transcript.constraint_batching_challenge {
             return Err(VerifierError::StirChallengeFailed {
                 challenge_id: 0,
-                details: "quasar weights mismatch".into(),
+                details: "constraint batching challenge mismatch".into(),
             });
         }
 
-        let (base_weights, _) = fresh_instances[0]
-            .linear_claim
-            .iter()
-            .next()
-            .expect("one linear claim per fresh instance");
-        let mut combined_target = EF::ZERO;
-        for (instance, &coeff_f) in fresh_instances.iter().zip(expected_weights.iter()) {
-            let coeff = EF::from(coeff_f);
-            let (claim_weights, &target) = instance
-                .linear_claim
-                .iter()
-                .next()
-                .expect("one linear claim per fresh instance");
-            if claim_weights.as_slice() != base_weights.as_slice() {
-                return Err(VerifierError::StirChallengeFailed {
-                    challenge_id: 0,
-                    details: "quasar fresh supports mismatch".into(),
-                });
+        // --- Phase 2: Verify constraint batching sumcheck ---
+        let (weights, targets) = extract_fresh_claims_public(fresh_instances);
+        let reduction_point = constraint_batch_verify(
+            transcript.constraint_batching_challenge,
+            &weights,
+            &targets,
+            &transcript.constraint_batch_proof,
+            challenger,
+        )?;
+
+        // --- Phase 3: Derive codeword batching challenge and compute expected eval ---
+        let expected_codeword_batching: F = challenger.sample();
+        if expected_codeword_batching != transcript.codeword_batching_challenge {
+            return Err(VerifierError::StirChallengeFailed {
+                challenge_id: 1,
+                details: "codeword batching challenge mismatch".into(),
+            });
+        }
+
+        let combined_eval: EF = {
+            let eta_ef = EF::from(transcript.codeword_batching_challenge);
+            let mut val = EF::ZERO;
+            let mut power = EF::ONE;
+            for eval in &transcript.constraint_batch_proof.individual_evals {
+                val += power * *eval;
+                power *= eta_ef;
             }
-            combined_target += coeff * target;
-        }
+            val
+        };
 
-        let expected_target = output
-            .accumulator
-            .public_instance
-            .linear_claim
-            .iter()
-            .next()
-            .unwrap()
-            .1;
-        if *expected_target != combined_target {
+        // --- Phase 4: Verify OOD + shift query consistency ---
+        let expected_ood = MultilinearPoint::new(
+            (0..num_vars)
+                .map(|_| challenger.sample_algebra_element())
+                .collect(),
+        );
+        let expected_shift_indices: Vec<usize> = (0..transcript.shift_query_indices.len())
+            .map(|_| challenger.sample_bits(num_vars))
+            .collect();
+
+        if expected_ood != transcript.ood_point
+            || expected_shift_indices != transcript.shift_query_indices
+        {
             return Err(VerifierError::StirChallengeFailed {
-                challenge_id: 0,
-                details: "quasar squashed target mismatch".into(),
+                challenge_id: 2,
+                details: "OOD/shift query challenge mismatch".into(),
             });
         }
+
+        // --- Phase 5: Build output claims and verify WHIR proof ---
+        let output_linear_claim =
+            evaluation_claim_as_linear_statement(&reduction_point, combined_eval);
+
+        let mut eq_statement = EqStatement::initialize(num_vars);
+        eq_statement
+            .add_evaluated_constraint(transcript.ood_point.clone(), transcript.ood_answer);
+        for (&idx, &eval) in transcript
+            .shift_query_indices
+            .iter()
+            .zip(transcript.shift_query_answers.iter())
+        {
+            let point = boolean_point_from_index::<F, EF>(idx, num_vars);
+            eq_statement.add_evaluated_constraint(point, eval);
+        }
+
+        let initial_claim = InitialClaim {
+            eq_statement,
+            linear_statement: output_linear_claim.clone(),
+        };
+
+        let parsed_commitment = CommitmentReader::new(self.0)
+            .parse_commitment::<W, DIGEST_ELEMS>(&output.proof.whir_proof, challenger);
+        WhirVerifier::new(self.0).verify_with_initial_claim::<P, W, PW, DIGEST_ELEMS>(
+            &output.proof.whir_proof,
+            challenger,
+            &parsed_commitment,
+            initial_claim,
+        )?;
 
         Ok(AccumulatorInstance {
-            commitment_root: output.accumulator.public_instance.commitment_root,
-            linear_claim: output.accumulator.public_instance.linear_claim.clone(),
+            commitment_root: output.proof.whir_proof.initial_commitment,
+            linear_claim: output_linear_claim,
             _marker: PhantomData,
         })
     }
@@ -269,7 +459,7 @@ mod tests {
     use super::*;
     use crate::{
         accumulation::{
-            linearized::initialize_accumulator_from_spartan,
+            linearized::{decide_linearized_accumulator, initialize_accumulator_from_spartan},
             scheme::{LinearizedAccumulationProver, LinearizedAccumulationVerifier},
         },
         fiat_shamir::domain_separator::DomainSeparator,
@@ -353,38 +543,39 @@ mod tests {
         let (_, instance1) = make_shape_and_instance(16);
         let spartan = R1CSProver::new();
         let proof0 = prove_instance(&instance0, 1);
-        let _proof1 = prove_instance(&instance1, 1);
-        let fresh0 = FreshLinearInstance::from_shared_linearization_points(
+        let proof1 = prove_instance(&instance1, 2);
+        let fresh0 = FreshLinearInstance::from_spartan_proof(
             &shape,
+            &proof0,
             spartan.prepare_witness(&instance0),
-            &proof0.eval_claims.rx,
-            &proof0.eval_claims.ry,
             EF::from_u64(3),
         );
-        let fresh1 = FreshLinearInstance::from_shared_linearization_points(
+        let fresh1 = FreshLinearInstance::from_spartan_proof(
             &shape,
+            &proof1,
             spartan.prepare_witness(&instance1),
-            &proof0.eval_claims.rx,
-            &proof0.eval_claims.ry,
-            EF::from_u64(3),
+            EF::from_u64(7),
         );
 
         let config = make_whir_config(fresh0.witness_poly.num_variables());
         let dft = Radix2DFTSmallBatch::<F>::default();
         let mut prover_challenger = seed_challenger(&config, 9);
         let output = QuasarFrontendProver::new(&config)
-            .squash_to_accumulator::<_, F, <F as Field>::Packing, _, 8>(
+            .squash_and_prove::<_, F, <F as Field>::Packing, _, 8>(
                 &dft,
                 &mut prover_challenger,
                 &[fresh0.clone(), fresh1.clone()],
+                2,
             )
             .unwrap();
 
-        let result = QuasarFrontendVerifier::verify(
-            &[fresh0.public(), fresh1.public()],
-            &output,
-            &output.transcript,
-        );
+        let mut verifier_challenger = seed_challenger(&config, 9);
+        let result = QuasarFrontendVerifier::new(&config)
+            .verify::<<F as Field>::Packing, F, <F as Field>::Packing, 8>(
+                &mut verifier_challenger,
+                &[fresh0.public(), fresh1.public()],
+                &output,
+            );
         assert!(result.is_ok());
     }
 
@@ -394,20 +585,18 @@ mod tests {
         let (_, instance1) = make_shape_and_instance(16);
         let spartan = R1CSProver::new();
         let proof0 = prove_instance(&instance0, 3);
-        let _proof1 = prove_instance(&instance1, 3);
-        let fresh0 = FreshLinearInstance::from_shared_linearization_points(
+        let proof1 = prove_instance(&instance1, 4);
+        let fresh0 = FreshLinearInstance::from_spartan_proof(
             &shape,
+            &proof0,
             spartan.prepare_witness(&instance0),
-            &proof0.eval_claims.rx,
-            &proof0.eval_claims.ry,
             EF::from_u64(5),
         );
-        let fresh1 = FreshLinearInstance::from_shared_linearization_points(
+        let fresh1 = FreshLinearInstance::from_spartan_proof(
             &shape,
+            &proof1,
             spartan.prepare_witness(&instance1),
-            &proof0.eval_claims.rx,
-            &proof0.eval_claims.ry,
-            EF::from_u64(5),
+            EF::from_u64(7),
         );
 
         let running_acc = initialize_accumulator_from_spartan::<F, EF, F, 8>(
@@ -422,14 +611,15 @@ mod tests {
         let dft = Radix2DFTSmallBatch::<F>::default();
         let mut quasar_challenger = seed_challenger(&config, 10);
         let squashed = QuasarFrontendProver::new(&config)
-            .squash_to_accumulator::<_, F, <F as Field>::Packing, _, 8>(
+            .squash_and_prove::<_, F, <F as Field>::Packing, _, 8>(
                 &dft,
                 &mut quasar_challenger,
                 &[fresh0, fresh1],
+                2,
             )
             .unwrap();
 
-        let fold_config = make_whir_config(running_acc.witness.poly.num_variables() + 1);
+        let fold_config = make_whir_config(running_acc.witness.poly.num_variables());
         let mut fold_challenger = seed_challenger(&fold_config, 11);
         let (folded, proof) = LinearizedAccumulationProver::new(&fold_config)
             .accumulate::<_, F, <F as Field>::Packing, _, 8>(
@@ -455,6 +645,44 @@ mod tests {
         assert_eq!(
             verified.commitment_root,
             folded.public_instance.commitment_root
+        );
+    }
+
+    #[test]
+    fn quasar_output_satisfies_decider() {
+        let (shape, instance0) = make_shape_and_instance(9);
+        let (_, instance1) = make_shape_and_instance(16);
+        let spartan = R1CSProver::new();
+        let proof0 = prove_instance(&instance0, 1);
+        let proof1 = prove_instance(&instance1, 2);
+        let fresh0 = FreshLinearInstance::from_spartan_proof(
+            &shape,
+            &proof0,
+            spartan.prepare_witness(&instance0),
+            EF::from_u64(3),
+        );
+        let fresh1 = FreshLinearInstance::from_spartan_proof(
+            &shape,
+            &proof1,
+            spartan.prepare_witness(&instance1),
+            EF::from_u64(7),
+        );
+
+        let config = make_whir_config(fresh0.witness_poly.num_variables());
+        let dft = Radix2DFTSmallBatch::<F>::default();
+        let mut challenger = seed_challenger(&config, 20);
+        let output = QuasarFrontendProver::new(&config)
+            .squash_and_prove::<_, F, <F as Field>::Packing, _, 8>(
+                &dft,
+                &mut challenger,
+                &[fresh0, fresh1],
+                2,
+            )
+            .unwrap();
+
+        assert!(
+            decide_linearized_accumulator(&output.accumulator),
+            "output accumulator failed decider"
         );
     }
 }

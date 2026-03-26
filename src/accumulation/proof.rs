@@ -2,20 +2,31 @@ use alloc::vec::Vec;
 
 use p3_field::{ExtensionField, Field};
 
-use crate::{poly::multilinear::MultilinearPoint, whir::proof::WhirProof};
+use crate::{
+    accumulation::constraint_batch::ConstraintBatchProof, poly::multilinear::MultilinearPoint,
+    whir::proof::WhirProof,
+};
 
 /// Transcript data used to batch multiple accumulator claims into one.
+///
+/// Uses a two-phase approach:
+/// 1. **Constraint batching** via sumcheck: reduces `ℓ` linear claims to point evaluations.
+/// 2. **Codeword batching** via random LC: combines `ℓ` oracles into one of the same size.
 #[derive(Clone, Debug)]
 pub struct AccumulationTranscript<F: Field, EF: ExtensionField<F>> {
-    /// Random linear-combination challenge for batching input claims.
-    pub batching_challenge: F,
-    /// Random out-of-domain point used to bind the union polynomial.
+    /// Challenge for weighting the `ℓ` linear claims in the constraint batching sumcheck.
+    pub constraint_batching_challenge: F,
+    /// Sumcheck proof: round polynomials and individual evaluations `fᵢ(r)`.
+    pub constraint_batch_proof: ConstraintBatchProof<EF>,
+    /// Challenge for combining the `ℓ` witness oracles via random linear combination.
+    pub codeword_batching_challenge: F,
+    /// Random out-of-domain point used to bind the combined polynomial.
     pub ood_point: MultilinearPoint<EF>,
-    /// Claimed evaluation of the union polynomial at `ood_point`.
+    /// Claimed evaluation of the combined polynomial at `ood_point`.
     pub ood_answer: EF,
-    /// Random in-domain spot-check indices over the union polynomial.
+    /// Random in-domain spot-check indices over the combined polynomial.
     pub shift_query_indices: Vec<usize>,
-    /// Claimed evaluations of the union polynomial at the sampled in-domain indices.
+    /// Claimed evaluations of the combined polynomial at the sampled in-domain indices.
     pub shift_query_answers: Vec<EF>,
 }
 

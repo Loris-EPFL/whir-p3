@@ -10,6 +10,7 @@ use whir_p3::{
         linearized::{
             initialize_accumulator_from_spartan, linearized_statement_from_spartan_proof,
         },
+        quasar::{FreshLinearInstance, QuasarFrontendProver, QuasarFrontendVerifier},
         scheme::{LinearizedAccumulationProver, LinearizedAccumulationVerifier},
     },
     fiat_shamir::domain_separator::DomainSeparator,
@@ -101,14 +102,15 @@ fn prepare_material(size_log2: usize) -> ClaimMaterial {
     }
 }
 
-fn prove_regular_pipeline(
+/// k independent WHIR proofs (no accumulation).
+fn prove_no_fold(
     material: &ClaimMaterial,
     num_claims: usize,
 ) -> Vec<(
     WhirProof<F, EF, F, 8>,
     whir_p3::whir::constraints::statement::InitialClaim<F, EF>,
 )> {
-    let (config, _whir_params) = make_whir_config(material.witness_poly.num_variables());
+    let (config, _) = make_whir_config(material.witness_poly.num_variables());
     let dft = Radix2DFTSmallBatch::<F>::default();
     let domainsep = make_domain_sep(&config);
 
@@ -147,7 +149,7 @@ fn prove_regular_pipeline(
         .collect()
 }
 
-fn verify_regular_pipeline(
+fn verify_no_fold(
     material: &ClaimMaterial,
     proofs: &[(
         WhirProof<F, EF, F, 8>,
@@ -184,34 +186,58 @@ fn verify_regular_pipeline(
     }
 }
 
-fn bench_regular_vs_accumulated(c: &mut Criterion) {
-    let mut group = c.benchmark_group("spartan_whir_vs_warp");
-    group.sample_size(10);
+fn build_fresh_instances(
+    material: &ClaimMaterial,
+    num_claims: usize,
+) -> Vec<FreshLinearInstance<F, EF>> {
+    let rx = material.spartan_proof.eval_claims.rx.clone();
+    let ry = material.spartan_proof.eval_claims.ry.clone();
+    (0..num_claims)
+        .map(|_| {
+            FreshLinearInstance::from_shared_linearization_points(
+                &material.shape,
+                material.witness_poly.clone(),
+                &rx,
+                &ry,
+                EF::from(F::from_u64(3)),
+            )
+        })
+        .collect()
+}
+
+/// Compares no_fold vs raw_fold vs quasar_squash at small sizes.
+fn bench_accumulation(c: &mut Criterion) {
+    let mut group = c.benchmark_group("accumulation");
+    group.sample_size(50).measurement_time(std::time::Duration::from_secs(15));
 
     for size_log2 in [8usize, 10usize] {
         let material = prepare_material(size_log2);
         let dft = Radix2DFTSmallBatch::<F>::default();
 
-        for &num_claims in &[2usize, 4usize] {
+        for &num_claims in &[2usize, 4usize, 8usize, 16usize, 32usize] {
+            let label = format!("2^{size_log2}/k={num_claims}");
+
+            // --- no_fold: k independent WHIR proofs ---
             group.bench_with_input(
-                BenchmarkId::new("regular_prove", format!("2^{size_log2}/k={num_claims}")),
+                BenchmarkId::new("no_fold_prove", &label),
                 &num_claims,
                 |b, &k| {
                     b.iter(|| {
-                        let _ = prove_regular_pipeline(&material, k);
+                        let _ = prove_no_fold(&material, k);
                     });
                 },
             );
 
-            let regular_proofs = prove_regular_pipeline(&material, num_claims);
+            let no_fold_proofs = prove_no_fold(&material, num_claims);
             group.bench_with_input(
-                BenchmarkId::new("regular_verify", format!("2^{size_log2}/k={num_claims}")),
+                BenchmarkId::new("no_fold_verify", &label),
                 &num_claims,
                 |b, _| {
-                    b.iter(|| verify_regular_pipeline(&material, &regular_proofs));
+                    b.iter(|| verify_no_fold(&material, &no_fold_proofs));
                 },
             );
 
+            // --- raw_fold: accumulate k pre-committed accumulators ---
             let accumulators = (0..num_claims)
                 .map(|i| {
                     initialize_accumulator_from_spartan::<F, EF, F, 8>(
@@ -224,13 +250,11 @@ fn bench_regular_vs_accumulated(c: &mut Criterion) {
                 })
                 .collect::<Vec<_>>();
 
-            let union_num_vars =
-                material.witness_poly.num_variables() + num_claims.trailing_zeros() as usize;
-            let (accum_config, _) = make_whir_config(union_num_vars);
+            let (accum_config, _) = make_whir_config(material.witness_poly.num_variables());
             let accum_domainsep = make_domain_sep(&accum_config);
 
             group.bench_with_input(
-                BenchmarkId::new("accumulated_prove", format!("2^{size_log2}/k={num_claims}")),
+                BenchmarkId::new("raw_fold_prove", &label),
                 &num_claims,
                 |b, _| {
                     b.iter(|| {
@@ -263,10 +287,7 @@ fn bench_regular_vs_accumulated(c: &mut Criterion) {
                 .collect::<Vec<_>>();
 
             group.bench_with_input(
-                BenchmarkId::new(
-                    "accumulated_verify",
-                    format!("2^{size_log2}/k={num_claims}"),
-                ),
+                BenchmarkId::new("raw_fold_verify", &label),
                 &num_claims,
                 |b, _| {
                     b.iter(|| {
@@ -282,11 +303,231 @@ fn bench_regular_vs_accumulated(c: &mut Criterion) {
                     });
                 },
             );
+
+            // --- quasar_squash: squash k fresh instances into 1 accumulator ---
+            let fresh_instances = build_fresh_instances(&material, num_claims);
+            let (quasar_config, _) = make_whir_config(material.witness_poly.num_variables());
+            let quasar_domainsep = make_domain_sep(&quasar_config);
+
+            group.bench_with_input(
+                BenchmarkId::new("quasar_squash_prove", &label),
+                &num_claims,
+                |b, _| {
+                    b.iter(|| {
+                        let mut challenger =
+                            seed_challenger(2000 + num_claims as u64, &quasar_domainsep);
+                        let _ = QuasarFrontendProver::new(&quasar_config)
+                            .squash_and_prove::<_, F, <F as Field>::Packing, _, 8>(
+                                &dft,
+                                &mut challenger,
+                                &fresh_instances,
+                                2,
+                            )
+                            .unwrap();
+                    });
+                },
+            );
+
+            let mut quasar_challenger =
+                seed_challenger(2000 + num_claims as u64, &quasar_domainsep);
+            let quasar_output = QuasarFrontendProver::new(&quasar_config)
+                .squash_and_prove::<_, F, <F as Field>::Packing, _, 8>(
+                    &dft,
+                    &mut quasar_challenger,
+                    &fresh_instances,
+                    2,
+                )
+                .unwrap();
+
+            let fresh_public = fresh_instances
+                .iter()
+                .map(FreshLinearInstance::public)
+                .collect::<Vec<_>>();
+
+            group.bench_with_input(
+                BenchmarkId::new("quasar_squash_verify", &label),
+                &num_claims,
+                |b, _| {
+                    b.iter(|| {
+                        let mut challenger =
+                            seed_challenger(2000 + num_claims as u64, &quasar_domainsep);
+                        QuasarFrontendVerifier::new(&quasar_config)
+                            .verify::<<F as Field>::Packing, F, <F as Field>::Packing, 8>(
+                                &mut challenger,
+                                &fresh_public,
+                                &quasar_output,
+                            )
+                            .unwrap();
+                    });
+                },
+            );
         }
     }
 
     group.finish();
 }
 
-criterion_group!(benches, bench_regular_vs_accumulated);
+/// Same comparison at larger polynomial sizes and higher k.
+fn bench_accumulation_scaling(c: &mut Criterion) {
+    let mut group = c.benchmark_group("accumulation_scaling");
+    group.sample_size(20).measurement_time(std::time::Duration::from_secs(20));
+
+    for size_log2 in [12usize, 14usize] {
+        let material = prepare_material(size_log2);
+        let dft = Radix2DFTSmallBatch::<F>::default();
+
+        for &num_claims in &[8usize, 16usize, 32usize, 64usize] {
+            let label = format!("2^{size_log2}/k={num_claims}");
+
+            // --- no_fold ---
+            group.bench_with_input(
+                BenchmarkId::new("no_fold_prove", &label),
+                &num_claims,
+                |b, &k| {
+                    b.iter(|| {
+                        let _ = prove_no_fold(&material, k);
+                    });
+                },
+            );
+
+            let no_fold_proofs = prove_no_fold(&material, num_claims);
+            group.bench_with_input(
+                BenchmarkId::new("no_fold_verify", &label),
+                &num_claims,
+                |b, _| {
+                    b.iter(|| verify_no_fold(&material, &no_fold_proofs));
+                },
+            );
+
+            // --- raw_fold ---
+            let accumulators = (0..num_claims)
+                .map(|i| {
+                    initialize_accumulator_from_spartan::<F, EF, F, 8>(
+                        &material.shape,
+                        &material.spartan_proof,
+                        material.witness_poly.clone(),
+                        [F::from_u64(i as u64); 8],
+                        EF::from(F::from_u64((i + 3) as u64)),
+                    )
+                })
+                .collect::<Vec<_>>();
+
+            let (accum_config, _) = make_whir_config(material.witness_poly.num_variables());
+            let accum_domainsep = make_domain_sep(&accum_config);
+
+            group.bench_with_input(
+                BenchmarkId::new("raw_fold_prove", &label),
+                &num_claims,
+                |b, _| {
+                    b.iter(|| {
+                        let mut challenger =
+                            seed_challenger(1000 + num_claims as u64, &accum_domainsep);
+                        let _ = LinearizedAccumulationProver::new(&accum_config)
+                            .accumulate::<_, F, <F as Field>::Packing, _, 8>(
+                                &dft,
+                                &mut challenger,
+                                &accumulators,
+                                2,
+                            )
+                            .unwrap();
+                    });
+                },
+            );
+
+            let mut prover_challenger = seed_challenger(1000 + num_claims as u64, &accum_domainsep);
+            let (_output, accumulation_proof) = LinearizedAccumulationProver::new(&accum_config)
+                .accumulate::<_, F, <F as Field>::Packing, _, 8>(
+                    &dft,
+                    &mut prover_challenger,
+                    &accumulators,
+                    2,
+                )
+                .unwrap();
+            let public_inputs = accumulators
+                .iter()
+                .map(|acc| acc.public_instance.clone())
+                .collect::<Vec<_>>();
+
+            group.bench_with_input(
+                BenchmarkId::new("raw_fold_verify", &label),
+                &num_claims,
+                |b, _| {
+                    b.iter(|| {
+                        let mut challenger =
+                            seed_challenger(1000 + num_claims as u64, &accum_domainsep);
+                        LinearizedAccumulationVerifier::new(&accum_config)
+                            .verify::<<F as Field>::Packing, F, <F as Field>::Packing, 8>(
+                                &mut challenger,
+                                &public_inputs,
+                                &accumulation_proof,
+                            )
+                            .unwrap();
+                    });
+                },
+            );
+
+            // --- quasar_squash ---
+            let fresh_instances = build_fresh_instances(&material, num_claims);
+            let (quasar_config, _) = make_whir_config(material.witness_poly.num_variables());
+            let quasar_domainsep = make_domain_sep(&quasar_config);
+
+            group.bench_with_input(
+                BenchmarkId::new("quasar_squash_prove", &label),
+                &num_claims,
+                |b, _| {
+                    b.iter(|| {
+                        let mut challenger =
+                            seed_challenger(2000 + num_claims as u64, &quasar_domainsep);
+                        let _ = QuasarFrontendProver::new(&quasar_config)
+                            .squash_and_prove::<_, F, <F as Field>::Packing, _, 8>(
+                                &dft,
+                                &mut challenger,
+                                &fresh_instances,
+                                2,
+                            )
+                            .unwrap();
+                    });
+                },
+            );
+
+            let mut quasar_challenger =
+                seed_challenger(2000 + num_claims as u64, &quasar_domainsep);
+            let quasar_output = QuasarFrontendProver::new(&quasar_config)
+                .squash_and_prove::<_, F, <F as Field>::Packing, _, 8>(
+                    &dft,
+                    &mut quasar_challenger,
+                    &fresh_instances,
+                    2,
+                )
+                .unwrap();
+
+            let fresh_public = fresh_instances
+                .iter()
+                .map(FreshLinearInstance::public)
+                .collect::<Vec<_>>();
+
+            group.bench_with_input(
+                BenchmarkId::new("quasar_squash_verify", &label),
+                &num_claims,
+                |b, _| {
+                    b.iter(|| {
+                        let mut challenger =
+                            seed_challenger(2000 + num_claims as u64, &quasar_domainsep);
+                        QuasarFrontendVerifier::new(&quasar_config)
+                            .verify::<<F as Field>::Packing, F, <F as Field>::Packing, 8>(
+                                &mut challenger,
+                                &fresh_public,
+                                &quasar_output,
+                            )
+                            .unwrap();
+                    });
+                },
+            );
+        }
+    }
+
+    group.finish();
+}
+
+criterion_group!(benches, bench_accumulation, bench_accumulation_scaling);
 criterion_main!(benches);

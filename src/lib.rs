@@ -5,8 +5,10 @@ extern crate alloc;
 extern crate std;
 
 pub mod accumulation;
+pub mod circuit;
 pub mod constant;
 pub mod fiat_shamir;
+pub mod ivc;
 pub mod parameters;
 pub mod poly;
 pub mod spartan;

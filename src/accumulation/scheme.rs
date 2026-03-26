@@ -3,15 +3,16 @@ use core::marker::PhantomData;
 
 use p3_challenger::{CanObserve, FieldChallenger, GrindingChallenger};
 use p3_dft::TwoAdicSubgroupDft;
-use p3_field::{ExtensionField, Field, PackedValue, TwoAdicField};
+use p3_field::{Algebra, ExtensionField, Field, PackedValue, TwoAdicField};
 use p3_symmetric::{CryptographicHasher, Hash, PseudoCompressionFunction};
 
 use crate::{
     accumulation::{
         accumulator::{Accumulator, AccumulatorInstance, AccumulatorWitness},
+        constraint_batch::{constraint_batch_prove, constraint_batch_verify},
         linearized::decide_linearized_accumulator,
         proof::{AccumulationProof, AccumulationTranscript},
-        union_poly::build_union_polynomial_from_refs,
+        random_lc::random_linear_combination,
     },
     fiat_shamir::errors::FiatShamirError,
     poly::{evals::EvaluationsList, multilinear::MultilinearPoint},
@@ -77,147 +78,142 @@ fn observe_accumulators_public<F, EF, W, Challenger, const DIGEST_ELEMS: usize>(
     }
 }
 
-fn batched_union_linear_claim_from_instances<
+/// Extract weight tables and target values from accumulator instances.
+fn extract_claims<F, EF, W, const DIGEST_ELEMS: usize>(
+    accumulators: &[AccumulatorInstance<F, EF, W, DIGEST_ELEMS>],
+) -> (Vec<EvaluationsList<EF>>, Vec<EF>)
+where
     F: Field,
     EF: ExtensionField<F>,
-    W,
-    const DIGEST_ELEMS: usize,
->(
-    accumulators: &[AccumulatorInstance<F, EF, W, DIGEST_ELEMS>],
-    batching_challenge: F,
-) -> LinearStatement<F, EF> {
-    assert!(!accumulators.is_empty());
-    assert!(accumulators.len().is_power_of_two());
-    let num_blocks = accumulators.len();
-    let local_vars = accumulators[0].linear_claim.num_variables();
-    let total_vars = local_vars + num_blocks.trailing_zeros() as usize;
-
-    let mut statement = LinearStatement::<F, EF>::initialize(total_vars);
-
-    let mut combined_weights = EvaluationsList::zero(total_vars);
-    let mut combined_target = EF::ZERO;
-    let local_evals_len = 1 << local_vars;
-    for (idx, accumulator) in accumulators.iter().enumerate() {
-        let coeff = EF::from(batching_challenge).exp_u64(idx as u64);
-        let (weights, &target) = accumulator
+{
+    let mut weights = Vec::with_capacity(accumulators.len());
+    let mut targets = Vec::with_capacity(accumulators.len());
+    for acc in accumulators {
+        let (w, &t) = acc
             .linear_claim
             .iter()
             .next()
             .expect("one linear claim per accumulator");
-        let start = idx * local_evals_len;
-        combined_weights.as_mut_slice()[start..start + local_evals_len]
-            .iter_mut()
-            .zip(weights.as_slice().iter())
-            .for_each(|(acc, &value)| *acc += coeff * value);
-        combined_target += coeff * target;
+        weights.push(w.clone());
+        targets.push(t);
     }
-    statement.add_constraint(combined_weights, combined_target);
+    (weights, targets)
+}
+
+/// Build the output accumulator's linear claim as an evaluation constraint.
+///
+/// The claim `f(r) = y` is expressed as a `LinearStatement` with weight `eq(r, ·)`
+/// and target `y`, so that `Σ_b eq(r, b) · f(b) = f(r) = y`.
+fn evaluation_claim_as_linear_statement<F: Field, EF: ExtensionField<F>>(
+    point: &MultilinearPoint<EF>,
+    value: EF,
+) -> LinearStatement<F, EF> {
+    let num_variables = point.num_variables();
+    let eq_weights = EvaluationsList::new_from_point(point.as_slice(), EF::ONE);
+    let mut statement = LinearStatement::<F, EF>::initialize(num_variables);
+    statement.add_constraint(eq_weights, value);
     statement
 }
 
-fn union_polynomial_from_accumulators<
-    F: Field,
-    EF: ExtensionField<F>,
-    W,
-    const DIGEST_ELEMS: usize,
->(
-    accumulators: &[Accumulator<F, EF, W, DIGEST_ELEMS>],
-) -> EvaluationsList<F> {
-    let polys = accumulators
-        .iter()
-        .map(|acc| &acc.witness.poly)
-        .collect::<Vec<_>>();
-    build_union_polynomial_from_refs(&polys)
-}
-
-fn build_public_initial_claim_from_transcript<
-    F: Field,
-    EF: ExtensionField<F>,
-    W,
-    const DIGEST_ELEMS: usize,
->(
-    accumulators: &[AccumulatorInstance<F, EF, W, DIGEST_ELEMS>],
+/// Lightweight accumulation verifier: re-derives Fiat-Shamir challenges, verifies the
+/// constraint batching sumcheck, computes the combined evaluation, and checks OOD/shift
+/// query consistency.
+///
+/// This performs the algebraic / transcript checks only — no Merkle proof or WHIR PCS
+/// verification. Returns the output `LinearStatement` and the `EqStatement` binding the
+/// OOD + shift queries. The caller can then feed these into a WHIR verifier (full verify)
+/// or defer to a decider (IVC).
+pub fn accumulation_verify_lightweight<F, EF, W, Challenger, const DIGEST_ELEMS: usize>(
+    challenger: &mut Challenger,
+    inputs: &[AccumulatorInstance<F, EF, W, DIGEST_ELEMS>],
     transcript: &AccumulationTranscript<F, EF>,
-    total_vars: usize,
-) -> InitialClaim<F, EF> {
-    let mut eq_statement = EqStatement::initialize(total_vars);
+) -> Result<(LinearStatement<F, EF>, EqStatement<EF>), VerifierError>
+where
+    F: TwoAdicField + Ord,
+    EF: ExtensionField<F> + TwoAdicField + Algebra<EF>,
+    W: PackedValue<Value = W> + Eq + Copy,
+    Challenger:
+        FieldChallenger<F> + GrindingChallenger<Witness = F> + CanObserve<Hash<F, W, DIGEST_ELEMS>>,
+{
+    assert!(!inputs.is_empty());
+    assert!(inputs.len().is_power_of_two());
 
-    eq_statement.add_evaluated_constraint(transcript.ood_point.clone(), transcript.ood_answer);
+    let num_vars = inputs[0].linear_claim.num_variables();
 
-    for (&index, &eval) in transcript
-        .shift_query_indices
-        .iter()
-        .zip(transcript.shift_query_answers.iter())
-    {
-        let point = boolean_point_from_index::<F, EF>(index, total_vars);
-        eq_statement.add_evaluated_constraint(point, eval);
+    // --- Phase 1: Derive constraint batching challenge ---
+    observe_accumulator_instances(challenger, inputs);
+    let expected_constraint_batching: F = challenger.sample();
+    if expected_constraint_batching != transcript.constraint_batching_challenge {
+        return Err(VerifierError::StirChallengeFailed {
+            challenge_id: 0,
+            details: "constraint batching challenge mismatch".into(),
+        });
     }
 
-    InitialClaim {
-        eq_statement,
-        linear_statement: batched_union_linear_claim_from_instances(
-            accumulators,
-            transcript.batching_challenge,
-        ),
-    }
-}
+    // --- Phase 2: Verify constraint batching sumcheck ---
+    let (weights, targets) = extract_claims::<F, EF, W, DIGEST_ELEMS>(inputs);
+    let reduction_point = constraint_batch_verify(
+        transcript.constraint_batching_challenge,
+        &weights,
+        &targets,
+        &transcript.constraint_batch_proof,
+        challenger,
+    )?;
 
-fn build_prover_initial_claim_from_transcript<
-    F: Field,
-    EF: ExtensionField<F>,
-    W,
-    const DIGEST_ELEMS: usize,
->(
-    accumulators: &[Accumulator<F, EF, W, DIGEST_ELEMS>],
-    transcript: &AccumulationTranscript<F, EF>,
-) -> InitialClaim<F, EF> {
-    let union_poly = union_polynomial_from_accumulators(accumulators);
-    let total_vars = union_poly.num_variables();
-    let mut eq_statement = EqStatement::initialize(total_vars);
-    eq_statement.add_evaluated_constraint(transcript.ood_point.clone(), transcript.ood_answer);
-    for (&index, &eval) in transcript
-        .shift_query_indices
-        .iter()
-        .zip(transcript.shift_query_answers.iter())
-    {
-        let point = boolean_point_from_index::<F, EF>(index, total_vars);
-        eq_statement.add_evaluated_constraint(point, eval);
+    // --- Phase 3: Derive codeword batching challenge and compute expected eval ---
+    let expected_codeword_batching: F = challenger.sample();
+    if expected_codeword_batching != transcript.codeword_batching_challenge {
+        return Err(VerifierError::StirChallengeFailed {
+            challenge_id: 1,
+            details: "codeword batching challenge mismatch".into(),
+        });
     }
 
-    let local_evals_len = 1 << accumulators[0].witness.poly.num_variables();
-    let mut combined_weights = EvaluationsList::zero(total_vars);
-    let mut combined_target = EF::ZERO;
-    for (idx, accumulator) in accumulators.iter().enumerate() {
-        let coeff = EF::from(transcript.batching_challenge).exp_u64(idx as u64);
-        let (weights, &target) = accumulator
-            .public_instance
-            .linear_claim
-            .iter()
-            .next()
-            .expect("one linear claim per accumulator");
-        let start = idx * local_evals_len;
-        combined_weights.as_mut_slice()[start..start + local_evals_len]
-            .iter_mut()
-            .zip(weights.as_slice().iter())
-            .for_each(|(acc, &value)| *acc += coeff * value);
-        combined_target += coeff * target;
-    }
-    let mut linear_statement = LinearStatement::<F, EF>::initialize(total_vars);
-    linear_statement.add_constraint(combined_weights, combined_target);
-
-    let claim = InitialClaim {
-        eq_statement,
-        linear_statement,
+    let combined_eval: EF = {
+        let eta_ef = EF::from(transcript.codeword_batching_challenge);
+        let mut val = EF::ZERO;
+        let mut power = EF::ONE;
+        for eval in &transcript.constraint_batch_proof.individual_evals {
+            val += power * *eval;
+            power *= eta_ef;
+        }
+        val
     };
-    debug_assert_eq!(
-        claim.eq_statement.len(),
-        1 + transcript.shift_query_indices.len()
+
+    // --- Phase 4: Verify OOD + shift query consistency ---
+    let expected_ood = MultilinearPoint::new(
+        (0..num_vars)
+            .map(|_| challenger.sample_algebra_element())
+            .collect(),
     );
-    debug_assert_eq!(
-        claim.eq_statement.iter().next().unwrap().1,
-        &transcript.ood_answer
-    );
-    claim
+    let expected_shift_indices: Vec<usize> = (0..transcript.shift_query_indices.len())
+        .map(|_| challenger.sample_bits(num_vars))
+        .collect();
+
+    if expected_ood != transcript.ood_point
+        || expected_shift_indices != transcript.shift_query_indices
+    {
+        return Err(VerifierError::StirChallengeFailed {
+            challenge_id: 2,
+            details: "OOD/shift query challenge mismatch".into(),
+        });
+    }
+
+    // --- Phase 5: Build output claims ---
+    let output_linear_claim = evaluation_claim_as_linear_statement(&reduction_point, combined_eval);
+
+    let mut eq_statement = EqStatement::initialize(num_vars);
+    eq_statement.add_evaluated_constraint(transcript.ood_point.clone(), transcript.ood_answer);
+    for (&idx, &eval) in transcript
+        .shift_query_indices
+        .iter()
+        .zip(transcript.shift_query_answers.iter())
+    {
+        let point = boolean_point_from_index::<F, EF>(idx, num_vars);
+        eq_statement.add_evaluated_constraint(point, eval);
+    }
+
+    Ok((output_linear_claim, eq_statement))
 }
 
 #[derive(Debug)]
@@ -231,14 +227,22 @@ where
 impl<'a, EF, F, H, C, Challenger> LinearizedAccumulationProver<'a, EF, F, H, C, Challenger>
 where
     F: TwoAdicField + Ord,
-    EF: ExtensionField<F> + TwoAdicField,
+    EF: ExtensionField<F> + TwoAdicField + Algebra<EF>,
     Challenger: FieldChallenger<F> + GrindingChallenger<Witness = F>,
 {
     pub const fn new(config: &'a WhirConfig<EF, F, H, C, Challenger>) -> Self {
         Self(config)
     }
 
-    #[allow(clippy::too_many_arguments)]
+    /// Accumulates multiple accumulators into one using random LC + constraint batching.
+    ///
+    /// Protocol:
+    /// 1. Run constraint batching sumcheck to reduce `ℓ` linear claims to point evaluations.
+    /// 2. Combine witness polynomials via random linear combination `f = Σ ηⁱ fᵢ`.
+    /// 3. Create evaluation claim `f(r) = Σ ηⁱ fᵢ(r)` linking the combined oracle to the sumcheck.
+    /// 4. Add OOD + shift query constraints for binding.
+    /// 5. Run WHIR prove on the combined polynomial.
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
     pub fn accumulate<P, W, PW, Dft, const DIGEST_ELEMS: usize>(
         &self,
         dft: &Dft,
@@ -272,41 +276,79 @@ where
             assert!(decide_linearized_accumulator(accumulator));
         }
 
+        // --- Phase 1: Observe inputs and derive constraint batching challenge ---
         observe_accumulators_public(challenger, accumulators);
-        let batching_challenge = challenger.sample();
-        let union_poly = union_polynomial_from_accumulators(accumulators);
-        let union_vars = union_poly.num_variables();
+        let constraint_batching_challenge: F = challenger.sample();
+
+        // Extract weight tables and targets from each accumulator's linear claim
+        let instances: Vec<_> = accumulators
+            .iter()
+            .map(|a| &a.public_instance)
+            .cloned()
+            .collect();
+        let (weights, targets) = extract_claims::<F, EF, W, DIGEST_ELEMS>(&instances);
+        let witness_polys: Vec<&EvaluationsList<F>> =
+            accumulators.iter().map(|a| &a.witness.poly).collect();
+
+        // --- Phase 2: Constraint batching sumcheck ---
+        let (constraint_batch_proof, reduction_point) = constraint_batch_prove(
+            constraint_batching_challenge,
+            &weights,
+            &targets,
+            &witness_polys.iter().map(|&p| p.clone()).collect::<Vec<_>>(),
+            challenger,
+        );
+
+        // --- Phase 3: Codeword batching via random LC ---
+        let codeword_batching_challenge: F = challenger.sample();
+        let combined_poly = random_linear_combination(&witness_polys, codeword_batching_challenge);
+        let num_vars = combined_poly.num_variables();
+
+        // Compute combined evaluation: f(r) = Σ ηⁱ fᵢ(r)
+        let combined_eval: EF = {
+            let eta_ef = EF::from(codeword_batching_challenge);
+            let mut val = EF::ZERO;
+            let mut power = EF::ONE;
+            for eval in &constraint_batch_proof.individual_evals {
+                val += power * *eval;
+                power *= eta_ef;
+            }
+            val
+        };
+
+        // --- Phase 4: OOD + shift queries on the combined polynomial ---
         let ood_point = MultilinearPoint::new(
-            (0..union_vars)
+            (0..num_vars)
                 .map(|_| challenger.sample_algebra_element())
                 .collect(),
         );
-        let shift_query_indices = (0..num_shift_queries)
-            .map(|_| challenger.sample_bits(union_vars))
-            .collect::<Vec<_>>();
-        let ood_answer = union_poly.evaluate_hypercube_base(&ood_point);
-        let shift_query_answers = shift_query_indices
+        let ood_answer = combined_poly.evaluate_hypercube_base(&ood_point);
+
+        let shift_query_indices: Vec<usize> = (0..num_shift_queries)
+            .map(|_| challenger.sample_bits(num_vars))
+            .collect();
+        let shift_query_answers: Vec<EF> = shift_query_indices
             .iter()
-            .map(|&index| {
-                union_poly
-                    .evaluate_hypercube_base(&boolean_point_from_index::<F, EF>(index, union_vars))
+            .map(|&idx| {
+                combined_poly
+                    .evaluate_hypercube_base(&boolean_point_from_index::<F, EF>(idx, num_vars))
             })
             .collect();
-        let transcript = AccumulationTranscript {
-            batching_challenge,
-            ood_point,
-            ood_answer,
-            shift_query_indices,
-            shift_query_answers,
-        };
 
-        let initial_claim = build_prover_initial_claim_from_transcript(accumulators, &transcript);
-        let mut statement = self.0.initial_statement_with_linear(
-            union_poly.clone(),
-            initial_claim.linear_statement.clone(),
-        );
-        for (point, _) in initial_claim.eq_statement.iter() {
-            let _ = statement.evaluate(point);
+        // --- Phase 5: Build WHIR statement and prove ---
+        // The output accumulator's constraint: evaluation claim f(r) = combined_eval
+        let output_linear_claim =
+            evaluation_claim_as_linear_statement(&reduction_point, combined_eval);
+
+        let mut statement = self
+            .0
+            .initial_statement_with_linear(combined_poly.clone(), output_linear_claim.clone());
+
+        // Add OOD and shift query equality constraints
+        let _ = statement.evaluate(&ood_point);
+        for (&idx, _) in shift_query_indices.iter().zip(shift_query_answers.iter()) {
+            let point = boolean_point_from_index::<F, EF>(idx, num_vars);
+            let _ = statement.evaluate(&point);
         }
 
         let mut whir_proof =
@@ -325,13 +367,26 @@ where
             commitment,
         )?;
 
+        // --- Build output ---
+        let transcript = AccumulationTranscript {
+            constraint_batching_challenge,
+            constraint_batch_proof,
+            codeword_batching_challenge,
+            ood_point,
+            ood_answer,
+            shift_query_indices,
+            shift_query_answers,
+        };
+
         let output_accumulator = Accumulator::new(
             AccumulatorInstance {
                 commitment_root: whir_proof.initial_commitment,
-                linear_claim: initial_claim.linear_statement,
+                linear_claim: output_linear_claim,
                 _marker: PhantomData,
             },
-            AccumulatorWitness { poly: union_poly },
+            AccumulatorWitness {
+                poly: combined_poly,
+            },
         );
 
         Ok((
@@ -355,13 +410,14 @@ where
 impl<'a, EF, F, H, C, Challenger> LinearizedAccumulationVerifier<'a, EF, F, H, C, Challenger>
 where
     F: TwoAdicField + Ord,
-    EF: ExtensionField<F> + TwoAdicField,
+    EF: ExtensionField<F> + TwoAdicField + Algebra<EF>,
     Challenger: FieldChallenger<F> + GrindingChallenger<Witness = F>,
 {
     pub const fn new(config: &'a WhirConfig<EF, F, H, C, Challenger>) -> Self {
         Self(config)
     }
 
+    /// Full verification: lightweight accumulation checks + WHIR PCS verification.
     pub fn verify<P, W, PW, const DIGEST_ELEMS: usize>(
         &self,
         challenger: &mut Challenger,
@@ -381,46 +437,32 @@ where
         Challenger: CanObserve<Hash<F, W, DIGEST_ELEMS>>,
         [W; DIGEST_ELEMS]: serde::Serialize + for<'de> serde::Deserialize<'de>,
     {
-        assert!(!inputs.is_empty());
-        assert!(inputs.len().is_power_of_two());
+        // Phase A: Lightweight algebraic checks (no Merkle/WHIR)
+        let (output_linear_claim, eq_statement) =
+            accumulation_verify_lightweight::<F, EF, W, Challenger, DIGEST_ELEMS>(
+                challenger,
+                inputs,
+                &proof.transcript,
+            )?;
 
-        observe_accumulator_instances(challenger, inputs);
-        let expected_batching = challenger.sample();
-        let total_vars =
-            inputs[0].linear_claim.num_variables() + inputs.len().trailing_zeros() as usize;
-        let expected_ood = MultilinearPoint::new(
-            (0..total_vars)
-                .map(|_| challenger.sample_algebra_element())
-                .collect(),
-        );
-        let expected_shift_indices = (0..proof.transcript.shift_query_indices.len())
-            .map(|_| challenger.sample_bits(expected_ood.num_variables()))
-            .collect::<Vec<_>>();
+        // Phase B: Full WHIR PCS verification
+        let initial_claim = InitialClaim {
+            eq_statement,
+            linear_statement: output_linear_claim.clone(),
+        };
 
-        if expected_batching != proof.transcript.batching_challenge
-            || expected_ood != proof.transcript.ood_point
-            || expected_shift_indices != proof.transcript.shift_query_indices
-        {
-            return Err(VerifierError::StirChallengeFailed {
-                challenge_id: 0,
-                details: "accumulation transcript mismatch".into(),
-            });
-        }
-
-        let initial_claim =
-            build_public_initial_claim_from_transcript(inputs, &proof.transcript, total_vars);
         let parsed_commitment = CommitmentReader::new(self.0)
             .parse_commitment::<W, DIGEST_ELEMS>(&proof.whir_proof, challenger);
         WhirVerifier::new(self.0).verify_with_initial_claim::<P, W, PW, DIGEST_ELEMS>(
             &proof.whir_proof,
             challenger,
             &parsed_commitment,
-            initial_claim.clone(),
+            initial_claim,
         )?;
 
         Ok(AccumulatorInstance {
             commitment_root: proof.whir_proof.initial_commitment,
-            linear_claim: initial_claim.linear_statement,
+            linear_claim: output_linear_claim,
             _marker: PhantomData,
         })
     }
@@ -477,6 +519,8 @@ mod tests {
         )
     }
 
+    /// WhirConfig sized for the INPUT polynomial (not union).
+    /// With random LC, the combined polynomial has the same size as inputs.
     fn make_whir_config() -> WhirConfig<EF, F, MyHash, MyCompress, MyChallenger> {
         let mut rng = SmallRng::seed_from_u64(55);
         let perm = Perm::new_from_rng_128(&mut rng);
@@ -490,7 +534,8 @@ mod tests {
             soundness_type: SecurityAssumption::CapacityBound,
             starting_log_inv_rate: 1,
         };
-        WhirConfig::new(4, params)
+        // num_variables = 3 (same as input accumulators, NOT 4 for union)
+        WhirConfig::new(3, params)
     }
 
     fn seed_challenger(
@@ -565,9 +610,11 @@ mod tests {
         let (_, instance1) = make_shape_and_instance(16);
         let spartan = R1CSProver::new();
 
-        let mut chal0 = MyChallenger::new(Perm::new_from_rng_128(&mut SmallRng::seed_from_u64(11)));
+        let mut chal0 =
+            MyChallenger::new(Perm::new_from_rng_128(&mut SmallRng::seed_from_u64(11)));
         let proof0 = spartan.prove::<EF, _>(&instance0, &mut chal0);
-        let mut chal1 = MyChallenger::new(Perm::new_from_rng_128(&mut SmallRng::seed_from_u64(12)));
+        let mut chal1 =
+            MyChallenger::new(Perm::new_from_rng_128(&mut SmallRng::seed_from_u64(12)));
         let proof1 = spartan.prove::<EF, _>(&instance1, &mut chal1);
 
         let acc0 = initialize_accumulator_from_spartan::<F, EF, F, 8>(
@@ -597,6 +644,7 @@ mod tests {
             )
             .unwrap();
 
+        // Tamper with a shift query answer
         proof.transcript.shift_query_answers[0] += EF::ONE;
 
         let mut verifier_challenger = seed_challenger(&config);
@@ -608,5 +656,50 @@ mod tests {
             );
 
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn output_accumulator_satisfies_decider() {
+        let (shape, instance0) = make_shape_and_instance(9);
+        let (_, instance1) = make_shape_and_instance(16);
+        let spartan = R1CSProver::new();
+
+        let mut chal0 = MyChallenger::new(Perm::new_from_rng_128(&mut SmallRng::seed_from_u64(1)));
+        let proof0 = spartan.prove::<EF, _>(&instance0, &mut chal0);
+        let mut chal1 = MyChallenger::new(Perm::new_from_rng_128(&mut SmallRng::seed_from_u64(2)));
+        let proof1 = spartan.prove::<EF, _>(&instance1, &mut chal1);
+
+        let acc0 = initialize_accumulator_from_spartan::<F, EF, F, 8>(
+            &shape,
+            &proof0,
+            spartan.prepare_witness(&instance0),
+            [F::ZERO; 8],
+            EF::from_u64(3),
+        );
+        let acc1 = initialize_accumulator_from_spartan::<F, EF, F, 8>(
+            &shape,
+            &proof1,
+            spartan.prepare_witness(&instance1),
+            [F::ONE; 8],
+            EF::from_u64(3),
+        );
+
+        let config = make_whir_config();
+        let dft = Radix2DFTSmallBatch::<F>::default();
+        let mut prover_challenger = seed_challenger(&config);
+        let (output, _proof) = LinearizedAccumulationProver::new(&config)
+            .accumulate::<_, F, <F as Field>::Packing, _, 8>(
+                &dft,
+                &mut prover_challenger,
+                &[acc0, acc1],
+                2,
+            )
+            .unwrap();
+
+        // The output accumulator should pass the decider check
+        assert!(
+            decide_linearized_accumulator(&output),
+            "output accumulator failed decider"
+        );
     }
 }

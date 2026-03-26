@@ -2,6 +2,4 @@ pub mod fresh;
 pub mod frontend;
 
 pub use fresh::{FreshLinearInstance, FreshLinearInstancePublic};
-pub use frontend::{
-    QuasarFrontendOutput, QuasarFrontendProver, QuasarFrontendVerifier, QuasarTranscript,
-};
+pub use frontend::{QuasarFrontendOutput, QuasarFrontendProver, QuasarFrontendVerifier};

@@ -28,6 +28,7 @@
 pub mod accumulator;
 pub mod decider;
 pub mod encoding;
+pub mod eval_fold;
 pub mod fold;
 pub mod quasar_adapter;
 pub mod twin_constraint;

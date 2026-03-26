@@ -359,7 +359,7 @@ fn write_opening_runtime_plot(root: &Path, rows: &[OpeningRow]) {
     let mut series = Vec::new();
     let mut crossover_x = None;
 
-    let mut fields: BTreeSet<String> = rows.iter().map(|r| r.field.clone()).collect();
+    let fields: BTreeSet<String> = rows.iter().map(|r| r.field.clone()).collect();
     for f in fields {
         let mut unbatched = Vec::new();
         let mut batched = Vec::new();
@@ -408,7 +408,7 @@ fn write_opening_payload_plot(root: &Path, rows: &[OpeningRow]) {
     let mut series = Vec::new();
     let mut crossover_x = None;
 
-    let mut fields: BTreeSet<String> = rows.iter().map(|r| r.field.clone()).collect();
+    let fields: BTreeSet<String> = rows.iter().map(|r| r.field.clone()).collect();
     for f in fields {
         let mut unbatched = Vec::new();
         let mut batched = Vec::new();
@@ -457,7 +457,7 @@ fn write_full_proof_size_plot(root: &Path, rows: &[OpeningRow]) {
     let mut series = Vec::new();
     let mut crossover_x = None;
 
-    let mut fields: BTreeSet<String> = rows.iter().map(|r| r.field.clone()).collect();
+    let fields: BTreeSet<String> = rows.iter().map(|r| r.field.clone()).collect();
     for f in fields {
         let mut unbatched = Vec::new();
         let mut batched = Vec::new();
@@ -511,7 +511,7 @@ fn write_verifier_vs_queries_plots(root: &Path, rows: &[VerifierQueryRow]) -> Ve
         }
 
         let mut series = Vec::new();
-        let mut fields: BTreeSet<String> = by_field_q.keys().map(|k| k.0.clone()).collect();
+        let fields: BTreeSet<String> = by_field_q.keys().map(|k| k.0.clone()).collect();
         for f in fields {
             let mut unbatched = Vec::new();
             let mut batched = Vec::new();
