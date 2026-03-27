@@ -32,7 +32,12 @@ use whir_p3::{
             fold::{warp_fold_prove_rs_committed, warp_fold_verify, FreshInstancePublic, RSEncodingConfig, WarpFoldResult},
         },
     },
+    circuit::poseidon2::Poseidon2CircuitConfig,
     fiat_shamir::domain_separator::DomainSeparator,
+    ivc::warp_ivc::{
+        warp_ivc_init, warp_ivc_step_recursive, compute_recursive_circuit_size,
+        WarpIVCConfig,
+    },
     parameters::{errors::SecurityAssumption, FoldingFactor, ProtocolParameters},
     poly::{evals::EvaluationsList, multilinear::MultilinearPoint},
     spartan::{
@@ -377,7 +382,7 @@ fn run_warp(
 }
 
 // ============================================================================
-// FULL PIPELINE: Spartan → Quasar multicast → WARP fold → 1 terminal WHIR
+// FULL PIPELINE: Spartan → Batch reduction → WARP fold → 1 terminal WHIR
 // ============================================================================
 
 fn run_full_pipeline(
@@ -427,18 +432,18 @@ fn run_full_pipeline(
     }
     let spartan_us = spartan_start.elapsed().as_micros() as f64;
 
-    // ── Phase 2: Quasar multicast (per step) + WARP fold ──
+    // ── Phase 2: Batch reduction (per step) + WARP fold ──
     let mut acc = make_initial_acc(num_witness, log_code, log_m, num_inputs);
 
-    let mut quasar_total_us = 0f64;
+    let mut batch_reduce_total_us = 0f64;
     let mut fold_total_us = 0f64;
 
     for step in 0..num_steps {
         let start_idx = step * batch;
         let end_idx = start_idx + batch;
 
-        // Quasar multicast: constraint batch + random LC
-        let quasar_start = Instant::now();
+        // Batch reduction: constraint_batch + random_lc
+        let batch_reduce_start = Instant::now();
 
         let step_witnesses = &all_witnesses[start_idx..end_idx];
         let step_linears = &all_linears[start_idx..end_idx];
@@ -466,7 +471,7 @@ fn run_full_pipeline(
         let wit_refs: Vec<&EvaluationsList<F>> = step_witnesses.iter().collect();
         let combined = random_linear_combination(&wit_refs, eta);
 
-        quasar_total_us += quasar_start.elapsed().as_micros() as f64;
+        batch_reduce_total_us += batch_reduce_start.elapsed().as_micros() as f64;
 
         // Create FreshInstance from the combined witness.
         // prepare_witness returns z = (public_input || witness || padding),
@@ -532,7 +537,196 @@ fn run_full_pipeline(
     }
     let whir_us = whir_start.elapsed().as_micros() as f64;
 
-    (spartan_us, quasar_total_us, fold_total_us, whir_us)
+    (spartan_us, batch_reduce_total_us, fold_total_us, whir_us)
+}
+
+// ============================================================================
+// RECURSIVE IVC: unified circuit (step + Poseidon2 verifier) + WARP fold
+// ============================================================================
+
+fn run_recursive_ivc(
+    shape: &R1CSShape<F>,
+    num_steps: usize,
+    num_cons: usize,
+    num_witness: usize,
+    num_inputs: usize,
+) -> (f64, f64, f64) {
+    // Returns (circuit_build_us, spartan_prove_us, warp_fold_us) — all steps total
+    use p3_baby_bear::GenericPoseidon2LinearLayersBabyBear;
+    use whir_p3::ivc::step::TrivialStepCircuit;
+
+    let dft = Radix2DFTSmallBatch::<F>::default();
+    let ivc_config = WarpIVCConfig::default();
+    let perm = Perm::new_from_rng_128(&mut SmallRng::seed_from_u64(42));
+    let merkle_hash = MyHash::new(perm.clone());
+    let merkle_compress = MyCompress::new(perm.clone());
+    let poseidon_perm = Perm::new_from_rng_128(&mut SmallRng::seed_from_u64(99));
+    let poseidon_config = Poseidon2CircuitConfig::<F, 16>::from_rng(
+        8, 13, &mut SmallRng::seed_from_u64(99),
+    );
+    let step_circuit = TrivialStepCircuit::new(1);
+
+    // Compute target witness count for uniform circuit sizing
+    let (target_witness, _, _) = compute_recursive_circuit_size::<
+        F, GenericPoseidon2LinearLayersBabyBear, _, _,
+    >(&step_circuit, &[F::ZERO], &poseidon_config, &poseidon_perm, 3);
+
+    // Build a satisfying R1CS instance for init
+    let mut rng = SmallRng::seed_from_u64(5);
+    let (_synth_shape, synth_instance) =
+        R1CSInstance::<F>::produce_synthetic_r1cs(num_cons, shape.num_vars(), num_inputs, &mut rng);
+
+    // Init step: build padded unified circuit (no verifier) to get consistent shape
+    let mut init_builder = whir_p3::circuit::builder::CircuitBuilder::<F>::new();
+    let mut init_chal_circuit = whir_p3::circuit::sponge::CircuitChallenger::<F, 16, 8>::new(&mut init_builder);
+    let _ = whir_p3::ivc::warp_fold_verifier_circuit::synthesize_warp_ivc_circuit::<
+        F, GenericPoseidon2LinearLayersBabyBear, _, _, 16, 8,
+    >(
+        &mut init_builder, &mut init_chal_circuit, &poseidon_config, &poseidon_perm,
+        &step_circuit, &[F::ZERO], None, Some(target_witness),
+    );
+    let (init_shape, init_instance) = init_builder.build();
+
+    let spartan_prover = R1CSProver::new();
+    let mut init_chal = MyChallenger::new(Perm::new_from_rng_128(&mut SmallRng::seed_from_u64(1)));
+    let _init_proof = spartan_prover.prove::<EF, _>(&init_instance, &mut init_chal);
+    let init_witness = spartan_prover.prepare_witness(&init_instance);
+
+    let init_num_inputs = init_instance.input().len();
+    let z0 = init_witness.as_slice();
+    let init_num_witness = (z0.len() - init_num_inputs).next_power_of_two();
+    let mut wit0 = z0[init_num_inputs..].to_vec();
+    wit0.resize(init_num_witness, F::ZERO);
+
+    let log_code = init_num_witness.trailing_zeros() as usize + ivc_config.rs_log_inv_rate;
+    let log_m = init_shape.num_cons().next_power_of_two().trailing_zeros() as usize;
+
+    let fresh0 = FreshInstance {
+        public_input: z0[..init_num_inputs].to_vec(),
+        witness: wit0,
+    };
+    let zero_acc = make_initial_acc(init_num_witness, log_code, log_m, init_num_inputs);
+    let rs_config_init = RSEncodingConfig::new(ivc_config.rs_folding_factor, ivc_config.rs_log_inv_rate);
+    let tau0 = vec![F::from_u64(42)];
+    let mut ctr0 = 0u64;
+    let mh0 = merkle_hash.clone();
+    let mc0 = merkle_compress.clone();
+    let result0 = warp_fold_prove_rs_committed(
+        &init_shape, &[fresh0], &zero_acc, F::from_u64(7), &tau0,
+        &rs_config_init, &dft,
+        |_| { ctr0 += 1; F::from_u64(ctr0 + 500) },
+        |codeword, folding_factor| {
+            let (root, _tree) = merkle_commit_codeword::<
+                F, F, <F as Field>::Packing, <F as Field>::Packing,
+                MyHash, MyCompress, DIGEST,
+            >(codeword, folding_factor, mh0.clone(), mc0.clone());
+            root
+        },
+    );
+    let mut state = whir_p3::ivc::warp_ivc::WarpIVCState {
+        step: 1,
+        accumulator: rebuild_acc(&result0),
+        shape: init_shape,
+        last_fold_result: Some(result0),
+        prev_acc_instance: Some(zero_acc.instance.clone()),
+        public_state: vec![F::ZERO],
+    };
+
+    // Recursive steps — measure each phase
+    let mut total_circuit_us = 0f64;
+    let mut total_spartan_us = 0f64;
+    let mut total_fold_us = 0f64;
+
+    for step_idx in 0..num_steps {
+        // Phase 1: Circuit synthesis (includes Poseidon2 gadget)
+        let circuit_start = Instant::now();
+
+        // Build verifier witness from previous fold
+        let verifier_witness = if let (Some(fold_result), Some(prev_inst)) = (
+            &state.last_fold_result,
+            &state.prev_acc_instance,
+        ) {
+            let commitment_roots = vec![
+                prev_inst.commitment_root.to_vec(),
+                fold_result.commitment_root.to_vec(),
+            ];
+            let eval_claims = vec![prev_inst.eval_claim, F::ZERO];
+            let eval_points = vec![
+                prev_inst.eval_point.clone(),
+                vec![F::ZERO; prev_inst.eval_point.len()],
+            ];
+            let pesat_targets = vec![prev_inst.pesat_target, F::ZERO];
+            Some(whir_p3::ivc::warp_fold_verifier_circuit::WarpFoldVerifierWitness::from_fold_result(
+                commitment_roots, eval_claims, eval_points, pesat_targets,
+                &fold_result.sumcheck_round_polys, F::from_u64(7),
+            ))
+        } else {
+            None
+        };
+
+        let mut builder = whir_p3::circuit::builder::CircuitBuilder::<F>::new();
+        let mut circuit_chal = whir_p3::circuit::sponge::CircuitChallenger::<F, 16, 8>::new(&mut builder);
+        let _ = whir_p3::ivc::warp_fold_verifier_circuit::synthesize_warp_ivc_circuit::<
+            F, GenericPoseidon2LinearLayersBabyBear, _, _, 16, 8,
+        >(
+            &mut builder, &mut circuit_chal, &poseidon_config, &poseidon_perm,
+            &step_circuit, &[F::ZERO], verifier_witness.as_ref(), Some(target_witness),
+        );
+        let (unified_shape, unified_instance) = builder.build();
+        total_circuit_us += circuit_start.elapsed().as_micros() as f64;
+
+        // Phase 2: Spartan prove
+        let spartan_start = Instant::now();
+        let spartan_prover = R1CSProver::new();
+        let mut spartan_chal = MyChallenger::new(Perm::new_from_rng_128(
+            &mut SmallRng::seed_from_u64(step_idx as u64 + 200),
+        ));
+        let _proof = spartan_prover.prove::<EF, _>(&unified_instance, &mut spartan_chal);
+        let witness_poly = spartan_prover.prepare_witness(&unified_instance);
+        total_spartan_us += spartan_start.elapsed().as_micros() as f64;
+
+        // Phase 3: WARP fold
+        let fold_start = Instant::now();
+        let num_inp = unified_instance.input().len();
+        let z = witness_poly.as_slice();
+        let public_input = z[..num_inp].to_vec();
+        let acc_wit_len = state.accumulator.witness.witness.len();
+        let mut witness_part = z[num_inp..].to_vec();
+        witness_part.resize(acc_wit_len, F::ZERO);
+
+        let fresh = FreshInstance { public_input, witness: witness_part };
+        let rs_config = RSEncodingConfig::new(ivc_config.rs_folding_factor, ivc_config.rs_log_inv_rate);
+        let tau = vec![F::from_u64(step_idx as u64 + 42)];
+        let mut ctr = step_idx as u64 * 1000;
+        let mh = merkle_hash.clone();
+        let mc = merkle_compress.clone();
+        let result = warp_fold_prove_rs_committed(
+            &state.shape, &[fresh], &state.accumulator, F::from_u64(7), &tau,
+            &rs_config, &dft,
+            |_| { ctr += 1; F::from_u64(ctr + 500) },
+            |codeword, folding_factor| {
+                let (root, _tree) = merkle_commit_codeword::<
+                    F, F, <F as Field>::Packing, <F as Field>::Packing,
+                    MyHash, MyCompress, DIGEST,
+                >(codeword, folding_factor, mh.clone(), mc.clone());
+                root
+            },
+        );
+        total_fold_us += fold_start.elapsed().as_micros() as f64;
+
+        // Update state
+        let new_acc = rebuild_acc(&result);
+        state = whir_p3::ivc::warp_ivc::WarpIVCState {
+            step: state.step + 1,
+            accumulator: new_acc,
+            shape: state.shape.clone(),
+            last_fold_result: Some(result),
+            prev_acc_instance: Some(state.accumulator.instance.clone()),
+            public_state: vec![F::ZERO],
+        };
+    }
+
+    (total_circuit_us, total_spartan_us, total_fold_us)
 }
 
 // ============================================================================
@@ -549,15 +743,17 @@ fn main() {
     let sizes = parse_csv(sizes_str);
     let steps_list = parse_csv(steps_str);
 
-    println!("3-Way Benchmark: Full Pipeline vs WARP-only vs No-Fold");
-    println!("=====================================================");
+    println!("Accumulation Benchmark: 4 paths compared");
+    println!("=========================================");
     println!("Field: BabyBear (31-bit), EF: BabyBear^4");
     println!("WHIR: folding_factor=2, rate=1/2, security=100, pow=0");
     println!("Batch per step: {batch} | Repeats: {repeats}");
     println!();
-    println!("full    = Spartan + Quasar multicast + WARP fold + 1 WHIR");
-    println!("warp    = WARP fold (no Spartan) + 1 WHIR");
-    println!("no_fold = N independent WHIR commit+prove");
+    println!("Paths (Spartan linearization excluded from first 3):");
+    println!("  independent_whir  = N × WHIR commit+prove (baseline, no folding)");
+    println!("  direct_fold       = N × WARP fold (l=batch+1) + 1 terminal WHIR");
+    println!("  batch_then_fold   = N × (batch reduce to 1 + WARP fold l=2) + 1 terminal WHIR");
+    println!("  recursive_ivc     = N × (circuit synthesis + Spartan prove + WARP fold) [full IVC step]");
     println!();
 
     for &size_log2 in &sizes {
@@ -578,14 +774,13 @@ fn main() {
 
         println!("=== log2(witness) = {size_log2} (n={num_vars_y}, M={num_cons}, code=2^{log_code}) ===");
         println!();
-        println!("{:>6} | {:>10} {:>10} {:>10} | {:>10} {:>10} {:>10} | {:>10} {:>10} | {:>7} {:>7}",
+        println!("{:>6} | {:>16} {:>16} {:>16} {:>16} | {:>16} {:>16} {:>16} | {:>10} {:>10} {:>10}",
             "steps",
-            "full_prov", "warp_prov", "nf_prove",
-            "full_det", "warp_det", "nf_det",
-            "full_spd", "warp_spd",
-            "f/w", "f/nf",
+            "independent_whir", "direct_fold", "batch_then_fold", "recursive_ivc",
+            "circuit_synth", "spartan_prove", "ivc_warp_fold",
+            "fold/indep", "batch/indep", "ivc/indep",
         );
-        println!("{}", "-".repeat(130));
+        println!("{}", "-".repeat(180));
 
         for &num_steps in &steps_list {
             let total_instances = num_steps * batch;
@@ -594,71 +789,72 @@ fn main() {
             let _ = run_warp(&shape, &config, 1, batch, num_cons, num_witness, num_inputs);
             let _ = run_no_fold(&config, 1, num_cons, num_witness);
 
-            let mut warp_folds = Vec::new();
-            let mut warp_decides = Vec::new();
-            let mut warp_verifies = Vec::new();
             let mut nf_proves = Vec::new();
-            let mut nf_verifies = Vec::new();
-            let mut full_spartans = Vec::new();
-            let mut full_quasars = Vec::new();
-            let mut full_folds = Vec::new();
-            let mut full_whirs = Vec::new();
+            let mut warp_totals = Vec::new();
+            let mut batch_fold_totals = Vec::new();
+            let mut recursive_totals = Vec::new();
+            let mut recursive_circuits = Vec::new();
+            let mut recursive_spartans = Vec::new();
+            let mut recursive_folds = Vec::new();
 
             for _ in 0..repeats {
-                let (fold_us, decide_us, verify_us, _wit_bytes, _fixed) =
-                    run_warp(&shape, &config, num_steps, batch, num_cons, num_witness, num_inputs);
-                warp_folds.push(fold_us);
-                warp_decides.push(decide_us);
-                warp_verifies.push(verify_us);
-
-                let (nf_p, nf_v) = run_no_fold(&config, total_instances, num_cons, num_witness);
+                // Path 1: Independent WHIR proofs
+                let (nf_p, _nf_v) = run_no_fold(&config, total_instances, num_cons, num_witness);
                 nf_proves.push(nf_p);
-                nf_verifies.push(nf_v);
 
-                let (sp_us, qu_us, fo_us, wh_us) =
+                // Path 2: Direct WARP fold (all instances at once per step)
+                let (fold_us, decide_us, _verify_us, _wit_bytes, _fixed) =
+                    run_warp(&shape, &config, num_steps, batch, num_cons, num_witness, num_inputs);
+                warp_totals.push(fold_us + decide_us);
+
+                // Path 3: Batch reduce then WARP fold
+                let (_sp_us, br_us, fo_us, wh_us) =
                     run_full_pipeline(&shape, &config, num_steps, batch, num_cons, num_witness, num_inputs);
-                full_spartans.push(sp_us);
-                full_quasars.push(qu_us);
-                full_folds.push(fo_us);
-                full_whirs.push(wh_us);
+                batch_fold_totals.push(br_us + fo_us + wh_us);
+
+                // Path 4: Recursive IVC (circuit + Spartan + fold)
+                let (circ_us, spart_us, fold_us) =
+                    run_recursive_ivc(&shape, num_steps, num_cons, num_witness, num_inputs);
+                recursive_circuits.push(circ_us);
+                recursive_spartans.push(spart_us);
+                recursive_folds.push(fold_us);
+                recursive_totals.push(circ_us + spart_us + fold_us);
             }
 
-            let wf = median(&mut warp_folds);
-            let wd = median(&mut warp_decides);
-            let wv = median(&mut warp_verifies);
-            let warp_prove = wf + wd;
+            let indep = median(&mut nf_proves);
+            let direct = median(&mut warp_totals);
+            let batch_fold = median(&mut batch_fold_totals);
+            let recursive = median(&mut recursive_totals);
+            let rc = median(&mut recursive_circuits);
+            let rs = median(&mut recursive_spartans);
+            let rf = median(&mut recursive_folds);
 
-            let nfp = median(&mut nf_proves);
-            let nfv = median(&mut nf_verifies);
-            let nf_total = nfp + nfv;
-
-            let fs = median(&mut full_spartans);
-            let fq = median(&mut full_quasars);
-            let ff = median(&mut full_folds);
-            let fw = median(&mut full_whirs);
-            let full_prove = fs + fq + ff + fw;
-
-            let full_vs_nf = nf_total / full_prove;
-            let warp_vs_nf = nf_total / warp_prove;
+            let fold_vs_indep = indep / direct;
+            let batch_vs_indep = indep / batch_fold;
+            let ivc_vs_indep = indep / recursive;
 
             println!(
-                "{:>6} | {:>8.0}us {:>8.0}us {:>8.0}us | {:>8.0}us {:>8.0}us {:>8.0}us | {:>8.0}us {:>8.0}us | {:>6.2}x {:>6.2}x",
+                "{:>6} | {:>14.0}us {:>14.0}us {:>14.0}us {:>14.0}us | {:>14.0}us {:>14.0}us {:>14.0}us | {:>9.2}x {:>9.2}x {:>9.2}x",
                 num_steps,
-                full_prove, warp_prove, nfp,
-                fs, fq, ff,
-                fw, wd,
-                full_vs_nf, warp_vs_nf,
+                indep, direct, batch_fold, recursive,
+                rc, rs, rf,
+                fold_vs_indep, batch_vs_indep, ivc_vs_indep,
             );
         }
         println!();
     }
 
     println!("Legend:");
-    println!("  full_prov  = Spartan + Quasar + WARP fold + 1 WHIR (total prover)");
-    println!("  warp_prov  = WARP fold + 1 WHIR (prover, no Spartan/Quasar)");
-    println!("  nf_prove   = N independent WHIR proofs (baseline)");
-    println!("  full_det   = Spartan time | Quasar time | WARP fold time");
-    println!("  full_spd   = terminal WHIR (full pipeline) | terminal WHIR (warp-only)");
-    println!("  f/w        = no_fold / full_pipeline speedup");
-    println!("  f/nf       = no_fold / warp_only speedup");
+    println!("  independent_whir  = N × WHIR commit+prove (one per instance, no folding)");
+    println!("  direct_fold       = N × WARP fold (l=batch+1 per step) + 1 terminal WHIR");
+    println!("  batch_then_fold   = N × (constraint_batch + random_lc + WARP fold l=2) + 1 terminal WHIR");
+    println!("  recursive_ivc     = N × (circuit synthesis with Poseidon2 verifier + Spartan prove + WARP fold)");
+    println!("  circuit_synth     = Build unified R1CS circuit (step + Poseidon2 fold verifier) [all steps]");
+    println!("  spartan_prove     = Spartan two-phase sumcheck on the unified circuit [all steps]");
+    println!("  ivc_warp_fold     = WARP fold: RS encode + Merkle + twin-constraint sumcheck [all steps]");
+    println!("  fold/indep     = independent_whir / direct_fold (>1 = fold wins)");
+    println!("  batch/indep    = independent_whir / batch_then_fold (>1 = batch+fold wins)");
+    println!("  ivc/indep      = independent_whir / recursive_ivc (>1 = recursive IVC wins)");
+    println!("  Note: independent_whir, direct_fold, batch_then_fold exclude Spartan linearization.");
+    println!("        recursive_ivc includes everything (circuit + Spartan + fold).");
 }

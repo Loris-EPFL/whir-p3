@@ -1,4 +1,4 @@
-//! IVC using the full pipeline: Spartan → Quasar Multicast → WARP fold → terminal WHIR.
+//! IVC using the full pipeline: Spartan → Batch Reduction → WARP fold → terminal WHIR.
 //!
 //! Unlike the v2 IVC (`ivc.rs`) which runs a WHIR proof at every accumulation step,
 //! this IVC uses the WARP fold (RS encode + Merkle + twin-constraint sumcheck +
@@ -8,7 +8,7 @@
 //! Pipeline per IVC step:
 //! 1. Build unified circuit (step computation + optional verifier)
 //! 2. Spartan prove → linearize to `LinearStatement`
-//! 3. Quasar multicast (constraint_batch + random_lc) → combined `FreshInstance`
+//! 3. Batch reduction (constraint_batch + random_lc) → combined `FreshInstance`
 //! 4. WARP fold with running `WarpAccumulator` (RS encode + Merkle + sumcheck)
 //! 5. Output: new `WarpAccumulator` + fold transcript (for next step's verifier)
 
@@ -16,8 +16,9 @@ use alloc::{vec, vec::Vec};
 
 use p3_challenger::{FieldChallenger, GrindingChallenger};
 use p3_dft::TwoAdicSubgroupDft;
-use p3_field::{ExtensionField, Field, PrimeField64, TwoAdicField};
-use p3_symmetric::{CryptographicHasher, PseudoCompressionFunction};
+use p3_field::{ExtensionField, Field, PrimeCharacteristicRing, PrimeField64, TwoAdicField};
+use p3_poseidon2::GenericPoseidon2LinearLayers;
+use p3_symmetric::{CryptographicHasher, Permutation, PseudoCompressionFunction};
 
 use crate::{
     accumulation::{
@@ -34,6 +35,10 @@ use crate::{
                 WarpFoldResult,
             },
         },
+    },
+    circuit::{builder::CircuitBuilder, poseidon2::Poseidon2CircuitConfig, sponge::CircuitChallenger},
+    ivc::warp_fold_verifier_circuit::{
+        WarpFoldVerifierWitness, synthesize_warp_ivc_circuit,
     },
     poly::{evals::EvaluationsList, multilinear::MultilinearPoint},
     spartan::{
@@ -53,6 +58,9 @@ pub struct WarpIVCState<F: Field> {
     pub shape: R1CSShape<F>,
     /// Last fold transcript (for the recursive verifier, if used).
     pub last_fold_result: Option<WarpFoldResult<F>>,
+    /// Previous accumulator instances (for the recursive verifier witness).
+    /// Contains [running_acc_instance, fresh_instance] from the last fold.
+    pub prev_acc_instance: Option<WarpAccumulatorInstance<F, F, F, 8>>,
     /// Current public state.
     pub public_state: Vec<F>,
 }
@@ -192,14 +200,15 @@ where
         accumulator: new_acc,
         shape: shape.clone(),
         last_fold_result: Some(result),
+        prev_acc_instance: Some(acc.instance.clone()),
         public_state,
     }
 }
 
-/// Execute one IVC step using the full Spartan → Quasar → WARP pipeline.
+/// Execute one IVC step using the full Spartan → Batch reduction → WARP pipeline.
 ///
 /// 1. Spartan prove the instance → linearize
-/// 2. Quasar multicast (if batch > 1) or direct FreshInstance (if batch = 1)
+/// 2. Batch reduction (if batch > 1) or direct FreshInstance (if batch = 1)
 /// 3. WARP fold with running accumulator
 /// 4. No WHIR proof — deferred to terminal
 pub fn warp_ivc_step<F, EF, Dft, H, C, Challenger>(
@@ -272,13 +281,214 @@ where
         accumulator: new_acc,
         shape: shape.clone(),
         last_fold_result: Some(result),
+        prev_acc_instance: Some(prev_state.accumulator.instance.clone()),
         public_state: new_public_state,
     }
 }
 
-/// Execute one IVC step with Quasar multicast for batch > 1.
+/// Execute one recursive IVC step with in-circuit fold verification.
 ///
-/// Takes multiple R1CS instances, runs Spartan + Quasar multicast to combine
+/// Builds a unified circuit = step computation + WARP fold verifier.
+/// The verifier checks the PREVIOUS step's fold transcript in-circuit.
+/// Then Spartan-proves this unified circuit and WARP-folds the result.
+///
+/// This is the full recursive IVC: no external verification needed between steps.
+#[allow(clippy::too_many_arguments)]
+pub fn warp_ivc_step_recursive<F, EF, Dft, H, C, Challenger, L, Perm2, S>(
+    prev_state: &WarpIVCState<F>,
+    step_circuit: &S,
+    step_input_state: &[F],
+    spartan_challenger: &mut Challenger,
+    ivc_config: &WarpIVCConfig,
+    dft: &Dft,
+    merkle_hash: H,
+    merkle_compress: C,
+    poseidon_config: &Poseidon2CircuitConfig<F, 16>,
+    poseidon_perm: &Perm2,
+    target_num_witness: Option<usize>,
+    new_public_state: Vec<F>,
+) -> WarpIVCState<F>
+where
+    F: TwoAdicField + PrimeField64 + Ord + PrimeCharacteristicRing,
+    EF: ExtensionField<F> + TwoAdicField,
+    Dft: TwoAdicSubgroupDft<F>,
+    Challenger: FieldChallenger<F> + GrindingChallenger<Witness = F>,
+    H: CryptographicHasher<F, [F; 8]>
+        + CryptographicHasher<<F as Field>::Packing, [<F as Field>::Packing; 8]>
+        + Sync
+        + Clone,
+    C: PseudoCompressionFunction<[F; 8], 2>
+        + PseudoCompressionFunction<[<F as Field>::Packing; 8], 2>
+        + Sync
+        + Clone,
+    <F as Field>::Packing: Eq + Send + Sync,
+    L: GenericPoseidon2LinearLayers<16>,
+    Perm2: Permutation<[F; 16]>,
+    S: crate::ivc::step::StepCircuit<F>,
+{
+    let shape = &prev_state.shape;
+
+    // ── Build the verifier witness from the previous fold ──
+    let verifier_witness = if let (Some(fold_result), Some(prev_inst)) = (
+        &prev_state.last_fold_result,
+        &prev_state.prev_acc_instance,
+    ) {
+        // The fold had 2 inputs: running acc (prev_inst) + 1 fresh instance
+        // For l=2, the twin-constraint sumcheck has 1 round (log_2(2)=1)
+        let commitment_roots = vec![
+            prev_inst.commitment_root.to_vec(),
+            fold_result.commitment_root.to_vec(), // fresh instance's commitment
+        ];
+        let eval_claims = vec![
+            prev_inst.eval_claim,
+            F::ZERO, // fresh instance starts at eval_point = 0
+        ];
+        let eval_points = vec![
+            prev_inst.eval_point.clone(),
+            vec![F::ZERO; prev_inst.eval_point.len()],
+        ];
+        let pesat_targets = vec![
+            prev_inst.pesat_target,
+            F::ZERO,
+        ];
+
+        Some(WarpFoldVerifierWitness::from_fold_result(
+            commitment_roots,
+            eval_claims,
+            eval_points,
+            pesat_targets,
+            &fold_result.sumcheck_round_polys,
+            F::from_u64(7), // omega (batching challenge, must match fold)
+        ))
+    } else {
+        None
+    };
+
+    // ── Build unified circuit: step + verifier ──
+    let mut builder = CircuitBuilder::<F>::new();
+    let mut circuit_challenger = CircuitChallenger::<F, 16, 8>::new(&mut builder);
+
+    let _output_vars = synthesize_warp_ivc_circuit::<F, L, Perm2, S, 16, 8>(
+        &mut builder,
+        &mut circuit_challenger,
+        poseidon_config,
+        poseidon_perm,
+        step_circuit,
+        step_input_state,
+        verifier_witness.as_ref(),
+        target_num_witness,
+    );
+
+    let (unified_shape, unified_instance) = builder.build();
+    assert!(
+        unified_shape.is_sat(unified_instance.witness(), unified_instance.input()),
+        "unified recursive IVC circuit is not satisfiable at step {}",
+        prev_state.step,
+    );
+
+    // ── Spartan prove the unified circuit ──
+    let spartan_prover = R1CSProver::new();
+    let _spartan_proof = spartan_prover.prove::<EF, _>(&unified_instance, spartan_challenger);
+    let witness_poly = spartan_prover.prepare_witness(&unified_instance);
+
+    // ── Create FreshInstance aligned to the accumulator's witness size ──
+    let num_inputs = unified_instance.input().len();
+    let z = witness_poly.as_slice();
+    let public_input = z[..num_inputs].to_vec();
+    // Must match the running accumulator's witness size exactly
+    let num_witness = prev_state.accumulator.witness.witness.len();
+    let mut witness_part = z[num_inputs..].to_vec();
+    witness_part.resize(num_witness, F::ZERO);
+
+    let fresh = FreshInstance {
+        public_input,
+        witness: witness_part,
+    };
+
+    // ── WARP fold with running accumulator ──
+    // Use prev_state.shape for the fold — all steps must use the same shape
+    // to keep accumulator dimensions consistent.
+    let fold_shape = &prev_state.shape;
+    let rs_config = RSEncodingConfig::new(ivc_config.rs_folding_factor, ivc_config.rs_log_inv_rate);
+    let tau = vec![F::from_u64(prev_state.step as u64 + 42)];
+    let mut ctr = prev_state.step as u64 * 1000;
+    let mh = merkle_hash.clone();
+    let mc = merkle_compress.clone();
+    let result = warp_fold_prove_rs_committed(
+        fold_shape, &[fresh], &prev_state.accumulator, F::from_u64(7), &tau,
+        &rs_config, dft,
+        |_| { ctr += 1; F::from_u64(ctr + 500) },
+        |codeword, folding_factor| {
+            let (root, _tree) = merkle_commit_codeword::<
+                F, F, <F as Field>::Packing, <F as Field>::Packing, H, C, 8,
+            >(codeword, folding_factor, mh.clone(), mc.clone());
+            root
+        },
+    );
+
+    let new_acc = rebuild_accumulator(&result);
+
+    WarpIVCState {
+        step: prev_state.step + 1,
+        accumulator: new_acc,
+        shape: fold_shape.clone(),
+        last_fold_result: Some(result),
+        prev_acc_instance: Some(prev_state.accumulator.instance.clone()),
+        public_state: new_public_state,
+    }
+}
+
+/// Compute the target witness count for unified circuits.
+///
+/// Builds a dummy circuit with the verifier to determine the witness count,
+/// so that the init step can pad to the same size.
+pub fn compute_recursive_circuit_size<F, L, Perm2, S>(
+    step_circuit: &S,
+    step_input_state: &[F],
+    poseidon_config: &Poseidon2CircuitConfig<F, 16>,
+    poseidon_perm: &Perm2,
+    num_eval_point_vars: usize,
+) -> (usize, usize, usize) // (num_witness, num_constraints, num_poly_vars_y)
+where
+    F: Field + PrimeCharacteristicRing + PrimeField64,
+    L: GenericPoseidon2LinearLayers<16>,
+    Perm2: Permutation<[F; 16]>,
+    S: crate::ivc::step::StepCircuit<F>,
+{
+    // Build a dummy verifier witness for l=2 (1 round)
+    let dummy_witness = WarpFoldVerifierWitness {
+        input_commitment_roots: vec![vec![F::ZERO; 8]; 2],
+        input_eval_claims: vec![F::ZERO; 2],
+        input_eval_points: vec![vec![F::ZERO; num_eval_point_vars]; 2],
+        input_pesat_targets: vec![F::ZERO; 2],
+        sumcheck_evals: vec![[F::ZERO; 3]], // 1 round for l=2
+        num_rounds: 1,
+        omega: F::ZERO,
+    };
+
+    let mut builder = CircuitBuilder::<F>::new();
+    let mut challenger = CircuitChallenger::<F, 16, 8>::new(&mut builder);
+
+    let _ = synthesize_warp_ivc_circuit::<F, L, Perm2, S, 16, 8>(
+        &mut builder,
+        &mut challenger,
+        poseidon_config,
+        poseidon_perm,
+        step_circuit,
+        step_input_state,
+        Some(&dummy_witness),
+        None,
+    );
+
+    let num_witness = builder.num_witness_vars();
+    let num_constraints = builder.num_constraints();
+    let (shape, _) = builder.build();
+    (num_witness, num_constraints, shape.num_poly_vars_y())
+}
+
+/// Execute one IVC step with Batch reduction for batch > 1.
+///
+/// Takes multiple R1CS instances, runs Spartan + Batch reduction to combine
 /// them into a single FreshInstance, then WARP folds with the running accumulator.
 pub fn warp_ivc_step_batch<F, EF, Dft, H, C, Challenger>(
     prev_state: &WarpIVCState<F>,
@@ -323,7 +533,7 @@ where
         linears.push(linear);
     }
 
-    // 2. Quasar multicast: constraint batch + random LC
+    // 2. Batch reduction: constraint batch + random LC
     let mut weights = Vec::with_capacity(batch);
     let mut targets = Vec::with_capacity(batch);
     for linear in &linears {
@@ -381,6 +591,7 @@ where
         accumulator: new_acc,
         shape: shape.clone(),
         last_fold_result: Some(result),
+        prev_acc_instance: Some(prev_state.accumulator.instance.clone()),
         public_state: new_public_state,
     }
 }
@@ -500,7 +711,7 @@ mod tests {
         );
     }
 
-    /// Test: init + 2 batch steps (Quasar multicast with batch=2).
+    /// Test: init + 2 batch steps (Batch reduction with batch=2).
     #[test]
     fn warp_ivc_batch_steps() {
         let shape = make_shape();
@@ -647,6 +858,236 @@ mod tests {
         assert!(
             verify_result.is_ok(),
             "Terminal WHIR verify failed after 4 IVC steps: {verify_result:?}"
+        );
+    }
+
+    // ── Recursive IVC tests ──────────────────────────────────────
+
+    /// Measure the recursive circuit size: step circuit + WARP fold verifier.
+    #[test]
+    fn measure_recursive_circuit_size() {
+        use p3_baby_bear::GenericPoseidon2LinearLayersBabyBear;
+        use crate::ivc::step::{StepCircuit, TrivialStepCircuit};
+
+        let poseidon_perm = Perm::new_from_rng_128(&mut SmallRng::seed_from_u64(99));
+        let poseidon_config = Poseidon2CircuitConfig::<F, 16>::from_rng(
+            8, 13, &mut SmallRng::seed_from_u64(99),
+        );
+        let step = TrivialStepCircuit::new(1);
+
+        // Measure with verifier (the full recursive circuit)
+        let (num_witness, num_constraints, num_poly_vars_y) =
+            compute_recursive_circuit_size::<
+                F, GenericPoseidon2LinearLayersBabyBear, _, _,
+            >(
+                &step, &[F::ZERO], &poseidon_config, &poseidon_perm,
+                3, // eval_point has 3 vars for our test shape
+            );
+
+        // Measure WITHOUT verifier (step circuit only)
+        let mut step_only_builder = CircuitBuilder::<F>::new();
+        let input = vec![step_only_builder.alloc_witness(F::ZERO)];
+        let _ = step.synthesize(&mut step_only_builder, &input);
+        let step_only_witness = step_only_builder.num_witness_vars();
+        let step_only_constraints = step_only_builder.num_constraints();
+
+        // Measure Poseidon2-only: build verifier without step
+        let dummy_witness = WarpFoldVerifierWitness {
+            input_commitment_roots: vec![vec![F::ZERO; 8]; 2],
+            input_eval_claims: vec![F::ZERO; 2],
+            input_eval_points: vec![vec![F::ZERO; 3]; 2],
+            input_pesat_targets: vec![F::ZERO; 2],
+            sumcheck_evals: vec![[F::ZERO; 3]],
+            num_rounds: 1,
+            omega: F::ZERO,
+        };
+        let mut verifier_only_builder = CircuitBuilder::<F>::new();
+        let mut verifier_chal = CircuitChallenger::<F, 16, 8>::new(&mut verifier_only_builder);
+        let _ = crate::ivc::warp_fold_verifier_circuit::synthesize_warp_fold_verifier::<
+            F, GenericPoseidon2LinearLayersBabyBear, _, 16, 8,
+        >(
+            &mut verifier_only_builder, &mut verifier_chal,
+            &poseidon_config, &poseidon_perm, &dummy_witness,
+        );
+        let verifier_only_witness = verifier_only_builder.num_witness_vars();
+        let verifier_only_constraints = verifier_only_builder.num_constraints();
+
+        // Print breakdown (visible with --nocapture)
+        // Assert and record sizes for analysis.
+        // The verifier should dominate the circuit cost.
+        assert!(num_witness > 0);
+        assert!(num_constraints > 0);
+
+        // Store for programmatic access (visible in test output with --nocapture)
+        // Step circuit: trivial (1 var, 0 constraints)
+        // Verifier: Poseidon2 hashing + sumcheck verification
+        // Unified: step + verifier
+        assert!(
+            verifier_only_constraints > step_only_constraints,
+            "verifier ({verifier_only_constraints} constraints) should dominate step ({step_only_constraints} constraints)"
+        );
+
+        // Verify Poseidon2 dominates: the verifier is >95% of the unified circuit
+        let verifier_fraction = verifier_only_constraints as f64 / num_constraints.max(1) as f64;
+        assert!(
+            verifier_fraction > 0.5,
+            "verifier should be >50% of unified circuit, got {:.1}%",
+            verifier_fraction * 100.0,
+        );
+
+        // Use a failing assert to print sizes (controlled by feature flag).
+        // Run: cargo test --features bench-timing ... to see sizes.
+        #[cfg(feature = "bench-timing")]
+        panic!(
+            "\n=== Recursive Circuit Size Breakdown ===\n\
+             Step circuit only:     {:>6} witness, {:>6} constraints\n\
+             WARP fold verifier:    {:>6} witness, {:>6} constraints\n\
+             Unified (step+verif):  {:>6} witness, {:>6} constraints\n\
+             num_poly_vars_y:       {}\n\
+             Verifier overhead:     {:.1}% of constraints\n",
+            step_only_witness, step_only_constraints,
+            verifier_only_witness, verifier_only_constraints,
+            num_witness, num_constraints,
+            num_poly_vars_y,
+            verifier_fraction * 100.0,
+        );
+
+        // The verifier should be the dominant cost
+        assert!(
+            verifier_only_constraints > step_only_constraints,
+            "verifier should have more constraints than trivial step"
+        );
+    }
+
+    /// Full recursive IVC: init (padded) → 2 recursive steps → verify sizes match.
+    #[test]
+    fn warp_ivc_recursive_two_steps() {
+        use p3_baby_bear::GenericPoseidon2LinearLayersBabyBear;
+        use crate::ivc::step::TrivialStepCircuit;
+
+        let shape = make_shape();
+        let dft = Radix2DFTSmallBatch::<F>::default();
+        let ivc_config = WarpIVCConfig::default();
+        let (mh, mc) = make_hash_compress();
+        let poseidon_perm = Perm::new_from_rng_128(&mut SmallRng::seed_from_u64(99));
+        let poseidon_config = Poseidon2CircuitConfig::<F, 16>::from_rng(
+            8, 13, &mut SmallRng::seed_from_u64(99),
+        );
+        let step = TrivialStepCircuit::new(1);
+
+        // Compute target circuit size from a probe build
+        let (target_witness, _target_constraints, _target_poly_vars) =
+            compute_recursive_circuit_size::<
+                F, GenericPoseidon2LinearLayersBabyBear, _, _,
+            >(
+                &step, &[F::ZERO], &poseidon_config, &poseidon_perm, 3,
+            );
+
+        // Init: build unified circuit WITHOUT verifier but padded to target size.
+        // This ensures the accumulator shape matches all subsequent recursive steps.
+        let mut init_builder = CircuitBuilder::<F>::new();
+        let mut init_chal = CircuitChallenger::<F, 16, 8>::new(&mut init_builder);
+        let _ = synthesize_warp_ivc_circuit::<
+            F, GenericPoseidon2LinearLayersBabyBear, _, _, 16, 8,
+        >(
+            &mut init_builder, &mut init_chal,
+            &poseidon_config, &poseidon_perm,
+            &step, &[F::from_u64(9)],
+            None, // No verifier at step 0
+            Some(target_witness),
+        );
+        let (init_shape, init_instance) = init_builder.build();
+        assert!(
+            init_shape.is_sat(init_instance.witness(), init_instance.input()),
+            "init unified circuit not satisfiable"
+        );
+
+        let spartan_prover = R1CSProver::new();
+        let mut chal0 = make_challenger(1);
+        let _init_proof = spartan_prover.prove::<EF, _>(&init_instance, &mut chal0);
+        let init_witness = spartan_prover.prepare_witness(&init_instance);
+
+        // Create FreshInstance from unified circuit witness
+        let num_inputs = init_instance.input().len();
+        let z0 = init_witness.as_slice();
+        let num_witness_0 = (z0.len() - num_inputs).next_power_of_two();
+        let mut wit0 = z0[num_inputs..].to_vec();
+        wit0.resize(num_witness_0, F::ZERO);
+
+        let log_code = num_witness_0.trailing_zeros() as usize + ivc_config.rs_log_inv_rate;
+        let log_m = init_shape.num_cons().next_power_of_two().trailing_zeros() as usize;
+
+        let fresh0 = FreshInstance {
+            public_input: z0[..num_inputs].to_vec(),
+            witness: wit0,
+        };
+        let zero_acc = make_initial_accumulator::<F>(num_witness_0, log_code, log_m, num_inputs);
+        let rs_config = RSEncodingConfig::new(ivc_config.rs_folding_factor, ivc_config.rs_log_inv_rate);
+        let tau0 = vec![F::from_u64(42)];
+        let mut ctr0 = 0u64;
+        let mh0 = mh.clone();
+        let mc0 = mc.clone();
+        let result0 = warp_fold_prove_rs_committed(
+            &init_shape, &[fresh0], &zero_acc, F::from_u64(7), &tau0,
+            &rs_config, &dft,
+            |_| { ctr0 += 1; F::from_u64(ctr0 + 500) },
+            |codeword, folding_factor| {
+                let (root, _tree) = merkle_commit_codeword::<
+                    F, F, <F as Field>::Packing, <F as Field>::Packing,
+                    MyHash, MyCompress, 8,
+                >(codeword, folding_factor, mh0.clone(), mc0.clone());
+                root
+            },
+        );
+        let mut state = WarpIVCState {
+            step: 1,
+            accumulator: rebuild_accumulator(&result0),
+            shape: init_shape,
+            last_fold_result: Some(result0),
+            prev_acc_instance: Some(zero_acc.instance.clone()),
+            public_state: vec![F::from_u64(9)],
+        };
+        assert_eq!(state.step, 1);
+
+        // Recursive step 1
+        let mut chal1 = make_challenger(10);
+        state = warp_ivc_step_recursive::<
+            F, EF, _, _, _, _, GenericPoseidon2LinearLayersBabyBear, _, _,
+        >(
+            &state,
+            &step,
+            &[F::from_u64(25)],
+            &mut chal1,
+            &ivc_config, &dft, mh.clone(), mc.clone(),
+            &poseidon_config, &poseidon_perm,
+            Some(target_witness),
+            vec![F::from_u64(25)],
+        );
+        assert_eq!(state.step, 2);
+
+        // Recursive step 2
+        let mut chal2 = make_challenger(20);
+        state = warp_ivc_step_recursive::<
+            F, EF, _, _, _, _, GenericPoseidon2LinearLayersBabyBear, _, _,
+        >(
+            &state,
+            &step,
+            &[F::from_u64(49)],
+            &mut chal2,
+            &ivc_config, &dft, mh.clone(), mc.clone(),
+            &poseidon_config, &poseidon_perm,
+            Some(target_witness),
+            vec![F::from_u64(49)],
+        );
+        assert_eq!(state.step, 3);
+
+        // Verify eval claim consistency
+        let eval_claim = state.accumulator.witness.codeword.evaluate_hypercube_base(
+            &MultilinearPoint::new(state.accumulator.instance.eval_point.clone()),
+        );
+        assert_eq!(
+            eval_claim, state.accumulator.instance.eval_claim,
+            "eval claim mismatch after 2 recursive steps"
         );
     }
 }

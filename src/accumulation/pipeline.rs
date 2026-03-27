@@ -1,4 +1,4 @@
-//! Full pipeline: Spartan → Quasar Multicast → Eval Fold → Terminal WHIR.
+//! Full pipeline: Spartan → Batch Reduction → Eval Fold → Terminal WHIR.
 //!
 //! This module wires the complete accumulation pipeline:
 //!
@@ -6,7 +6,7 @@
 //!    `FreshLinearInstance` (weight table λ, target σ). The nonlinearity
 //!    is consumed by the Spartan sumcheck.
 //!
-//! 2. **Quasar multicast** batches l linear claims via `constraint_batch_prove`
+//! 2. **Batch reduction** batches l linear claims via `constraint_batch_prove`
 //!    → reduces to point evaluations fᵢ(r). Then `random_linear_combination`
 //!    combines the l witness polynomials into one of the same size:
 //!    f = Σᵢ ηⁱ·fᵢ with evaluation claim f(r) = Σᵢ ηⁱ·fᵢ(r).
@@ -104,8 +104,8 @@ mod tests {
         )
     }
 
-    /// Step 2: Quasar multicast — batch l linear claims → combined witness + eval claim
-    fn quasar_multicast(
+    /// Step 2: Batch reduction — batch l linear claims → combined witness + eval claim
+    fn batch_reduce(
         fresh_instances: &[FreshLinearInstance<F, EF>],
         witnesses: &[EvaluationsList<F>],
     ) -> (EvaluationsList<F>, Vec<EF>, Vec<EF>) {
@@ -150,7 +150,7 @@ mod tests {
         (combined, point_coords, batch_proof.individual_evals)
     }
 
-    /// Full pipeline test: Spartan → Quasar → Eval Fold → verify consistency
+    /// Full pipeline test: Spartan → Batch Reduction → Eval Fold → verify consistency
     #[test]
     fn full_pipeline_two_instances_one_fold() {
         let shape = make_square_shape();
@@ -165,14 +165,14 @@ mod tests {
         assert!(fresh0.verify());
         assert!(fresh1.verify());
 
-        // Step 2: Quasar multicast
+        // Step 2: Batch reduction
         let (combined, _reduction_point, _individual_evals) =
-            quasar_multicast(&[fresh0, fresh1], &[wit0, wit1]);
+            batch_reduce(&[fresh0, fresh1], &[wit0, wit1]);
 
         // Witness size preserved
         assert_eq!(combined.num_evals(), 8); // 2^3 (num_poly_vars_y = 3)
 
-        // Step 3: Create initial accumulator + fresh accumulator from Quasar output
+        // Step 3: Create initial accumulator + fresh accumulator from batch reduction output
         let rs_config = RSEncodingConfig::new(1, 1); // folding_factor=1, log_inv_rate=1
         let dft = Radix2DFTSmallBatch::<F>::default();
 
@@ -329,15 +329,15 @@ mod tests {
         challenger
     }
 
-    // ── End-to-end test: Spartan → Quasar → EvalFold → WHIR ─────────
+    // ── End-to-end test: Spartan → Batch Reduction → EvalFold → WHIR ─────────
 
     /// Full pipeline with terminal WHIR proof:
     /// 1. Spartan proves 4 R1CS instances
-    /// 2. Quasar multicast batches them (2 at a time)
+    /// 2. Batch reduction batches them (2 at a time)
     /// 3. Eval fold accumulates over 2 steps
     /// 4. Terminal WHIR prove + verify on the final accumulator
     #[test]
-    fn full_pipeline_spartan_quasar_evalfold_whir() {
+    fn full_pipeline_spartan_batch_evalfold_whir() {
         let shape = make_square_shape();
         let rs_config = RSEncodingConfig::new(1, 1); // rate 1/2
         let dft = Radix2DFTSmallBatch::<F>::default();
@@ -358,7 +358,7 @@ mod tests {
         }
 
         // ── First fold step: multicast instances 0,1 → fold with initial acc ──
-        let (combined_01, _pt01, _evals01) = quasar_multicast(
+        let (combined_01, _pt01, _evals01) = batch_reduce(
             &[linearized[0].0.clone(), linearized[1].0.clone()],
             &[linearized[0].1.clone(), linearized[1].1.clone()],
         );
@@ -394,7 +394,7 @@ mod tests {
         running = EvalAccumulator { instance: result1.instance, witness: result1.witness };
 
         // ── Second fold step: multicast instances 2,3 → fold ──
-        let (combined_23, _pt23, _evals23) = quasar_multicast(
+        let (combined_23, _pt23, _evals23) = batch_reduce(
             &[linearized[2].0.clone(), linearized[3].0.clone()],
             &[linearized[2].1.clone(), linearized[3].1.clone()],
         );

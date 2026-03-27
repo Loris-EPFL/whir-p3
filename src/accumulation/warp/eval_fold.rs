@@ -1,6 +1,6 @@
-//! Eval-only accumulation fold for the Spartan → Quasar → WARP → WHIR pipeline.
+//! Eval-only accumulation fold for the Spartan → batch reduction → WARP → WHIR pipeline.
 //!
-//! After Spartan linearizes R1CS into `LinearStatement`s and Quasar multicast
+//! After Spartan linearizes R1CS into `LinearStatement`s and batch reduction multicast
 //! batches them via constraint_batch + random_lc, the accumulator only needs
 //! to track **evaluation claims** `f(α) = μ`. No PESAT claims are needed.
 //!
@@ -41,7 +41,7 @@ use super::fold::RSEncodingConfig;
 
 /// Compact eval-only accumulator instance (public).
 ///
-/// After Spartan linearizes R1CS and Quasar multicast batches the linear
+/// After Spartan linearizes R1CS and batch reduction multicast batches the linear
 /// claims, the only claim left is an evaluation claim f̃(α) = μ on a
 /// committed (RS-encoded + Merkle) polynomial.
 #[derive(Clone, Debug)]
@@ -125,7 +125,7 @@ fn compute_mu<F: Field>(codeword: &[F], alpha: &[F]) -> F {
 
 /// Eval-only fold prover.
 ///
-/// Takes l `EvalAccumulator`s (1 running + fresh instances from Quasar multicast)
+/// Takes l `EvalAccumulator`s (1 running + fresh instances from batch reduction multicast)
 /// and produces a single output accumulator with fixed-size witness.
 ///
 /// The fold:
@@ -499,12 +499,12 @@ pub fn initial_eval_accumulator<F: Field, const DIGEST_ELEMS: usize>(
     }
 }
 
-/// Convert a Quasar multicast output (combined witness + eval claim) into
+/// Convert a batch reduction multicast output (combined witness + eval claim) into
 /// an EvalAccumulator ready for folding.
 ///
-/// This bridges the Quasar multicast (which produces a combined polynomial
+/// This bridges the batch reduction multicast (which produces a combined polynomial
 /// with an evaluation claim) into the eval-only fold format.
-pub fn quasar_output_to_eval_accumulator<F, Dft, const DIGEST_ELEMS: usize>(
+pub fn batch_output_to_eval_accumulator<F, Dft, const DIGEST_ELEMS: usize>(
     combined_witness: EvaluationsList<F>,
     eval_point: Vec<F>,
     eval_claim: F,
