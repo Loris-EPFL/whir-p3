@@ -18,8 +18,8 @@
 use alloc::{vec, vec::Vec};
 
 use p3_field::Field;
+use p3_maybe_rayon::prelude::*;
 
-use crate::spartan::encoding::eq_poly_at_index;
 use crate::spartan::r1cs::R1CSShape;
 
 /// R1CS constraint in sparse (row-based) form: (A_row, B_row, C_row).
@@ -50,6 +50,9 @@ pub fn shape_to_sparse_constraints<F: Field>(shape: &R1CSShape<F>) -> Vec<Sparse
 ///
 /// This evaluates the MLE of the codeword at the alpha point using the O(n)
 /// binary tree eq-table expansion.
+/// Minimum size before switching to parallel iteration.
+const PARALLEL_THRESHOLD: usize = 4096;
+
 fn compute_mu<F: Field>(codeword: &[F], alpha: &[F]) -> F {
     let n = codeword.len();
     let log_n = n.trailing_zeros() as usize;
@@ -57,11 +60,19 @@ fn compute_mu<F: Field>(codeword: &[F], alpha: &[F]) -> F {
 
     // Build eq(α, ·) table in O(n) and inner-product with codeword
     let eq_table = compute_eq_table(alpha);
-    let mut mu = F::ZERO;
-    for i in 0..n {
-        mu += eq_table[i] * codeword[i];
+    if n >= PARALLEL_THRESHOLD {
+        eq_table
+            .par_iter()
+            .zip(codeword.par_iter())
+            .map(|(&e, &c)| e * c)
+            .par_fold_reduce(|| F::ZERO, |a, b| a + b, |a, b| a + b)
+    } else {
+        let mut mu = F::ZERO;
+        for i in 0..n {
+            mu += eq_table[i] * codeword[i];
+        }
+        mu
     }
-    mu
 }
 
 /// Precompute the PESAT target η_i = Σ_row eq(β_i, row) · (Az·Bz - Cz)(row).
@@ -79,15 +90,29 @@ fn compute_eta<F: Field>(
     };
 
     let eq_table = compute_eq_table(beta);
-    let mut eta = F::ZERO;
-    for (row, constraint) in constraints.iter().enumerate() {
-        let (ref a, ref b, ref c) = *constraint;
-        let az = eval_lc(a, z);
-        let bz = eval_lc(b, z);
-        let cz = eval_lc(c, z);
-        eta += eq_table[row] * (az * bz - cz);
+    if num_cons >= PARALLEL_THRESHOLD {
+        constraints
+            .par_iter()
+            .enumerate()
+            .map(|(row, constraint)| {
+                let (ref a, ref b, ref c) = *constraint;
+                let az: F = a.iter().map(|&(coeff, idx)| coeff * z[idx]).sum();
+                let bz: F = b.iter().map(|&(coeff, idx)| coeff * z[idx]).sum();
+                let cz: F = c.iter().map(|&(coeff, idx)| coeff * z[idx]).sum();
+                eq_table[row] * (az * bz - cz)
+            })
+            .par_fold_reduce(|| F::ZERO, |a, b| a + b, |a, b| a + b)
+    } else {
+        let mut eta = F::ZERO;
+        for (row, constraint) in constraints.iter().enumerate() {
+            let (ref a, ref b, ref c) = *constraint;
+            let az = eval_lc(a, z);
+            let bz = eval_lc(b, z);
+            let cz = eval_lc(c, z);
+            eta += eq_table[row] * (az * bz - cz);
+        }
+        eta
     }
-    eta
 }
 
 /// Build eq(tau, ·) table in O(n) via binary tree expansion (LSB-first convention).
@@ -169,24 +194,47 @@ pub fn twin_constraint_sumcheck<F: Field>(
 
     for _round in 0..log_l {
         let half = tau_evals.len() / 2;
-        let mut evals = [F::ZERO; 3]; // degree-2: evaluate at 0, 1, 2
 
-        for i in 0..half {
-            let t_lo = tau_evals[2 * i];
-            let t_hi = tau_evals[2 * i + 1];
-            let v_lo = target_table[2 * i];
-            let v_hi = target_table[2 * i + 1];
+        // Evaluate degree-2 univariate at points 0, 1, 2
+        let compute_pair = |t_pair: &[F], v_pair: &[F]| {
+            let t_lo = t_pair[0];
+            let t_hi = t_pair[1];
+            let v_lo = v_pair[0];
+            let v_hi = v_pair[1];
 
             let t_d = t_hi - t_lo;
             let v_d = v_hi - v_lo;
 
-            // t=0
-            evals[0] += t_lo * v_lo;
-            // t=1
-            evals[1] += t_hi * v_hi;
-            // t=2
-            evals[2] += (t_lo + t_d.double()) * (v_lo + v_d.double());
-        }
+            [
+                t_lo * v_lo,
+                t_hi * v_hi,
+                (t_lo + t_d.double()) * (v_lo + v_d.double()),
+            ]
+        };
+
+        let evals = if half >= PARALLEL_THRESHOLD {
+            tau_evals
+                .par_chunks(2)
+                .zip(target_table.par_chunks(2))
+                .map(|(t_pair, v_pair)| compute_pair(t_pair, v_pair))
+                .par_fold_reduce(
+                    || [F::ZERO; 3],
+                    |a, b| [a[0] + b[0], a[1] + b[1], a[2] + b[2]],
+                    |a, b| [a[0] + b[0], a[1] + b[1], a[2] + b[2]],
+                )
+        } else {
+            let mut evals = [F::ZERO; 3];
+            for i in 0..half {
+                let e = compute_pair(
+                    &tau_evals[2 * i..2 * i + 2],
+                    &target_table[2 * i..2 * i + 2],
+                );
+                evals[0] += e[0];
+                evals[1] += e[1];
+                evals[2] += e[2];
+            }
+            evals
+        };
 
         let round_evals = evals.to_vec();
         assert_eq!(
@@ -209,14 +257,27 @@ pub fn twin_constraint_sumcheck<F: Field>(
         round_evals_all.push(round_evals);
 
         // Bind tau and target tables
-        for i in 0..half {
-            tau_evals[i] =
-                tau_evals[2 * i] + r * (tau_evals[2 * i + 1] - tau_evals[2 * i]);
-            target_table[i] =
-                target_table[2 * i] + r * (target_table[2 * i + 1] - target_table[2 * i]);
+        if half >= PARALLEL_THRESHOLD {
+            let folded_tau: Vec<F> = tau_evals
+                .par_chunks(2)
+                .map(|pair| pair[0] + r * (pair[1] - pair[0]))
+                .collect();
+            let folded_target: Vec<F> = target_table
+                .par_chunks(2)
+                .map(|pair| pair[0] + r * (pair[1] - pair[0]))
+                .collect();
+            *tau_evals = folded_tau;
+            target_table = folded_target;
+        } else {
+            for i in 0..half {
+                tau_evals[i] =
+                    tau_evals[2 * i] + r * (tau_evals[2 * i + 1] - tau_evals[2 * i]);
+                target_table[i] =
+                    target_table[2 * i] + r * (target_table[2 * i + 1] - target_table[2 * i]);
+            }
+            tau_evals.truncate(half);
+            target_table.truncate(half);
         }
-        tau_evals.truncate(half);
-        target_table.truncate(half);
     }
 
     // ========================================
@@ -226,50 +287,49 @@ pub fn twin_constraint_sumcheck<F: Field>(
     let eq_weights = compute_eq_table(&challenges);
 
     // Fold codewords: folded[j] = Σ_i eq(γ, i) · codewords[i][j]
-    let code_len = codewords[0].len();
-    let mut folded_codeword = vec![F::ZERO; code_len];
-    for (i, cw) in codewords.iter().enumerate() {
-        let w = eq_weights[i];
-        for j in 0..code_len {
-            folded_codeword[j] += w * cw[j];
-        }
-    }
+    let folded_codeword = fold_weighted(codewords, &eq_weights);
     *codewords = vec![folded_codeword];
 
     // Fold witnesses
-    let wit_len = witnesses[0].len();
-    let mut folded_witness = vec![F::ZERO; wit_len];
-    for (i, wit) in witnesses.iter().enumerate() {
-        let w = eq_weights[i];
-        for j in 0..wit_len {
-            folded_witness[j] += w * wit[j];
-        }
-    }
+    let folded_witness = fold_weighted(witnesses, &eq_weights);
     *witnesses = vec![folded_witness];
 
     // Fold alphas
-    let alpha_len = alphas[0].len();
-    let mut folded_alpha = vec![F::ZERO; alpha_len];
-    for (i, alpha) in alphas.iter().enumerate() {
-        let w = eq_weights[i];
-        for j in 0..alpha_len {
-            folded_alpha[j] += w * alpha[j];
-        }
-    }
+    let folded_alpha = fold_weighted(alphas, &eq_weights);
     *alphas = vec![folded_alpha];
 
     // Fold betas
-    let beta_len = betas[0].len();
-    let mut folded_beta = vec![F::ZERO; beta_len];
-    for (i, beta) in betas.iter().enumerate() {
-        let w = eq_weights[i];
-        for j in 0..beta_len {
-            folded_beta[j] += w * beta[j];
-        }
-    }
+    let folded_beta = fold_weighted(betas, &eq_weights);
     *betas = vec![folded_beta];
 
     (round_evals_all, challenges)
+}
+
+/// Fold `l` vectors into one via eq-weighted linear combination: folded[j] = Σ_i w[i] · vecs[i][j].
+///
+/// Parallelizes over the inner dimension (j) when the vector length is large.
+fn fold_weighted<F: Field>(vecs: &[Vec<F>], weights: &[F]) -> Vec<F> {
+    let len = vecs[0].len();
+    if len >= PARALLEL_THRESHOLD {
+        let mut folded = vec![F::ZERO; len];
+        folded.par_iter_mut().enumerate().for_each(|(j, out)| {
+            let mut sum = F::ZERO;
+            for (i, v) in vecs.iter().enumerate() {
+                sum += weights[i] * v[j];
+            }
+            *out = sum;
+        });
+        folded
+    } else {
+        let mut folded = vec![F::ZERO; len];
+        for (i, v) in vecs.iter().enumerate() {
+            let w = weights[i];
+            for j in 0..len {
+                folded[j] += w * v[j];
+            }
+        }
+        folded
+    }
 }
 
 #[cfg(test)]
@@ -459,13 +519,22 @@ mod tests {
 /// Reduce tablewise data after a sumcheck round.
 pub fn reduce_tablewise<F: Field>(table: &mut Vec<Vec<F>>, challenge: F) {
     let reduced: Vec<Vec<F>> = table
-        .chunks(2)
+        .par_chunks(2)
         .map(|pair| {
-            pair[0]
-                .iter()
-                .zip(pair[1].iter())
-                .map(|(&l, &r)| l + challenge * (r - l))
-                .collect()
+            let len = pair[0].len();
+            if len >= PARALLEL_THRESHOLD {
+                pair[0]
+                    .par_iter()
+                    .zip(pair[1].par_iter())
+                    .map(|(&l, &r)| l + challenge * (r - l))
+                    .collect()
+            } else {
+                pair[0]
+                    .iter()
+                    .zip(pair[1].iter())
+                    .map(|(&l, &r)| l + challenge * (r - l))
+                    .collect()
+            }
         })
         .collect();
     *table = reduced;
@@ -473,9 +542,18 @@ pub fn reduce_tablewise<F: Field>(table: &mut Vec<Vec<F>>, challenge: F) {
 
 /// Reduce pairwise (scalar) data after a sumcheck round.
 pub fn reduce_pairwise<F: Field>(table: &mut Vec<F>, challenge: F) {
-    let reduced: Vec<F> = table
-        .chunks(2)
-        .map(|pair| pair[0] + challenge * (pair[1] - pair[0]))
-        .collect();
-    *table = reduced;
+    let half = table.len() / 2;
+    if half >= PARALLEL_THRESHOLD {
+        let reduced: Vec<F> = table
+            .par_chunks(2)
+            .map(|pair| pair[0] + challenge * (pair[1] - pair[0]))
+            .collect();
+        *table = reduced;
+    } else {
+        let reduced: Vec<F> = table
+            .chunks(2)
+            .map(|pair| pair[0] + challenge * (pair[1] - pair[0]))
+            .collect();
+        *table = reduced;
+    }
 }

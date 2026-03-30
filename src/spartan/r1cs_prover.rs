@@ -7,6 +7,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 use p3_challenger::{CanObserve, FieldChallenger, GrindingChallenger};
 use p3_field::{ExtensionField, Field};
+use p3_maybe_rayon::prelude::*;
 
 use crate::poly::evals::EvaluationsList;
 
@@ -630,12 +631,23 @@ fn compute_eq_table<F: Field>(tau: &[F]) -> Vec<F> {
 ///   table[i] = table[2i] + challenge · (table[2i+1] - table[2i])
 ///
 /// This matches `eq_poly_at_index`'s convention where bit 0 = r[0].
+/// Minimum table half-size before we switch to parallel iteration.
+const PARALLEL_THRESHOLD: usize = 4096;
+
 fn bind_table<F: Field>(table: &mut Vec<F>, challenge: F) {
     let half = table.len() / 2;
-    for i in 0..half {
-        table[i] = table[2 * i] + challenge * (table[2 * i + 1] - table[2 * i]);
+    if half >= PARALLEL_THRESHOLD {
+        let folded: Vec<F> = table
+            .par_chunks(2)
+            .map(|pair| pair[0] + challenge * (pair[1] - pair[0]))
+            .collect();
+        *table = folded;
+    } else {
+        for i in 0..half {
+            table[i] = table[2 * i] + challenge * (table[2 * i + 1] - table[2 * i]);
+        }
+        table.truncate(half);
     }
-    table.truncate(half);
 }
 
 /// Phase 1 table-based sumcheck: G(x) = eq(τ,x) · (Az(x)·Bz(x) - Cz(x)), degree 3.
@@ -663,44 +675,69 @@ where
 
         // Evaluate degree-3 univariate at points 0, 1, 2, 3
         // Adjacent pairs (2i, 2i+1) differ in bit 0 (LSB-first convention)
-        let mut evals = [F::ZERO; 4];
+        let compute_pair = |eq_pair: &[F], az_pair: &[F], bz_pair: &[F], cz_pair: &[F]| {
+            let eq_lo = eq_pair[0];
+            let eq_hi = eq_pair[1];
+            let az_lo = az_pair[0];
+            let az_hi = az_pair[1];
+            let bz_lo = bz_pair[0];
+            let bz_hi = bz_pair[1];
+            let cz_lo = cz_pair[0];
+            let cz_hi = cz_pair[1];
 
-        for i in 0..half {
-            let eq_lo = eq_tau[2 * i];
-            let eq_hi = eq_tau[2 * i + 1];
-            let az_lo = az[2 * i];
-            let az_hi = az[2 * i + 1];
-            let bz_lo = bz[2 * i];
-            let bz_hi = bz[2 * i + 1];
-            let cz_lo = cz[2 * i];
-            let cz_hi = cz[2 * i + 1];
-
-            // Deltas for linear interpolation: f(t) = f_lo + t · delta
             let eq_d = eq_hi - eq_lo;
             let az_d = az_hi - az_lo;
             let bz_d = bz_hi - bz_lo;
             let cz_d = cz_hi - cz_lo;
 
-            // t=0: use lo values
-            evals[0] += eq_lo * (az_lo * bz_lo - cz_lo);
+            let e0 = eq_lo * (az_lo * bz_lo - cz_lo);
+            let e1 = eq_hi * (az_hi * bz_hi - cz_hi);
 
-            // t=1: use hi values
-            evals[1] += eq_hi * (az_hi * bz_hi - cz_hi);
-
-            // t=2: f_lo + 2·delta
             let eq_2 = eq_lo + eq_d.double();
             let az_2 = az_lo + az_d.double();
             let bz_2 = bz_lo + bz_d.double();
             let cz_2 = cz_lo + cz_d.double();
-            evals[2] += eq_2 * (az_2 * bz_2 - cz_2);
+            let e2 = eq_2 * (az_2 * bz_2 - cz_2);
 
-            // t=3: f_lo + 3·delta
             let eq_3 = eq_2 + eq_d;
             let az_3 = az_2 + az_d;
             let bz_3 = bz_2 + bz_d;
             let cz_3 = cz_2 + cz_d;
-            evals[3] += eq_3 * (az_3 * bz_3 - cz_3);
-        }
+            let e3 = eq_3 * (az_3 * bz_3 - cz_3);
+
+            [e0, e1, e2, e3]
+        };
+
+        let evals = if half >= PARALLEL_THRESHOLD {
+            eq_tau
+                .par_chunks(2)
+                .zip(az.par_chunks(2))
+                .zip(bz.par_chunks(2))
+                .zip(cz.par_chunks(2))
+                .map(|(((eq_pair, az_pair), bz_pair), cz_pair)| {
+                    compute_pair(eq_pair, az_pair, bz_pair, cz_pair)
+                })
+                .par_fold_reduce(
+                    || [F::ZERO; 4],
+                    |a, b| [a[0] + b[0], a[1] + b[1], a[2] + b[2], a[3] + b[3]],
+                    |a, b| [a[0] + b[0], a[1] + b[1], a[2] + b[2], a[3] + b[3]],
+                )
+        } else {
+            let mut evals = [F::ZERO; 4];
+            for i in 0..half {
+                let e = compute_pair(
+                    &eq_tau[2 * i..2 * i + 2],
+                    &az[2 * i..2 * i + 2],
+                    &bz[2 * i..2 * i + 2],
+                    &cz[2 * i..2 * i + 2],
+                );
+                evals[0] += e[0];
+                evals[1] += e[1];
+                evals[2] += e[2];
+                evals[3] += e[3];
+            }
+            evals
+        };
 
         let round_evals = evals.to_vec();
 
@@ -754,28 +791,47 @@ where
 
         // Evaluate degree-2 univariate at points 0, 1, 2
         // Adjacent pairs (2i, 2i+1) differ in bit 0 (LSB-first convention)
-        let mut evals = [F::ZERO; 3];
-
-        for i in 0..half {
-            let z_lo = z_table[2 * i];
-            let z_hi = z_table[2 * i + 1];
-            let l_lo = lin_table[2 * i];
-            let l_hi = lin_table[2 * i + 1];
+        let compute_pair = |z_pair: &[F], l_pair: &[F]| {
+            let z_lo = z_pair[0];
+            let z_hi = z_pair[1];
+            let l_lo = l_pair[0];
+            let l_hi = l_pair[1];
 
             let z_d = z_hi - z_lo;
             let l_d = l_hi - l_lo;
 
-            // t=0
-            evals[0] += z_lo * l_lo;
-
-            // t=1
-            evals[1] += z_hi * l_hi;
-
-            // t=2
+            let e0 = z_lo * l_lo;
+            let e1 = z_hi * l_hi;
             let z_2 = z_lo + z_d.double();
             let l_2 = l_lo + l_d.double();
-            evals[2] += z_2 * l_2;
-        }
+            let e2 = z_2 * l_2;
+
+            [e0, e1, e2]
+        };
+
+        let evals = if half >= PARALLEL_THRESHOLD {
+            z_table
+                .par_chunks(2)
+                .zip(lin_table.par_chunks(2))
+                .map(|(z_pair, l_pair)| compute_pair(z_pair, l_pair))
+                .par_fold_reduce(
+                    || [F::ZERO; 3],
+                    |a, b| [a[0] + b[0], a[1] + b[1], a[2] + b[2]],
+                    |a, b| [a[0] + b[0], a[1] + b[1], a[2] + b[2]],
+                )
+        } else {
+            let mut evals = [F::ZERO; 3];
+            for i in 0..half {
+                let e = compute_pair(
+                    &z_table[2 * i..2 * i + 2],
+                    &lin_table[2 * i..2 * i + 2],
+                );
+                evals[0] += e[0];
+                evals[1] += e[1];
+                evals[2] += e[2];
+            }
+            evals
+        };
 
         let round_evals = evals.to_vec();
 
