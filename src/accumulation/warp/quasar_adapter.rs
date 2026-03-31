@@ -91,6 +91,7 @@ pub fn quasar_then_warp_fold<F: Field>(
     acc: &super::accumulator::WarpAccumulator<F, F, F, 8>,
     omega: F,
     tau_challenges: &[F],
+    fresh_betas: &[Vec<F>],
     transcript_round: impl FnMut(&[F]) -> F,
 ) -> super::fold::WarpFoldResult<F> {
     super::fold::warp_fold_prove(
@@ -99,6 +100,7 @@ pub fn quasar_then_warp_fold<F: Field>(
         acc,
         omega,
         tau_challenges,
+        fresh_betas,
         transcript_round,
     )
 }
@@ -193,6 +195,7 @@ mod tests {
             &acc,
             omega,
             &tau_challenges,
+            &[],
             |_| {
                 counter += 1;
                 F::from_u64(counter + 400)
@@ -258,6 +261,7 @@ mod tests {
                 &acc,
                 omega,
                 &tau_challenges,
+                &[],
                 |_| {
                     counter += 1;
                     F::from_u64(counter + 600)

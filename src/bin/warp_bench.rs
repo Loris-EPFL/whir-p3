@@ -288,7 +288,7 @@ fn run_warp(
         let mc = merkle_compress.clone();
         let mut ctr = step as u64 * 1000;
         let result = warp_fold_prove_rs_committed(shape, &fresh, &acc, F::from_u64(7), &tau,
-            &rs_config, &dft,
+            &[], &rs_config, &dft,
             |_| { ctr += 1; F::from_u64(ctr + 500) },
             |codeword, folding_factor| {
                 let (root, _tree) = merkle_commit_codeword::<
@@ -498,7 +498,7 @@ fn run_full_pipeline(
         let mc = merkle_compress.clone();
         let mut ctr = step as u64 * 1000;
         let result = warp_fold_prove_rs_committed(shape, &fresh, &acc, F::from_u64(7), &tau,
-            &rs_config, &dft,
+            &[], &rs_config, &dft,
             |_| { ctr += 1; F::from_u64(ctr + 500) },
             |codeword, folding_factor| {
                 let (root, _tree) = merkle_commit_codeword::<
@@ -613,7 +613,7 @@ fn run_recursive_ivc(
     let mc0 = merkle_compress.clone();
     let result0 = warp_fold_prove_rs_committed(
         &init_shape, &[fresh0], &zero_acc, F::from_u64(7), &tau0,
-        &rs_config_init, &dft,
+        &[], &rs_config_init, &dft,
         |_| { ctr0 += 1; F::from_u64(ctr0 + 500) },
         |codeword, folding_factor| {
             let (root, _tree) = merkle_commit_codeword::<
@@ -702,7 +702,7 @@ fn run_recursive_ivc(
         let mc = merkle_compress.clone();
         let result = warp_fold_prove_rs_committed(
             &state.shape, &[fresh], &state.accumulator, F::from_u64(7), &tau,
-            &rs_config, &dft,
+            &[], &rs_config, &dft,
             |_| { ctr += 1; F::from_u64(ctr + 500) },
             |codeword, folding_factor| {
                 let (root, _tree) = merkle_commit_codeword::<

@@ -136,6 +136,20 @@ pub struct WarpFoldedInstance<F: Field> {
     pub pesat_target: F,
 }
 
+/// Evaluate the MLE of a codeword at a point in LSB-first convention.
+///
+/// The internal fold tables (compute_eq_table, twin-constraint sumcheck) use
+/// LSB-first bit ordering: bit k of index i corresponds to point\[k\].
+/// However, `EvaluationsList::evaluate_hypercube_base` uses MSB-first:
+/// bit k of index i corresponds to point\[n-1-k\].
+///
+/// This helper reverses the point so that fold-produced points (eval_point,
+/// pesat_tau) can be correctly evaluated via `evaluate_hypercube_base`.
+pub fn evaluate_mle_lsb<F: Field>(codeword: &crate::poly::evals::EvaluationsList<F>, lsb_point: &[F]) -> F {
+    let reversed: Vec<F> = lsb_point.iter().rev().copied().collect();
+    codeword.evaluate_hypercube_base(&crate::poly::multilinear::MultilinearPoint::new(reversed))
+}
+
 /// Evaluate bundled R1CS at a given PESAT point.
 ///
 /// Computes η = Σ_i eq(tau, i) · (Az_i · Bz_i - Cz_i) where the sum is
@@ -191,6 +205,7 @@ pub fn warp_fold_prove<F: Field>(
     acc: &WarpAccumulator<F, F, F, 8>,
     omega: F,
     tau_challenges: &[F],
+    fresh_betas: &[Vec<F>],
     mut transcript_round: impl FnMut(&[F]) -> F,
 ) -> WarpFoldResult<F> {
     let l1 = fresh_instances.len();
@@ -267,10 +282,13 @@ pub fn warp_fold_prove<F: Field>(
     // Beta (PESAT point = tau) table
     let mut betas: Vec<Vec<F>> = Vec::with_capacity(l);
     betas.push(acc.instance.pesat_tau.clone());
-    // Fresh instances get their own tau from zerocheck randomness
-    // For now, use zero (the fold will derive the correct folded tau)
-    for _ in 0..l1 {
-        betas.push(vec![F::ZERO; log_m]);
+    // Fresh instances get their betas from the Fiat-Shamir transcript
+    for i in 0..l1 {
+        if i < fresh_betas.len() {
+            betas.push(fresh_betas[i].clone());
+        } else {
+            betas.push(vec![F::ZERO; log_m]);
+        }
     }
     while betas.len() < l {
         betas.push(vec![F::ZERO; log_m]);
@@ -350,12 +368,14 @@ pub fn warp_fold_prove<F: Field>(
     let fresh_pesat_targets: Vec<F> = fresh_instances
         .iter()
         .enumerate()
-        .map(|(_i, inst)| {
-            // For now, fresh PESAT targets are 0 for valid instances
-            // In the full protocol, these come from the zerocheck randomness
+        .map(|(i, inst)| {
             let z = build_z_vector(&inst.public_input, &inst.witness);
-            let tau = &vec![F::ZERO; log_m]; // fresh instances start with zero tau
-            evaluate_bundled_r1cs(shape, tau, &z)
+            let beta = if i < fresh_betas.len() {
+                &fresh_betas[i]
+            } else {
+                &vec![F::ZERO; log_m]
+            };
+            evaluate_bundled_r1cs(shape, beta, &z)
         })
         .collect();
 
@@ -390,6 +410,7 @@ pub fn warp_fold_prove_rs<F, Dft>(
     acc: &WarpAccumulator<F, F, F, 8>,
     omega: F,
     tau_challenges: &[F],
+    fresh_betas: &[Vec<F>],
     rs_config: &RSEncodingConfig,
     dft: &Dft,
     mut transcript_round: impl FnMut(&[F]) -> F,
@@ -399,7 +420,7 @@ where
     Dft: TwoAdicSubgroupDft<F>,
 {
     warp_fold_prove_rs_inner(
-        shape, fresh_instances, acc, omega, tau_challenges,
+        shape, fresh_instances, acc, omega, tau_challenges, fresh_betas,
         rs_config, dft, &mut transcript_round, None::<fn(&crate::poly::evals::EvaluationsList<F>, usize) -> [F; 8]>,
     )
 }
@@ -415,6 +436,7 @@ pub fn warp_fold_prove_rs_committed<F, Dft>(
     acc: &WarpAccumulator<F, F, F, 8>,
     omega: F,
     tau_challenges: &[F],
+    fresh_betas: &[Vec<F>],
     rs_config: &RSEncodingConfig,
     dft: &Dft,
     mut transcript_round: impl FnMut(&[F]) -> F,
@@ -425,7 +447,7 @@ where
     Dft: TwoAdicSubgroupDft<F>,
 {
     warp_fold_prove_rs_inner(
-        shape, fresh_instances, acc, omega, tau_challenges,
+        shape, fresh_instances, acc, omega, tau_challenges, fresh_betas,
         rs_config, dft, &mut transcript_round, Some(commit_fn),
     )
 }
@@ -590,6 +612,7 @@ fn warp_fold_prove_rs_inner<F, Dft>(
     acc: &WarpAccumulator<F, F, F, 8>,
     omega: F,
     tau_challenges: &[F],
+    fresh_betas: &[Vec<F>],
     rs_config: &RSEncodingConfig,
     dft: &Dft,
     transcript_round: &mut impl FnMut(&[F]) -> F,
@@ -695,15 +718,26 @@ where
         alphas.push(vec![F::ZERO; log_n]);
     }
 
-    // Beta table
+    // Beta table — fresh betas from Fiat-Shamir transcript
     let mut betas: Vec<Vec<F>> = Vec::with_capacity(l);
     betas.push(acc.instance.pesat_tau.clone());
-    for _ in 0..l1 {
-        betas.push(vec![F::ZERO; log_m]);
+    for i in 0..l1 {
+        if i < fresh_betas.len() {
+            betas.push(fresh_betas[i].clone());
+        } else {
+            betas.push(vec![F::ZERO; log_m]);
+        }
     }
     while betas.len() < l {
         betas.push(vec![F::ZERO; log_m]);
     }
+
+    // Capture fresh codeword[0] values BEFORE sumcheck consumes the tables.
+    // With RS encoding, codeword[0] != witness[0], so we must use the actual codeword.
+    // mu_i = hat{f_i}(alpha_i=0) = codeword_i[0] for alpha_i = 0.
+    let fresh_codeword_first_elems: Vec<F> = (0..l1)
+        .map(|i| codewords[1 + i][0])
+        .collect();
 
     // Tau eq-evals
     let mut tau_evals: Vec<F> = (0..l)
@@ -754,17 +788,21 @@ where
         witness: folded_w.to_vec(),
     };
 
-    let fresh_eval_claims: Vec<F> = fresh_instances
-        .iter()
-        .map(|inst| if inst.witness.is_empty() { F::ZERO } else { inst.witness[0] })
-        .collect();
+    // Fresh eval claims: μ_i = hat{f_i}(alpha_i=0) = codeword_i[0].
+    // Captured before the sumcheck consumed the codeword tables.
+    let fresh_eval_claims = fresh_codeword_first_elems;
 
     let fresh_pesat_targets: Vec<F> = fresh_instances
         .iter()
-        .map(|inst| {
+        .enumerate()
+        .map(|(i, inst)| {
             let z = build_z_vector(&inst.public_input, &inst.witness);
-            let tau = vec![F::ZERO; log_m];
-            evaluate_bundled_r1cs(shape, &tau, &z)
+            let beta = if i < fresh_betas.len() {
+                &fresh_betas[i]
+            } else {
+                &vec![F::ZERO; log_m]
+            };
+            evaluate_bundled_r1cs(shape, beta, &z)
         })
         .collect();
 
@@ -1119,6 +1157,7 @@ pub fn warp_fold_verify<F: Field>(
     acc_instance: &super::accumulator::WarpAccumulatorInstance<F, F, F, 8>,
     omega: F,
     tau_challenges: &[F],
+    fresh_betas: &[Vec<F>],
     sumcheck_round_polys: &[Vec<F>],
     sumcheck_challenges: &[F],
     claimed_output: &WarpFoldedInstance<F>,
@@ -1200,11 +1239,15 @@ pub fn warp_fold_verify<F: Field>(
 
     let expected_alpha = compute_folded_point(&alpha_inputs, sumcheck_challenges);
 
-    // Beta (PESAT tau) table
+    // Beta (PESAT tau) table — use fresh_betas when provided, zeros otherwise
     let mut beta_inputs = Vec::with_capacity(l);
     beta_inputs.push(acc_instance.pesat_tau.clone());
-    for _ in 0..l1 {
-        beta_inputs.push(vec![F::ZERO; log_m]);
+    for i in 0..l1 {
+        if i < fresh_betas.len() {
+            beta_inputs.push(fresh_betas[i].clone());
+        } else {
+            beta_inputs.push(vec![F::ZERO; log_m]);
+        }
     }
     while beta_inputs.len() < l {
         beta_inputs.push(vec![F::ZERO; log_m]);
@@ -1333,6 +1376,7 @@ mod tests {
             &acc,
             omega,
             &tau_challenges,
+            &[],
             |_coeffs| {
                 round_counter += 1;
                 F::from_u64(round_counter + 200)
@@ -1376,6 +1420,7 @@ mod tests {
             &acc,
             omega,
             &tau_challenges,
+            &[],
             |_coeffs| {
                 round_counter += 1;
                 F::from_u64(round_counter + 200)
@@ -1417,6 +1462,7 @@ mod tests {
             &acc,
             omega,
             &tau_challenges,
+            &[],
             |_coeffs| {
                 round_counter += 1;
                 F::from_u64(round_counter + 300)
@@ -1456,6 +1502,7 @@ mod tests {
                 &acc,
                 omega,
                 &tau_challenges,
+                &[],
                 |_coeffs| {
                     round_counter += 1;
                     F::from_u64(round_counter + 500)
@@ -1505,6 +1552,7 @@ mod tests {
             &acc,
             omega,
             &tau_challenges,
+            &[],
             |_coeffs| {
                 round_counter += 1;
                 F::from_u64(round_counter + 200)
@@ -1545,6 +1593,7 @@ mod tests {
             &acc,
             omega,
             &tau_challenges,
+            &[],
             |_coeffs| {
                 round_counter += 1;
                 F::from_u64(round_counter + 200)
@@ -1561,6 +1610,7 @@ mod tests {
             &acc.instance,
             omega,
             &tau_challenges,
+            &[],
             &result.sumcheck_round_polys,
             &result.sumcheck_challenges,
             &result.instance,
@@ -1602,6 +1652,7 @@ mod tests {
             &acc,
             omega,
             &tau_challenges,
+            &[],
             |_coeffs| {
                 round_counter += 1;
                 F::from_u64(round_counter + 200)
@@ -1622,6 +1673,7 @@ mod tests {
             &acc.instance,
             omega,
             &tau_challenges,
+            &[],
             &result.sumcheck_round_polys,
             &result.sumcheck_challenges,
             &tampered,
@@ -1649,6 +1701,7 @@ mod tests {
             &acc,
             omega,
             &tau_challenges,
+            &[],
             |_coeffs| {
                 round_counter += 1;
                 F::from_u64(round_counter + 200)
@@ -1669,6 +1722,7 @@ mod tests {
             &acc.instance,
             omega,
             &tau_challenges,
+            &[],
             &tampered_polys,
             &result.sumcheck_challenges,
             &result.instance,
@@ -1696,6 +1750,7 @@ mod tests {
             &acc,
             omega,
             &tau_challenges,
+            &[],
             |_coeffs| {
                 round_counter += 1;
                 F::from_u64(round_counter + 200)
@@ -1716,6 +1771,7 @@ mod tests {
             &acc.instance,
             omega,
             &tau_challenges,
+            &[],
             &result.sumcheck_round_polys,
             &result.sumcheck_challenges,
             &tampered,
@@ -1748,6 +1804,7 @@ mod tests {
             &acc,
             omega,
             &tau_challenges,
+            &[],
             |_coeffs| {
                 round_counter += 1;
                 F::from_u64(round_counter + 300)
@@ -1767,6 +1824,7 @@ mod tests {
             &acc.instance,
             omega,
             &tau_challenges,
+            &[],
             &result.sumcheck_round_polys,
             &result.sumcheck_challenges,
             &result.instance,
@@ -1796,6 +1854,7 @@ mod tests {
                 &acc,
                 omega,
                 &tau_challenges,
+                &[],
                 |_coeffs| {
                     round_counter += 1;
                     F::from_u64(round_counter + 500)
@@ -1813,6 +1872,7 @@ mod tests {
                 &acc.instance,
                 omega,
                 &tau_challenges,
+                &[],
                 &result.sumcheck_round_polys,
                 &result.sumcheck_challenges,
             &result.instance,

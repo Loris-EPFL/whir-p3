@@ -246,7 +246,7 @@ fn main() {
                     let mh2 = mh.clone(); let mc2 = mc.clone();
                     let mut ctr = step as u64 * 1000;
                     let r = warp_fold_prove_rs_committed(&shape, &step_fresh, &acc2, F::from_u64(7), &tau,
-                        &rs_config, &dft,
+                        &[], &rs_config, &dft,
                         |_| { ctr += 1; F::from_u64(ctr + 500) },
                         |cw, ff| { let (r, _) = merkle_commit_codeword::<F,F,<F as Field>::Packing,<F as Field>::Packing,MyHash,MyCompress,DIGEST>(cw, ff, mh2.clone(), mc2.clone()); r },
                     );
@@ -291,7 +291,7 @@ fn main() {
                     let mh3 = mh.clone(); let mc3 = mc.clone();
                     let mut ctr = step as u64 * 1000;
                     let r = warp_fold_prove_rs_committed(&shape, &fresh, &acc3, F::from_u64(7), &tau,
-                        &rs_config, &dft,
+                        &[], &rs_config, &dft,
                         |_| { ctr += 1; F::from_u64(ctr + 500) },
                         |cw, ff| { let (r, _) = merkle_commit_codeword::<F,F,<F as Field>::Packing,<F as Field>::Packing,MyHash,MyCompress,DIGEST>(cw, ff, mh3.clone(), mc3.clone()); r },
                     );

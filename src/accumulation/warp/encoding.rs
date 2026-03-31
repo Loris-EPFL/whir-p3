@@ -329,7 +329,7 @@ mod tests {
             let tau = vec![F::from_u64(step + 42)];
             let mut ctr = step * 100;
             let result = warp_fold_prove_rs(
-                &shape, &[fresh], &acc, F::from_u64(7), &tau, &rs_config, &dft,
+                &shape, &[fresh], &acc, F::from_u64(7), &tau, &[], &rs_config, &dft,
                 |_| { ctr += 1; F::from_u64(ctr + 500) },
             );
 

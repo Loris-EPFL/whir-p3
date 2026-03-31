@@ -58,14 +58,19 @@ pub fn warp_decide_algebraic<F: Field>(
     acc: &WarpAccumulator<F, F, F, 8>,
 ) -> Result<(), WarpDeciderError> {
     // Check 1: Evaluation claim f̂(α) = μ
-    let eval_point = MultilinearPoint::new(acc.instance.eval_point.clone());
-    let computed_mu = acc.witness.codeword.evaluate_hypercube_base(&eval_point);
+    // eval_point is in LSB-first convention (from the fold's compute_eq_table).
+    // evaluate_mle_lsb handles the reversal for evaluate_hypercube_base.
+    let computed_mu = super::fold::evaluate_mle_lsb(
+        &acc.witness.codeword,
+        &acc.instance.eval_point,
+    );
 
     if computed_mu != acc.instance.eval_claim {
         return Err(WarpDeciderError::EvaluationClaimFailed);
     }
 
     // Check 2: PESAT satisfaction P*(β, z) = η
+    // evaluate_bundled_r1cs uses compute_eq_table (LSB-first), matching pesat_tau.
     let z = build_z_vector(&acc.instance.pesat_x, &acc.witness.witness);
     let computed_eta = evaluate_bundled_r1cs(shape, &acc.instance.pesat_tau, &z);
 
@@ -84,6 +89,40 @@ pub fn warp_decide_algebraic<F: Field>(
         return Err(WarpDeciderError::CodewordValidityFailed);
     }
 
+    Ok(())
+}
+
+/// Algebraic decider for RS-encoded accumulators.
+///
+/// Checks eval claim and PESAT satisfaction but NOT codeword validity.
+/// With RS encoding, verifying `f = RS_encode(w)` requires re-encoding
+/// which needs the DFT engine. This check is instead deferred to the
+/// terminal WHIR proof which establishes proximity to the RS code.
+///
+/// Use this when the accumulator was built with `warp_fold_prove_rs*`.
+pub fn warp_decide_algebraic_rs<F: Field>(
+    shape: &R1CSShape<F>,
+    acc: &WarpAccumulator<F, F, F, 8>,
+) -> Result<(), WarpDeciderError> {
+    // Check 1: Evaluation claim f̂(α) = μ
+    let computed_mu = super::fold::evaluate_mle_lsb(
+        &acc.witness.codeword,
+        &acc.instance.eval_point,
+    );
+
+    if computed_mu != acc.instance.eval_claim {
+        return Err(WarpDeciderError::EvaluationClaimFailed);
+    }
+
+    // Check 2: PESAT satisfaction P*(β, z) = η
+    let z = build_z_vector(&acc.instance.pesat_x, &acc.witness.witness);
+    let computed_eta = evaluate_bundled_r1cs(shape, &acc.instance.pesat_tau, &z);
+
+    if computed_eta != acc.instance.pesat_target {
+        return Err(WarpDeciderError::PesatSatisfactionFailed);
+    }
+
+    // Check 3: Codeword validity deferred to WHIR proof (RS encoding)
     Ok(())
 }
 
@@ -189,19 +228,18 @@ mod tests {
             acc,
             omega,
             &tau_challenges,
+            &[],
             |_coeffs| {
                 round_counter += 1;
                 F::from_u64(round_counter + 500)
             },
         );
 
-        // Compute eval_claim = f̂(α)
-        let eval_claim = result
-            .witness
-            .codeword
-            .evaluate_hypercube_base(&MultilinearPoint::new(
-                result.instance.eval_point.iter().copied().collect(),
-            ));
+        // Compute eval_claim = f̂(α) using LSB-first convention from fold
+        let eval_claim = crate::accumulation::warp::fold::evaluate_mle_lsb(
+            &result.witness.codeword,
+            &result.instance.eval_point,
+        );
 
         WarpAccumulator::new(
             WarpAccumulatorInstance {

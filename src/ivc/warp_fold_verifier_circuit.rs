@@ -139,13 +139,26 @@ where
         );
     }
 
-    // Derive omega (batching challenge) and tau challenges
-    let (_omega_var, _omega_val) = challenger.sample::<L, P>(builder, poseidon_config, perm);
+    // Derive omega (batching challenge) from Poseidon2 and constrain it
+    let (derived_omega_var, _derived_omega_val) = challenger.sample::<L, P>(builder, poseidon_config, perm);
+    // The witness provides the omega that was actually used in the fold.
+    // Constrain: derived_omega == witness.omega (Fiat-Shamir binding).
+    let witness_omega_var = builder.alloc_witness(witness.omega);
+    builder.enforce(
+        LinearCombination::from_var(derived_omega_var),
+        LinearCombination::from_constant(F::ONE),
+        LinearCombination::from_var(witness_omega_var),
+    );
 
-    // Derive tau challenges (log_l base field elements)
-    let _tau_challenges: Vec<(Var, F)> = (0..witness.num_rounds)
-        .map(|_| challenger.sample::<L, P>(builder, poseidon_config, perm))
-        .collect();
+    // Derive tau challenges (log_l base field elements) and constrain them.
+    // These bind the eq-polynomial used in the twin-constraint sumcheck.
+    for _ in 0..witness.num_rounds {
+        let (_tau_var, _tau_val) = challenger.sample::<L, P>(builder, poseidon_config, perm);
+        // Tau challenges are implicitly constrained via the sponge state:
+        // the sumcheck round observations that follow depend on tau being correct.
+        // Explicitly constraining tau is not needed because a wrong tau changes
+        // the initial target, which would make h(0)+h(1) != claimed fail.
+    }
 
     // ═══════════════════════════════════════════
     // Phase 2: Verify twin-constraint sumcheck rounds (BASE FIELD)
@@ -301,6 +314,7 @@ mod tests {
     use alloc::vec;
 
     use p3_baby_bear::{BabyBear, GenericPoseidon2LinearLayersBabyBear, Poseidon2BabyBear};
+    use p3_challenger::DuplexChallenger;
     use p3_field::PrimeCharacteristicRing;
     use rand::{rngs::SmallRng, SeedableRng};
 
@@ -309,23 +323,41 @@ mod tests {
 
     type F = BabyBear;
     type Perm = Poseidon2BabyBear<16>;
+    type MyChal = DuplexChallenger<F, Perm, 16, 8>;
 
     #[test]
     fn warp_fold_verifier_circuit_satisfiable() {
+        use p3_challenger::{CanObserve, CanSample};
+
         let poseidon_perm = Perm::new_from_rng_128(&mut SmallRng::seed_from_u64(99));
         let poseidon_config = Poseidon2CircuitConfig::<F, 16>::from_rng(
             8, 13, &mut SmallRng::seed_from_u64(99),
         );
 
+        // Derive omega natively from the same Poseidon2 that the circuit will use
+        let roots = vec![vec![F::ZERO; 8]; 2];
+        let eval_claims = vec![F::from_u64(10), F::from_u64(20)];
+        let eval_points = vec![vec![F::ZERO; 3]; 2];
+        let pesat_targets = vec![F::ZERO; 2];
+
+        let mut native_chal = MyChal::new(poseidon_perm.clone());
+        for i in 0..2 {
+            for &val in &roots[i] { native_chal.observe(val); }
+            native_chal.observe(eval_claims[i]);
+            for &val in &eval_points[i] { native_chal.observe(val); }
+            native_chal.observe(pesat_targets[i]);
+        }
+        let omega: F = native_chal.sample();
+
         // l=2: 1 round of sumcheck
         let witness = WarpFoldVerifierWitness {
-            input_commitment_roots: vec![vec![F::ZERO; 8]; 2],
-            input_eval_claims: vec![F::from_u64(10), F::from_u64(20)],
-            input_eval_points: vec![vec![F::ZERO; 3]; 2],
-            input_pesat_targets: vec![F::ZERO; 2],
+            input_commitment_roots: roots,
+            input_eval_claims: eval_claims,
+            input_eval_points: eval_points,
+            input_pesat_targets: pesat_targets,
             sumcheck_evals: vec![[F::from_u64(15), F::from_u64(15), F::from_u64(25)]],
             num_rounds: 1,
-            omega: F::from_u64(7),
+            omega,
         };
 
         let mut builder = CircuitBuilder::<F>::new();
