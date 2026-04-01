@@ -62,6 +62,9 @@ p3-keccak = { git = "https://github.com/Plonky3/Plonky3.git", rev = "c38eb05" }
 p3-poseidon2 = { git = "https://github.com/Plonky3/Plonky3.git", rev = "c38eb05" }
 p3-mds = { git = "https://github.com/Plonky3/Plonky3.git", rev = "c38eb05" }
 
+symphony = { path = "../Symphony", default-features = false, optional = true }
+sha2 = { version = "0.11.0", optional = true }
+
 hashbrown = "0.16"
 itertools = { version = "0.14.0", default-features = false, features = [
     "use_alloc",
@@ -93,6 +96,7 @@ parallel = ["dep:rayon", "p3-maybe-rayon/parallel", "p3-util/parallel"]
 rayon = ["dep:rayon"]
 cli = ["dep:clap", "dep:tracing-subscriber", "dep:tracing-forest", "dep:bincode", "rand/default"]
 bench-timing = []
+symphony = ["dep:symphony", "dep:sha2"]
 
 [[bin]]
 name = "main"
@@ -111,6 +115,15 @@ path = "src/bin/warp_bench.rs"
 [[bin]]
 name = "accumulation_report"
 path = "src/bin/accumulation_report.rs"
+
+[[bin]]
+name = "cp_snark_bench"
+path = "src/bin/cp_snark_bench.rs"
+required-features = ["symphony"]
+
+[[bin]]
+name = "arity_bench"
+path = "src/bin/arity_bench.rs"
 
 [profile.profiling]
 inherits = "release"
