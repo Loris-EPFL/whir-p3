@@ -14,8 +14,8 @@
 //! | Challenge derivation          | In-circuit       | Witness (deferred) |
 //! | Constraints (l=2, 1 round)    | ~5000            | ~15                |
 //!
-//! Hash verification is deferred to terminal via `DeferredFoldTranscript`.
-//! See `cp_snark::verify_deferred_transcripts`.
+//! Hash verification is deferred to terminal via `CommittedFoldTranscript`.
+//! See `cp_snark::verify_committed_transcripts`.
 
 use alloc::{vec, vec::Vec};
 
@@ -27,7 +27,7 @@ use crate::circuit::builder::{CircuitBuilder, LinearCombination, Var};
 ///
 /// Contains only the sumcheck round data and pre-derived challenges.
 /// No commitment roots, eval claims, or other hash-input data — those
-/// are stored in `DeferredFoldTranscript` for terminal verification.
+/// are stored in `CommittedFoldTranscript` for terminal verification.
 #[derive(Clone, Debug)]
 pub struct AlgebraicFoldVerifierWitness<F: Field> {
     /// Twin-constraint sumcheck round polynomials: `[h(0), h(1), h(2)]` per round.

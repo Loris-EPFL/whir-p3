@@ -14,7 +14,7 @@
 
 use alloc::{vec, vec::Vec};
 
-use p3_challenger::{FieldChallenger, GrindingChallenger};
+use p3_challenger::{CanObserve, CanSample, FieldChallenger, GrindingChallenger};
 use p3_dft::TwoAdicSubgroupDft;
 use p3_field::{ExtensionField, Field, PrimeCharacteristicRing, PrimeField64, TwoAdicField};
 use p3_poseidon2::GenericPoseidon2LinearLayers;
@@ -29,7 +29,7 @@ use crate::{
             accumulator::{
                 FreshInstance, WarpAccumulator, WarpAccumulatorInstance, WarpAccumulatorWitness,
             },
-            encoding::merkle_commit_codeword,
+            encoding::{merkle_commit_codeword, rs_encode},
             fold::{
                 evaluate_bundled_r1cs, warp_fold_prove_rs_committed, RSEncodingConfig,
                 WarpFoldResult,
@@ -772,24 +772,28 @@ where
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-// CP-SNARK mode: deferred Fiat-Shamir verification (Symphony Section 6)
+// CP-SNARK mode: commitment-based deferred FS verification (Symphony Section 6)
 // ═══════════════════════════════════════════════════════════════════════
+//
+// Uses Symphony's HashCommitment (SHA-256, straightline extractable) to
+// bind fold transcript data, fixing the soundness gap of the previous
+// wrapper. Gated behind the `symphony` feature.
 
-use p3_challenger::{CanObserve, CanSample};
-
+#[cfg(feature = "symphony")]
 use crate::{
-    accumulation::warp::encoding::rs_encode,
-    cp_snark::{build_deferred_transcript, DeferredFoldTranscript},
+    cp_snark::{commit_fold_transcript, CommittedFoldTranscript},
     ivc::warp_fold_verifier_algebraic::{
         AlgebraicFoldVerifierWitness, compute_cp_circuit_size, synthesize_warp_ivc_circuit_cp,
     },
 };
 
-/// IVC state for the CP-SNARK mode.
+/// IVC state for the CP-SNARK mode (Symphony-backed).
 ///
-/// Same as `WarpIVCState` but also carries deferred fold transcripts
-/// for terminal verification. The circuit is much smaller (~17x) because
-/// Poseidon2 hashing is replaced by native challenge derivation.
+/// Same as `WarpIVCState` but also carries committed fold transcripts
+/// for terminal verification. Uses Symphony's `HashCommitment` for binding.
+/// The circuit is much smaller (~17x) because Poseidon2 hashing is
+/// replaced by native challenge derivation.
+#[cfg(feature = "symphony")]
 #[derive(Clone, Debug)]
 pub struct WarpIVCStateCp<F: Field> {
     /// Current step number.
@@ -804,16 +808,15 @@ pub struct WarpIVCStateCp<F: Field> {
     pub prev_acc_instance: Option<WarpAccumulatorInstance<F, F, F, 8>>,
     /// Current public state.
     pub public_state: Vec<F>,
-    /// Deferred fold transcripts — verified natively at terminal.
-    pub deferred_transcripts: Vec<DeferredFoldTranscript<F>>,
+    /// Committed fold transcripts — binding-verified at terminal via Symphony.
+    pub committed_transcripts: Vec<CommittedFoldTranscript<F>>,
 }
 
-/// Initialize the WARP IVC in CP-SNARK mode.
+/// Initialize the WARP IVC in CP-SNARK mode (Symphony-backed).
 ///
-/// Same as `warp_ivc_init` but returns `WarpIVCStateCp` with a deferred
-/// transcript for the first fold. Uses a native Poseidon2 challenger (via
-/// `make_fold_challenger`) to derive omega, tau, and sumcheck challenges
-/// so that `verify_deferred_transcripts` can replay and verify at terminal.
+/// Same as `warp_ivc_init` but returns `WarpIVCStateCp` with a committed
+/// transcript (via Symphony's `HashCommitment`) for the first fold.
+#[cfg(feature = "symphony")]
 pub fn warp_ivc_init_cp<F, EF, Dft, H, C, Challenger, FoldChal>(
     shape: &R1CSShape<F>,
     instance: &R1CSInstance<F>,
@@ -916,8 +919,8 @@ where
         },
     );
 
-    // ── Build deferred transcript ──
-    let init_transcript = build_deferred_transcript(
+    // ── Commit fold transcript via Symphony's HashCommitment ──
+    let init_transcript = commit_fold_transcript(
         0,
         input_commitment_roots,
         input_eval_claims,
@@ -938,20 +941,21 @@ where
         last_fold_result: Some(result),
         prev_acc_instance: Some(acc.instance.clone()),
         public_state,
-        deferred_transcripts: vec![init_transcript],
+        committed_transcripts: vec![init_transcript],
     }
 }
 
-/// Execute one recursive IVC step in CP-SNARK mode.
+/// Execute one recursive IVC step in CP-SNARK mode (Symphony-backed).
 ///
 /// Like `warp_ivc_step_recursive` but with an algebraic circuit (NO Poseidon2):
 /// 1. Build unified circuit = step computation + algebraic sumcheck verifier
 /// 2. Spartan prove this MUCH smaller circuit
 /// 3. WARP fold with running accumulator (Poseidon2-derived challenges)
-/// 4. Store deferred transcript for terminal verification
+/// 4. Commit fold transcript via Symphony's HashCommitment
 ///
 /// The circuit is ~17x smaller than the regular recursive IVC because all
 /// Poseidon2 hashing is replaced by witness-provided challenges.
+#[cfg(feature = "symphony")]
 #[allow(clippy::too_many_arguments)]
 pub fn warp_ivc_step_recursive_cp<F, EF, Dft, H, C, Challenger, S, FoldChal>(
     prev_state: &WarpIVCStateCp<F>,
@@ -1086,8 +1090,8 @@ where
         },
     );
 
-    // ── Store deferred transcript ──
-    let transcript = build_deferred_transcript(
+    // ── Commit fold transcript via Symphony's HashCommitment ──
+    let transcript = commit_fold_transcript(
         prev_state.step,
         input_commitment_roots,
         input_eval_claims,
@@ -1099,8 +1103,8 @@ where
         result.sumcheck_challenges.clone(),
     );
 
-    let mut deferred = prev_state.deferred_transcripts.clone();
-    deferred.push(transcript);
+    let mut committed = prev_state.committed_transcripts.clone();
+    committed.push(transcript);
 
     let new_acc = rebuild_accumulator(&result);
 
@@ -1111,7 +1115,7 @@ where
         last_fold_result: Some(result),
         prev_acc_instance: Some(prev_state.accumulator.instance.clone()),
         public_state: new_public_state,
-        deferred_transcripts: deferred,
+        committed_transcripts: committed,
     }
 }
 
@@ -1665,10 +1669,11 @@ mod tests {
         );
     }
 
-    // ── CP-SNARK mode tests ─────────────────────────────────────
+    // ── CP-SNARK mode tests (Symphony-backed, requires `symphony` feature) ──
 
     /// CP-SNARK mode: init (padded) + 2 recursive steps with algebraic circuit.
     #[test]
+    #[cfg(feature = "symphony")]
     fn warp_ivc_cp_snark_two_steps() {
         use crate::ivc::step::TrivialStepCircuit;
         use crate::ivc::warp_fold_verifier_algebraic::compute_cp_circuit_size;
@@ -1710,7 +1715,7 @@ mod tests {
             make_fold_challenger_factory(),
         );
         assert_eq!(state.step, 1);
-        assert_eq!(state.deferred_transcripts.len(), 1);
+        assert_eq!(state.committed_transcripts.len(), 1);
 
         // ── Recursive step 1 ──
         let mut chal1 = make_challenger(10);
@@ -1728,7 +1733,7 @@ mod tests {
             make_fold_challenger_factory(),
         );
         assert_eq!(state.step, 2);
-        assert_eq!(state.deferred_transcripts.len(), 2);
+        assert_eq!(state.committed_transcripts.len(), 2);
 
         // ── Recursive step 2 ──
         let mut chal2 = make_challenger(20);
@@ -1746,7 +1751,7 @@ mod tests {
             make_fold_challenger_factory(),
         );
         assert_eq!(state.step, 3);
-        assert_eq!(state.deferred_transcripts.len(), 3);
+        assert_eq!(state.committed_transcripts.len(), 3);
 
         // Verify eval claim consistency
         let eval_claim = crate::accumulation::warp::fold::evaluate_mle_lsb(
@@ -1761,6 +1766,7 @@ mod tests {
 
     /// Compare circuit sizes: CP-SNARK vs regular recursive.
     #[test]
+    #[cfg(feature = "symphony")]
     fn cp_snark_vs_regular_circuit_size() {
         use p3_baby_bear::GenericPoseidon2LinearLayersBabyBear;
         use crate::ivc::step::TrivialStepCircuit;
@@ -1823,6 +1829,7 @@ mod tests {
     /// - Tampered accumulator eval_claim → algebraic decider rejects
     /// - Tampered accumulator pesat_target → algebraic decider rejects
     #[test]
+    #[cfg(feature = "symphony")]
     fn warp_ivc_cp_snark_full_pipeline_with_terminal() {
         use crate::cp_snark::{cp_snark_terminal_verify, CpSnarkDeciderError};
         use crate::accumulation::warp::decider::WarpDeciderError;
@@ -1863,13 +1870,13 @@ mod tests {
             );
         }
         assert_eq!(state.step, 4);
-        assert_eq!(state.deferred_transcripts.len(), 4);
+        assert_eq!(state.committed_transcripts.len(), 4);
 
         // ── Terminal: CP-SNARK verify (algebraic decider + transcript replay) ──
         let terminal_result = cp_snark_terminal_verify(
             &state.shape,
             &state.accumulator,
-            &state.deferred_transcripts,
+            &state.committed_transcripts,
             make_fold_challenger_factory(),
         );
         assert!(
@@ -1924,13 +1931,18 @@ mod tests {
 
         // ══════════════════════════════════════════════════════════════
         // Soundness checks (adapted from Symphony security_soundness.rs)
+        //
+        // Key improvement: tampering with committed data now triggers
+        // CommitmentBindingFailed (SHA-256 binding), not just
+        // ChallengeMismatch. This is the fix from using Symphony's
+        // HashCommitment.
         // ══════════════════════════════════════════════════════════════
 
-        // ── Soundness 1: Tampered deferred transcript → TranscriptMismatch ──
+        // ── Soundness 1: Tampered omega → CommitmentBindingFailed ──
+        // Tampering without re-committing is detected by SHA-256 binding
         {
-            let mut bad_transcripts = state.deferred_transcripts.clone();
-            // Tamper with omega in step 2's transcript (splice attack)
-            bad_transcripts[2].omega += F::ONE;
+            let mut bad_transcripts = state.committed_transcripts.clone();
+            bad_transcripts[2].data.omega += F::ONE;
 
             let result = cp_snark_terminal_verify(
                 &state.shape,
@@ -1938,17 +1950,16 @@ mod tests {
                 &bad_transcripts,
                 make_fold_challenger_factory(),
             );
-            assert_eq!(
-                result,
-                Err(CpSnarkDeciderError::TranscriptMismatch),
-                "should reject tampered omega in deferred transcript"
+            assert!(
+                matches!(result, Err(CpSnarkDeciderError::CommitmentBindingFailed { step: 2 })),
+                "should reject tampered omega via commitment binding: {result:?}"
             );
         }
 
-        // ── Soundness 2: Tampered sumcheck challenge → TranscriptMismatch ──
+        // ── Soundness 2: Tampered sumcheck challenge → CommitmentBindingFailed ──
         {
-            let mut bad_transcripts = state.deferred_transcripts.clone();
-            bad_transcripts[1].sumcheck_challenges[0] += F::ONE;
+            let mut bad_transcripts = state.committed_transcripts.clone();
+            bad_transcripts[1].data.sumcheck_challenges[0] += F::ONE;
 
             let result = cp_snark_terminal_verify(
                 &state.shape,
@@ -1956,17 +1967,16 @@ mod tests {
                 &bad_transcripts,
                 make_fold_challenger_factory(),
             );
-            assert_eq!(
-                result,
-                Err(CpSnarkDeciderError::TranscriptMismatch),
-                "should reject tampered sumcheck challenge"
+            assert!(
+                matches!(result, Err(CpSnarkDeciderError::CommitmentBindingFailed { step: 1 })),
+                "should reject tampered sumcheck challenge via binding: {result:?}"
             );
         }
 
-        // ── Soundness 3: Tampered tau challenge → TranscriptMismatch ──
+        // ── Soundness 3: Tampered tau challenge → CommitmentBindingFailed ──
         {
-            let mut bad_transcripts = state.deferred_transcripts.clone();
-            bad_transcripts[0].tau_challenges[0] += F::ONE;
+            let mut bad_transcripts = state.committed_transcripts.clone();
+            bad_transcripts[0].data.tau_challenges[0] += F::ONE;
 
             let result = cp_snark_terminal_verify(
                 &state.shape,
@@ -1974,10 +1984,9 @@ mod tests {
                 &bad_transcripts,
                 make_fold_challenger_factory(),
             );
-            assert_eq!(
-                result,
-                Err(CpSnarkDeciderError::TranscriptMismatch),
-                "should reject tampered tau challenge"
+            assert!(
+                matches!(result, Err(CpSnarkDeciderError::CommitmentBindingFailed { step: 0 })),
+                "should reject tampered tau via binding: {result:?}"
             );
         }
 
@@ -1989,7 +1998,7 @@ mod tests {
             let result = cp_snark_terminal_verify(
                 &state.shape,
                 &bad_acc,
-                &state.deferred_transcripts,
+                &state.committed_transcripts,
                 make_fold_challenger_factory(),
             );
             assert_eq!(
@@ -2007,7 +2016,7 @@ mod tests {
             let result = cp_snark_terminal_verify(
                 &state.shape,
                 &bad_acc,
-                &state.deferred_transcripts,
+                &state.committed_transcripts,
                 make_fold_challenger_factory(),
             );
             assert_eq!(
@@ -2017,10 +2026,10 @@ mod tests {
             );
         }
 
-        // ── Soundness 6: Tampered sumcheck round evals → TranscriptMismatch ──
+        // ── Soundness 6: Tampered sumcheck evals → CommitmentBindingFailed ──
         {
-            let mut bad_transcripts = state.deferred_transcripts.clone();
-            bad_transcripts[3].sumcheck_evals[0][0] += F::ONE;
+            let mut bad_transcripts = state.committed_transcripts.clone();
+            bad_transcripts[3].data.sumcheck_evals[0][0] += F::ONE;
 
             let result = cp_snark_terminal_verify(
                 &state.shape,
@@ -2028,17 +2037,16 @@ mod tests {
                 &bad_transcripts,
                 make_fold_challenger_factory(),
             );
-            assert_eq!(
-                result,
-                Err(CpSnarkDeciderError::TranscriptMismatch),
-                "should reject tampered sumcheck round evaluation"
+            assert!(
+                matches!(result, Err(CpSnarkDeciderError::CommitmentBindingFailed { step: 3 })),
+                "should reject tampered sumcheck eval via binding: {result:?}"
             );
         }
 
-        // ── Soundness 7: Tampered commitment root in transcript → TranscriptMismatch ──
+        // ── Soundness 7: Tampered commitment root → CommitmentBindingFailed ──
         {
-            let mut bad_transcripts = state.deferred_transcripts.clone();
-            bad_transcripts[0].input_commitment_roots[0][0] += F::ONE;
+            let mut bad_transcripts = state.committed_transcripts.clone();
+            bad_transcripts[0].data.input_commitment_roots[0][0] += F::ONE;
 
             let result = cp_snark_terminal_verify(
                 &state.shape,
@@ -2046,10 +2054,9 @@ mod tests {
                 &bad_transcripts,
                 make_fold_challenger_factory(),
             );
-            assert_eq!(
-                result,
-                Err(CpSnarkDeciderError::TranscriptMismatch),
-                "should reject tampered commitment root in transcript"
+            assert!(
+                matches!(result, Err(CpSnarkDeciderError::CommitmentBindingFailed { step: 0 })),
+                "should reject tampered commitment root via binding: {result:?}"
             );
         }
     }

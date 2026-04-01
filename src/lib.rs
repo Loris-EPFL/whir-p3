@@ -4,9 +4,13 @@ extern crate alloc;
 #[cfg(feature = "bench-timing")]
 extern crate std;
 
+#[cfg(feature = "symphony")]
+extern crate std;
+
 pub mod accumulation;
 pub mod circuit;
 pub mod constant;
+#[cfg(feature = "symphony")]
 pub mod cp_snark;
 pub mod fiat_shamir;
 pub mod ivc;
