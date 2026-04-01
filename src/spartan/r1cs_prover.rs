@@ -859,6 +859,10 @@ where
     }
 }
 
+// NOTE: Packed sumcheck (src/sumcheck/packed.rs) produces k evaluation claims
+// per round, which is protocol-incompatible with Spartan's single-point output.
+// The packed sumcheck primitive is correct and ready for WHIR integration,
+// where prover/verifier are co-designed for the k-claim output format.
 fn evaluate_univariate_from_samples<F: Field>(samples: &[F], r: F) -> F {
     let degree = samples.len() - 1;
     let mut result = F::ZERO;
@@ -1634,4 +1638,5 @@ mod tests {
             proof_oracle.eval_claims.a_matrix_eval,
         );
     }
+
 }

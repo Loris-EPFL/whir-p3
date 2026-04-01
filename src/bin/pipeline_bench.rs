@@ -13,7 +13,7 @@
 
 use std::{env, time::Instant};
 
-use p3_baby_bear::{BabyBear, Poseidon2BabyBear};
+use p3_koala_bear::{KoalaBear, Poseidon2KoalaBear};
 use p3_challenger::DuplexChallenger;
 use p3_dft::Radix2DFTSmallBatch;
 use p3_field::{extension::BinomialExtensionField, Field, PrimeCharacteristicRing};
@@ -51,9 +51,9 @@ use whir_p3::{
     },
 };
 
-type F = BabyBear;
+type F = KoalaBear;
 type EF = BinomialExtensionField<F, 4>;
-type Perm = Poseidon2BabyBear<16>;
+type Perm = Poseidon2KoalaBear<16>;
 type MyHash = PaddingFreeSponge<Perm, 16, 8, 8>;
 type MyCompress = TruncatedPermutation<Perm, 2, 8, 16>;
 type MyChallenger = DuplexChallenger<F, Perm, 16, 8>;
@@ -259,7 +259,7 @@ fn main() {
 
     println!("Pipeline Benchmark: Spartan → Quasar → EvalFold → WHIR");
     println!("========================================================");
-    println!("Field: BabyBear (31-bit), EF: BabyBear^4");
+    println!("Field: KoalaBear (31-bit), EF: KoalaBear^4");
     println!("RS rate: 1/{}, batch: {batch}, repeats: {repeats}", 1 << RS_LOG_INV_RATE);
     println!();
     println!("{:>6} {:>6} {:>12} {:>12} {:>12} {:>12} {:>12} {:>8}",

@@ -327,7 +327,7 @@ mod tests {
     fn eval_fold_verifier_circuit_builds() {
         let poseidon_perm = Perm::new_from_rng_128(&mut SmallRng::seed_from_u64(99));
         let poseidon_config = Poseidon2CircuitConfig::<F, 16>::from_rng(
-            8, 13, &mut SmallRng::seed_from_u64(99),
+            8, 13, 7, &mut SmallRng::seed_from_u64(99),
         );
 
         let witness = EvalFoldVerifierWitness {
@@ -363,7 +363,7 @@ mod tests {
     fn eval_fold_ivc_circuit_builds_with_and_without_verifier() {
         let poseidon_perm = Perm::new_from_rng_128(&mut SmallRng::seed_from_u64(99));
         let poseidon_config = Poseidon2CircuitConfig::<F, 16>::from_rng(
-            8, 13, &mut SmallRng::seed_from_u64(99),
+            8, 13, 7, &mut SmallRng::seed_from_u64(99),
         );
         let step = TrivialStepCircuit::new(1);
 
@@ -414,7 +414,7 @@ mod tests {
     fn compare_circuit_sizes_eval_fold_vs_constraint_batch() {
         let poseidon_perm = Perm::new_from_rng_128(&mut SmallRng::seed_from_u64(99));
         let poseidon_config = Poseidon2CircuitConfig::<F, 16>::from_rng(
-            8, 13, &mut SmallRng::seed_from_u64(99),
+            8, 13, 7, &mut SmallRng::seed_from_u64(99),
         );
 
         // Eval-fold verifier (base field sumcheck, 1 round)

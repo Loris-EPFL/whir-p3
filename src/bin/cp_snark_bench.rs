@@ -8,15 +8,17 @@
 //! same WARP fold. The only difference is the recursive verifier circuit.
 //!
 //! Usage:
-//!   cargo run --release --bin cp_snark_bench -- <log_sizes> <num_steps> <repeats>
+//!   cargo run --release --bin cp_snark_bench -- <log_sizes> <num_steps> <repeats> [step_muls]
 //!
 //! Examples:
-//!   cargo run --release --bin cp_snark_bench -- "10,12" "2,4,8" 3
-//!   cargo run --release --bin cp_snark_bench -- "10,12,14" "4,8,16" 5
+//!   cargo run --release --bin cp_snark_bench -- "10,12" "2,4,8" 3         # trivial step circuit
+//!   cargo run --release --bin cp_snark_bench -- "10,12,14" "4,8,16" 5 0   # trivial (step_muls=0)
+//!   cargo run --release --bin cp_snark_bench -- "14" "4,8" 3 1000         # 1000-mul step circuit
+//!   cargo run --release --bin cp_snark_bench -- "14" "4,8" 3 10000        # 10K-mul step circuit
 
 use std::{env, time::Instant};
 
-use p3_baby_bear::{BabyBear, GenericPoseidon2LinearLayersBabyBear, Poseidon2BabyBear};
+use p3_koala_bear::{GenericPoseidon2LinearLayersKoalaBear, KoalaBear, Poseidon2KoalaBear};
 use p3_challenger::{CanObserve, CanSample, DuplexChallenger};
 use p3_dft::Radix2DFTSmallBatch;
 use p3_field::{extension::BinomialExtensionField, PrimeCharacteristicRing};
@@ -35,7 +37,7 @@ use whir_p3::{
         builder::CircuitBuilder, poseidon2::Poseidon2CircuitConfig, sponge::CircuitChallenger,
     },
     ivc::{
-        step::TrivialStepCircuit,
+        step::{StepCircuit, TrivialStepCircuit, WorkloadStepCircuit},
         warp_fold_verifier_algebraic::{
             AlgebraicFoldVerifierWitness, compute_cp_circuit_size, synthesize_warp_ivc_circuit_cp,
         },
@@ -49,9 +51,9 @@ use whir_p3::{
     },
 };
 
-type F = BabyBear;
+type F = KoalaBear;
 type EF = BinomialExtensionField<F, 4>;
-type Perm = Poseidon2BabyBear<16>;
+type Perm = Poseidon2KoalaBear<16>;
 type MyHash = PaddingFreeSponge<Perm, 16, 8, 8>;
 type MyCompress = TruncatedPermutation<Perm, 2, 8, 16>;
 type MyChallenger = DuplexChallenger<F, Perm, 16, 8>;
@@ -72,6 +74,24 @@ fn median(v: &mut Vec<f64>) -> f64 {
 fn make_hc() -> (MyHash, MyCompress) {
     let p = Perm::new_from_rng_128(&mut SmallRng::seed_from_u64(42));
     (MyHash::new(p.clone()), MyCompress::new(p))
+}
+
+/// Create a consistent (Poseidon2 permutation, circuit config) pair from the same
+/// seed. Both must use identical round constants for the in-circuit verifier
+/// to produce satisfying R1CS.
+/// S-box degree for the configured field's Poseidon2.
+/// KoalaBear uses x^3, BabyBear uses x^7.
+const SBOX_DEGREE: u64 = 3; // KoalaBear
+
+fn make_poseidon2_pair(seed: u64) -> (Perm, Poseidon2CircuitConfig<F, 16>) {
+    use p3_poseidon2::poseidon2_round_numbers_128;
+    let perm = Perm::new_from_rng_128(&mut SmallRng::seed_from_u64(seed));
+    let (rounds_f, rounds_p) = poseidon2_round_numbers_128::<F>(16, SBOX_DEGREE)
+        .expect("unsupported Poseidon2 parameters for this field");
+    let config = Poseidon2CircuitConfig::<F, 16>::from_rng(
+        rounds_f, rounds_p, SBOX_DEGREE, &mut SmallRng::seed_from_u64(seed),
+    );
+    (perm, config)
 }
 
 fn make_challenger(seed: u64) -> MyChallenger {
@@ -260,28 +280,36 @@ fn run_regular_recursive(
     _log_code: usize,
     _log_m: usize,
     _num_inputs: usize,
+    step_muls: usize,
 ) -> (f64, f64, f64, f64) {
-    let step = TrivialStepCircuit::new(1);
+    let step = WorkloadStepCircuit::new(step_muls);
     let dft = Radix2DFTSmallBatch::<F>::default();
     let (mh, mc) = make_hc();
     let rs_config = RSEncodingConfig::new(2, RS_LOG_INV_RATE);
-    let poseidon_perm = Perm::new_from_rng_128(&mut SmallRng::seed_from_u64(99));
-    let poseidon_config =
-        Poseidon2CircuitConfig::<F, 16>::from_rng(8, 13, &mut SmallRng::seed_from_u64(99));
+    let (poseidon_perm, poseidon_config) = make_poseidon2_pair(99);
+
+    // Probe the step circuit to determine eval_point size
+    let mut probe_builder = CircuitBuilder::<F>::new();
+    let probe_in = probe_builder.alloc_witness(F::ZERO);
+    let _ = step.synthesize(&mut probe_builder, &[probe_in]);
+    let (probe_shape, probe_inst) = probe_builder.build();
+    let spartan = R1CSProver::new();
+    let probe_w = spartan.prepare_witness(&probe_inst);
+    let probe_ni = probe_inst.input().len();
+    let probe_nw = (probe_w.num_evals() - probe_ni).next_power_of_two();
+    let probe_log_code = probe_nw.trailing_zeros() as usize + RS_LOG_INV_RATE;
 
     let (target_w, _, _) = compute_recursive_circuit_size::<
         F,
-        GenericPoseidon2LinearLayersBabyBear,
+        GenericPoseidon2LinearLayersKoalaBear,
         _,
         _,
-    >(&step, &[F::ZERO], &poseidon_config, &poseidon_perm, 3);
-
-    let spartan = R1CSProver::new();
+    >(&step, &[F::ZERO], &poseidon_config, &poseidon_perm, probe_log_code);
 
     // Init: padded circuit (no verifier)
     let mut init_builder = CircuitBuilder::<F>::new();
     let mut init_chal = CircuitChallenger::<F, 16, 8>::new(&mut init_builder);
-    let _ = synthesize_warp_ivc_circuit::<F, GenericPoseidon2LinearLayersBabyBear, _, _, 16, 8>(
+    let _ = synthesize_warp_ivc_circuit::<F, GenericPoseidon2LinearLayersKoalaBear, _, _, 16, 8>(
         &mut init_builder,
         &mut init_chal,
         &poseidon_config,
@@ -432,7 +460,7 @@ fn run_regular_recursive(
         let mut challenger = CircuitChallenger::<F, 16, 8>::new(&mut builder);
         let _ = synthesize_warp_ivc_circuit::<
             F,
-            GenericPoseidon2LinearLayersBabyBear,
+            GenericPoseidon2LinearLayersKoalaBear,
             _,
             _,
             16,
@@ -522,8 +550,9 @@ fn run_cp_snark_recursive(
     _log_code: usize,
     _log_m: usize,
     _num_inputs: usize,
+    step_muls: usize,
 ) -> (f64, f64, f64, f64) {
-    let step = TrivialStepCircuit::new(1);
+    let step = WorkloadStepCircuit::new(step_muls);
     let dft = Radix2DFTSmallBatch::<F>::default();
     let (mh, mc) = make_hc();
     let rs_config = RSEncodingConfig::new(2, RS_LOG_INV_RATE);
@@ -692,30 +721,30 @@ fn main() {
     let sizes_str = args.get(1).map(|s| s.as_str()).unwrap_or("10,12");
     let steps_str = args.get(2).map(|s| s.as_str()).unwrap_or("2,4,8");
     let repeats: usize = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(3);
+    let step_muls: usize = args.get(4).and_then(|s| s.parse().ok()).unwrap_or(0);
     let sizes = parse_csv(sizes_str);
     let steps_list = parse_csv(steps_str);
 
     println!("CP-SNARK (Symphony) vs Regular Recursive IVC");
     println!("=============================================");
-    println!("Field: BabyBear, EF: BabyBear^4 | WARP fold: factor=2, rate=1/2");
-    println!("Repeats: {repeats} (+ 1 warmup) | Median timing");
+    println!("Field: KoalaBear, EF: KoalaBear^4 | WARP fold: factor=2, rate=1/2");
+    println!("Repeats: {repeats} (+ 1 warmup) | Median timing | Step circuit: {step_muls} muls");
     println!();
 
     // ── Circuit sizes ──
-    let step_ckt = TrivialStepCircuit::new(1);
-    let poseidon_perm = Perm::new_from_rng_128(&mut SmallRng::seed_from_u64(99));
-    let poseidon_config =
-        Poseidon2CircuitConfig::<F, 16>::from_rng(8, 13, &mut SmallRng::seed_from_u64(99));
+    let (poseidon_perm, poseidon_config) = make_poseidon2_pair(99);
 
+    // Compute circuit sizes for both modes, using the configured step circuit.
+    let workload = WorkloadStepCircuit::new(step_muls);
     let (reg_w, reg_c, reg_pv) = compute_recursive_circuit_size::<
         F,
-        GenericPoseidon2LinearLayersBabyBear,
+        GenericPoseidon2LinearLayersKoalaBear,
         _,
         _,
     >(
-        &step_ckt, &[F::ZERO], &poseidon_config, &poseidon_perm, 3,
+        &workload, &[F::ZERO], &poseidon_config, &poseidon_perm, 3,
     );
-    let (cp_w, cp_c, cp_pv) = compute_cp_circuit_size(&step_ckt, &[F::ZERO]);
+    let (cp_w, cp_c, cp_pv) = compute_cp_circuit_size(&workload, &[F::ZERO]);
 
     println!("Recursive verifier circuit overhead (added per IVC step):");
     println!(
@@ -793,12 +822,12 @@ fn main() {
 
                 // Regular recursive IVC
                 let (rs, rc, rsp, rf) = run_regular_recursive(
-                    &shape, &instance, num_steps, num_witness, log_code, log_m, num_inputs,
+                    &shape, &instance, num_steps, num_witness, log_code, log_m, num_inputs, step_muls,
                 );
 
                 // CP-SNARK recursive IVC
                 let (cs, cc, csp, cf) = run_cp_snark_recursive(
-                    &shape, &instance, num_steps, num_witness, log_code, log_m, num_inputs,
+                    &shape, &instance, num_steps, num_witness, log_code, log_m, num_inputs, step_muls,
                 );
 
                 if rep > 0 {

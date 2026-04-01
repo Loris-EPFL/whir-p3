@@ -660,11 +660,11 @@ macro_rules! bench_field_impl {
 
 bench_field_impl!(
     bench_babybear,
-    "BabyBear",
-    p3_baby_bear::BabyBear,
-    BinomialExtensionField<p3_baby_bear::BabyBear, 4>,
-    p3_baby_bear::Poseidon2BabyBear<16>,
-    DuplexChallenger<p3_baby_bear::BabyBear, p3_baby_bear::Poseidon2BabyBear<16>, 16, 8>,
+    "KoalaBear",
+    p3_koala_bear::KoalaBear,
+    BinomialExtensionField<p3_koala_bear::KoalaBear, 4>,
+    p3_koala_bear::Poseidon2KoalaBear<16>,
+    DuplexChallenger<p3_koala_bear::KoalaBear, p3_koala_bear::Poseidon2KoalaBear<16>, 16, 8>,
     4,
     32
 );
@@ -712,12 +712,12 @@ fn parse_csv_sizes(s: &str) -> Vec<usize> {
 
 fn print_compare_usage() {
     eprintln!("Usage:");
-    eprintln!("  spartan_spark_bench compare <log_m_sizes> <repeats> [--field babybear|m31|koalabear|goldilocks|all]");
+    eprintln!("  spartan_spark_bench compare <log_m_sizes> <repeats> [--field koalabear|m31|goldilocks|all]");
     eprintln!("  spartan_spark_bench [--quick]              (original CSV benchmark)");
     eprintln!();
     eprintln!("Examples:");
     eprintln!("  spartan_spark_bench compare \"4,6,8,10\" 5");
-    eprintln!("  spartan_spark_bench compare \"6,8,10,12\" 10 --field babybear");
+    eprintln!("  spartan_spark_bench compare \"6,8,10,12\" 10 --field koalabear");
     eprintln!("  spartan_spark_bench --quick");
 }
 
@@ -737,7 +737,7 @@ fn main() {
         let field_flag = args.iter().position(|a| a == "--field")
             .and_then(|i| args.get(i + 1))
             .map(|s| s.to_lowercase());
-        let field = field_flag.as_deref().unwrap_or("babybear");
+        let field = field_flag.as_deref().unwrap_or("koalabear");
 
         let log_ms = parse_csv_sizes(sizes_str);
 
@@ -747,9 +747,8 @@ fn main() {
         println!();
 
         match field {
-            "babybear" => bench_babybear::run_compare(&log_ms, repeats),
+            "koalabear" => bench_babybear::run_compare(&log_ms, repeats),
             "m31" => bench_m31::run_compare(&log_ms, repeats),
-            "koalabear" => bench_koalabear::run_compare(&log_ms, repeats),
             "goldilocks" => bench_goldilocks::run_compare(&log_ms, repeats),
             "all" => {
                 bench_babybear::run_compare(&log_ms, repeats);
@@ -758,7 +757,7 @@ fn main() {
                 bench_goldilocks::run_compare(&log_ms, repeats);
             }
             _ => {
-                eprintln!("Unknown field: {field}. Use babybear, m31, koalabear, goldilocks, or all.");
+                eprintln!("Unknown field: {field}. Use koalabear, m31, goldilocks, or all.");
                 std::process::exit(1);
             }
         }
@@ -795,7 +794,7 @@ fn main() {
     )
     .unwrap();
 
-    println!("Running BabyBear benchmark...");
+    println!("Running KoalaBear benchmark...");
     bench_babybear::run(
         quick,
         repeats,

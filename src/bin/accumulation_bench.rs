@@ -6,7 +6,7 @@ use std::{
 };
 
 use clap::Parser;
-use p3_baby_bear::{BabyBear, Poseidon2BabyBear};
+use p3_koala_bear::{KoalaBear, Poseidon2KoalaBear};
 use p3_challenger::DuplexChallenger;
 use p3_dft::Radix2DFTSmallBatch;
 use p3_field::{extension::BinomialExtensionField, Field, PrimeCharacteristicRing};
@@ -36,9 +36,9 @@ use whir_p3::{
     },
 };
 
-type F = BabyBear;
+type F = KoalaBear;
 type EF = BinomialExtensionField<F, 4>;
-type Perm = Poseidon2BabyBear<16>;
+type Perm = Poseidon2KoalaBear<16>;
 type MyHash = PaddingFreeSponge<Perm, 16, 8, 8>;
 type MyCompress = TruncatedPermutation<Perm, 2, 8, 16>;
 type MyChallenger = DuplexChallenger<F, Perm, 16, 8>;

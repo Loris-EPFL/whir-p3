@@ -549,7 +549,7 @@ mod tests {
 
         // 3. Synthesize the recursive circuit
         let perm_circuit = Perm::new_from_rng_128(&mut SmallRng::seed_from_u64(99));
-        let poseidon_config = Poseidon2CircuitConfig::<F, 16>::from_rng(8, 13, &mut SmallRng::seed_from_u64(99));
+        let poseidon_config = Poseidon2CircuitConfig::<F, 16>::from_rng(8, 13, 7, &mut SmallRng::seed_from_u64(99));
 
         // We need to initialize the circuit challenger to match the prover's challenger.
         // The prover started with seed_challenger() which includes domain separator observation.
@@ -597,7 +597,7 @@ mod tests {
 
         let perm_for_circuit = Perm::new_from_rng_128(&mut SmallRng::seed_from_u64(99));
         let config_for_circuit = Poseidon2CircuitConfig::<F, 16>::from_rng(
-            8, 13, &mut SmallRng::seed_from_u64(99),
+            8, 13, 7, &mut SmallRng::seed_from_u64(99),
         );
 
         let mut builder2 = CircuitBuilder::<F>::new();

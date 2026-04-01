@@ -29,6 +29,8 @@ pub struct Poseidon2CircuitConfig<F: Field, const WIDTH: usize> {
     pub initial_external_constants: Vec<[F; WIDTH]>,
     pub terminal_external_constants: Vec<[F; WIDTH]>,
     pub internal_constants: Vec<F>,
+    /// S-box exponent: 3 for KoalaBear, 7 for BabyBear.
+    pub sbox_degree: u64,
 }
 
 impl<F: Field, const WIDTH: usize> Poseidon2CircuitConfig<F, WIDTH> {
@@ -36,16 +38,25 @@ impl<F: Field, const WIDTH: usize> Poseidon2CircuitConfig<F, WIDTH> {
     pub fn new(
         external_constants: ExternalLayerConstants<F, WIDTH>,
         internal_constants: Vec<F>,
+        sbox_degree: u64,
     ) -> Self {
         Self {
             initial_external_constants: external_constants.get_initial_constants().clone(),
             terminal_external_constants: external_constants.get_terminal_constants().clone(),
             internal_constants,
+            sbox_degree,
         }
     }
 
     /// Create by generating constants from the same RNG used for `Poseidon2::new_from_rng`.
-    pub fn from_rng<R: rand::Rng>(rounds_f: usize, rounds_p: usize, rng: &mut R) -> Self
+    ///
+    /// `sbox_degree`: the S-box exponent (3 for KoalaBear, 7 for BabyBear).
+    pub fn from_rng<R: rand::Rng>(
+        rounds_f: usize,
+        rounds_p: usize,
+        sbox_degree: u64,
+        rng: &mut R,
+    ) -> Self
     where
         rand::distr::StandardUniform:
             rand::distr::Distribution<F> + rand::distr::Distribution<[F; WIDTH]>,
@@ -56,23 +67,49 @@ impl<F: Field, const WIDTH: usize> Poseidon2CircuitConfig<F, WIDTH> {
             .sample_iter(rand::distr::StandardUniform)
             .take(rounds_p)
             .collect();
-        Self::new(external_constants, internal_constants)
+        Self::new(external_constants, internal_constants, sbox_degree)
     }
 }
 
-/// Apply the S-box x^7 as R1CS constraints.
+/// Apply the S-box x^d as R1CS constraints.
 ///
-/// Returns the output variable and adds 4 multiplication constraints.
-fn sbox_circuit<F: Field>(builder: &mut CircuitBuilder<F>, x: Var, x_val: F) -> Var {
-    let x2_val = x_val * x_val;
-    let x3_val = x2_val * x_val;
-    let x6_val = x3_val * x3_val;
-    let x7_val = x6_val * x_val;
+/// Supports d=3 (KoalaBear: 2 multiplications) and d=7 (BabyBear: 4 multiplications).
+fn sbox_circuit<F: Field>(builder: &mut CircuitBuilder<F>, x: Var, x_val: F, degree: u64) -> Var {
+    match degree {
+        3 => {
+            // x^3 = x * x * x (2 multiplications)
+            let x2_val = x_val * x_val;
+            let x3_val = x2_val * x_val;
+            let x2 = builder.mul(x, x, x2_val);
+            builder.mul(x2, x, x3_val)
+        }
+        7 => {
+            // x^7 = ((x^2 * x)^2) * x (4 multiplications)
+            let x2_val = x_val * x_val;
+            let x3_val = x2_val * x_val;
+            let x6_val = x3_val * x3_val;
+            let x7_val = x6_val * x_val;
+            let x2 = builder.mul(x, x, x2_val);
+            let x3 = builder.mul(x2, x, x3_val);
+            let x6 = builder.mul(x3, x3, x6_val);
+            builder.mul(x6, x, x7_val)
+        }
+        _ => panic!("unsupported S-box degree {degree}: only 3 and 7 are supported"),
+    }
+}
 
-    let x2 = builder.mul(x, x, x2_val);
-    let x3 = builder.mul(x2, x, x3_val);
-    let x6 = builder.mul(x3, x3, x6_val);
-    builder.mul(x6, x, x7_val)
+/// Compute x^d for the S-box value tracking (no constraints, just field arithmetic).
+fn sbox_val<F: Field>(x: F, degree: u64) -> F {
+    match degree {
+        3 => x * x * x,
+        7 => {
+            let x2 = x * x;
+            let x3 = x2 * x;
+            let x6 = x3 * x3;
+            x6 * x
+        }
+        _ => panic!("unsupported S-box degree {degree}"),
+    }
 }
 
 /// Extract the linear transformation matrix for a function `f: [F; W] -> [F; W]`
@@ -183,14 +220,8 @@ where
                 LinearCombination::from_constant(F::ONE),
                 LinearCombination::from_var(post_rc),
             );
-            cur_vars[i] = sbox_circuit(builder, post_rc, cur_vals[i]);
-            cur_vals[i] = cur_vals[i]
-                * cur_vals[i]
-                * cur_vals[i]
-                * cur_vals[i]
-                * cur_vals[i]
-                * cur_vals[i]
-                * cur_vals[i];
+            cur_vars[i] = sbox_circuit(builder, post_rc, cur_vals[i], config.sbox_degree);
+            cur_vals[i] = sbox_val(cur_vals[i], config.sbox_degree);
         }
 
         // External linear layer
@@ -212,14 +243,8 @@ where
             LinearCombination::from_constant(F::ONE),
             LinearCombination::from_var(post_rc),
         );
-        cur_vars[0] = sbox_circuit(builder, post_rc, cur_vals[0]);
-        cur_vals[0] = cur_vals[0]
-            * cur_vals[0]
-            * cur_vals[0]
-            * cur_vals[0]
-            * cur_vals[0]
-            * cur_vals[0]
-            * cur_vals[0];
+        cur_vars[0] = sbox_circuit(builder, post_rc, cur_vals[0], config.sbox_degree);
+        cur_vals[0] = sbox_val(cur_vals[0], config.sbox_degree);
 
         // Internal linear layer
         let (new_vars, new_vals) =
@@ -240,14 +265,8 @@ where
                 LinearCombination::from_constant(F::ONE),
                 LinearCombination::from_var(post_rc),
             );
-            cur_vars[i] = sbox_circuit(builder, post_rc, cur_vals[i]);
-            cur_vals[i] = cur_vals[i]
-                * cur_vals[i]
-                * cur_vals[i]
-                * cur_vals[i]
-                * cur_vals[i]
-                * cur_vals[i]
-                * cur_vals[i];
+            cur_vars[i] = sbox_circuit(builder, post_rc, cur_vals[i], config.sbox_degree);
+            cur_vals[i] = sbox_val(cur_vals[i], config.sbox_degree);
         }
 
         let (new_vars, new_vals) =
@@ -280,7 +299,7 @@ mod tests {
         let perm = Perm::new_from_rng_128(&mut rng);
 
         let mut rng2 = SmallRng::seed_from_u64(42);
-        let config = Poseidon2CircuitConfig::<F, 16>::from_rng(8, 13, &mut rng2);
+        let config = Poseidon2CircuitConfig::<F, 16>::from_rng(8, 13, 7, &mut rng2);
 
         let state_vals: [F; 16] = core::array::from_fn(|i| F::from_u64(i as u64 + 1));
         let mut builder = CircuitBuilder::<F>::new();
@@ -317,7 +336,7 @@ mod tests {
         let perm = Perm::new_from_rng_128(&mut rng);
 
         let mut rng2 = SmallRng::seed_from_u64(42);
-        let config = Poseidon2CircuitConfig::<F, 16>::from_rng(8, 13, &mut rng2);
+        let config = Poseidon2CircuitConfig::<F, 16>::from_rng(8, 13, 7, &mut rng2);
 
         let state_vals: [F; 16] = core::array::from_fn(|i| F::from_u64(i as u64 + 1));
         let mut builder = CircuitBuilder::<F>::new();

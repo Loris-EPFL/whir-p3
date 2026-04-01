@@ -9,7 +9,7 @@
 
 use std::{env, time::Instant};
 
-use p3_baby_bear::{BabyBear, GenericPoseidon2LinearLayersBabyBear, Poseidon2BabyBear};
+use p3_koala_bear::{GenericPoseidon2LinearLayersKoalaBear, KoalaBear, Poseidon2KoalaBear};
 use p3_challenger::DuplexChallenger;
 use p3_dft::Radix2DFTSmallBatch;
 use p3_field::{extension::BinomialExtensionField, Field, PrimeCharacteristicRing};
@@ -49,9 +49,9 @@ use whir_p3::{
     },
 };
 
-type F = BabyBear;
+type F = KoalaBear;
 type EF = BinomialExtensionField<F, 4>;
-type Perm = Poseidon2BabyBear<16>;
+type Perm = Poseidon2KoalaBear<16>;
 type MyHash = PaddingFreeSponge<Perm, 16, 8, 8>;
 type MyCompress = TruncatedPermutation<Perm, 2, 8, 16>;
 type MyChallenger = DuplexChallenger<F, Perm, 16, 8>;
@@ -157,7 +157,7 @@ fn main() {
 
     println!("Apples-to-Apples Benchmark");
     println!("==========================");
-    println!("Field: BabyBear, EF: BabyBear^4 | WHIR: fold=2, rate=1/2, sec=100");
+    println!("Field: KoalaBear, EF: KoalaBear^4 | WHIR: fold=2, rate=1/2, sec=100");
     println!("Batch per step: {batch} | Repeats: {repeats} | N = steps × {batch}");
     println!();
     println!("ALL paths start from Spartan-linearized witnesses (same cost for all).");

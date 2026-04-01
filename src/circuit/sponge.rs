@@ -230,7 +230,7 @@ mod tests {
         let mut rng = SmallRng::seed_from_u64(42);
         let perm = Perm::new_from_rng_128(&mut rng);
         let mut rng2 = SmallRng::seed_from_u64(42);
-        let config = Poseidon2CircuitConfig::<F, 16>::from_rng(8, 13, &mut rng2);
+        let config = Poseidon2CircuitConfig::<F, 16>::from_rng(8, 13, 7, &mut rng2);
         (perm, config)
     }
 

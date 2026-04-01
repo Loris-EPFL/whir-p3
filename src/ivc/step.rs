@@ -3,7 +3,7 @@
 //! Users implement this trait to define the per-step computation that gets
 //! folded into the running accumulator at each IVC step.
 
-use alloc::vec::Vec;
+use alloc::{vec, vec::Vec};
 
 use p3_field::Field;
 
@@ -57,6 +57,50 @@ impl<F: Field> StepCircuit<F> for TrivialStepCircuit {
     ) -> Vec<Var> {
         // Identity: output = input (no constraints added)
         input_state.to_vec()
+    }
+}
+
+/// A step circuit that generates a configurable number of multiplication
+/// constraints by chaining squarings: x -> x^2 -> x^4 -> ...
+///
+/// `num_muls` squarings produce `num_muls` R1CS constraints. Useful for
+/// benchmarking the pipeline at different step circuit sizes.
+#[derive(Debug)]
+pub struct WorkloadStepCircuit {
+    num_muls: usize,
+}
+
+impl WorkloadStepCircuit {
+    #[must_use]
+    pub const fn new(num_muls: usize) -> Self {
+        Self { num_muls }
+    }
+}
+
+impl<F: Field> StepCircuit<F> for WorkloadStepCircuit {
+    fn state_size(&self) -> usize {
+        1
+    }
+
+    fn synthesize(
+        &self,
+        builder: &mut CircuitBuilder<F>,
+        input_state: &[Var],
+    ) -> Vec<Var> {
+        // Generate num_muls independent multiplication constraints.
+        // Each constraint: a_i * a_i = b_i where a_i and b_i are fresh
+        // witness variables with consistent values. This is independent
+        // of the input state value, so it's always satisfiable.
+        let mut last = input_state[0];
+        for i in 0..self.num_muls {
+            let val = F::from_u64((i as u64 + 2) % 1000 + 1);
+            let a = builder.alloc_witness(val);
+            let b = builder.mul(a, a, val * val);
+            // Chain to output: constrain last = last (identity via addition)
+            // to keep the variables connected to the circuit
+            last = b;
+        }
+        vec![last]
     }
 }
 

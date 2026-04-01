@@ -13,7 +13,7 @@
 
 use std::{env, mem::size_of, time::Instant};
 
-use p3_baby_bear::{BabyBear, Poseidon2BabyBear};
+use p3_koala_bear::{KoalaBear, Poseidon2KoalaBear};
 use p3_challenger::DuplexChallenger;
 use p3_dft::Radix2DFTSmallBatch;
 use p3_field::{extension::BinomialExtensionField, Field, PrimeCharacteristicRing};
@@ -54,9 +54,9 @@ use whir_p3::{
     },
 };
 
-type F = BabyBear;
+type F = KoalaBear;
 type EF = BinomialExtensionField<F, 4>;
-type Perm = Poseidon2BabyBear<16>;
+type Perm = Poseidon2KoalaBear<16>;
 type MyHash = PaddingFreeSponge<Perm, 16, 8, 8>;
 type MyCompress = TruncatedPermutation<Perm, 2, 8, 16>;
 type MyChallenger = DuplexChallenger<F, Perm, 16, 8>;
@@ -552,7 +552,7 @@ fn run_recursive_ivc(
     num_inputs: usize,
 ) -> (f64, f64, f64) {
     // Returns (circuit_build_us, spartan_prove_us, warp_fold_us) — all steps total
-    use p3_baby_bear::GenericPoseidon2LinearLayersBabyBear;
+    use p3_koala_bear::GenericPoseidon2LinearLayersKoalaBear;
     use whir_p3::ivc::step::TrivialStepCircuit;
 
     let dft = Radix2DFTSmallBatch::<F>::default();
@@ -561,14 +561,17 @@ fn run_recursive_ivc(
     let merkle_hash = MyHash::new(perm.clone());
     let merkle_compress = MyCompress::new(perm.clone());
     let poseidon_perm = Perm::new_from_rng_128(&mut SmallRng::seed_from_u64(99));
+    let sbox_degree: u64 = 3; // KoalaBear uses x^3
+    let (rounds_f, rounds_p) = p3_poseidon2::poseidon2_round_numbers_128::<F>(16, sbox_degree)
+        .expect("unsupported Poseidon2 parameters");
     let poseidon_config = Poseidon2CircuitConfig::<F, 16>::from_rng(
-        8, 13, &mut SmallRng::seed_from_u64(99),
+        rounds_f, rounds_p, sbox_degree, &mut SmallRng::seed_from_u64(99),
     );
     let step_circuit = TrivialStepCircuit::new(1);
 
     // Compute target witness count for uniform circuit sizing
     let (target_witness, _, _) = compute_recursive_circuit_size::<
-        F, GenericPoseidon2LinearLayersBabyBear, _, _,
+        F, GenericPoseidon2LinearLayersKoalaBear, _, _,
     >(&step_circuit, &[F::ZERO], &poseidon_config, &poseidon_perm, 3);
 
     // Build a satisfying R1CS instance for init
@@ -580,7 +583,7 @@ fn run_recursive_ivc(
     let mut init_builder = whir_p3::circuit::builder::CircuitBuilder::<F>::new();
     let mut init_chal_circuit = whir_p3::circuit::sponge::CircuitChallenger::<F, 16, 8>::new(&mut init_builder);
     let _ = whir_p3::ivc::warp_fold_verifier_circuit::synthesize_warp_ivc_circuit::<
-        F, GenericPoseidon2LinearLayersBabyBear, _, _, 16, 8,
+        F, GenericPoseidon2LinearLayersKoalaBear, _, _, 16, 8,
     >(
         &mut init_builder, &mut init_chal_circuit, &poseidon_config, &poseidon_perm,
         &step_circuit, &[F::ZERO], None, Some(target_witness),
@@ -667,7 +670,7 @@ fn run_recursive_ivc(
         let mut builder = whir_p3::circuit::builder::CircuitBuilder::<F>::new();
         let mut circuit_chal = whir_p3::circuit::sponge::CircuitChallenger::<F, 16, 8>::new(&mut builder);
         let _ = whir_p3::ivc::warp_fold_verifier_circuit::synthesize_warp_ivc_circuit::<
-            F, GenericPoseidon2LinearLayersBabyBear, _, _, 16, 8,
+            F, GenericPoseidon2LinearLayersKoalaBear, _, _, 16, 8,
         >(
             &mut builder, &mut circuit_chal, &poseidon_config, &poseidon_perm,
             &step_circuit, &[F::ZERO], verifier_witness.as_ref(), Some(target_witness),
@@ -745,7 +748,7 @@ fn main() {
 
     println!("Accumulation Benchmark: 4 paths compared");
     println!("=========================================");
-    println!("Field: BabyBear (31-bit), EF: BabyBear^4");
+    println!("Field: KoalaBear (31-bit), EF: KoalaBear^4");
     println!("WHIR: folding_factor=2, rate=1/2, security=100, pow=0");
     println!("Batch per step: {batch} | Repeats: {repeats}");
     println!();

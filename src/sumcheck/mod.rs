@@ -1,4 +1,5 @@
 pub mod lagrange;
+pub mod packed;
 pub mod product_polynomial;
 pub mod sumcheck_prover;
 pub mod svo;

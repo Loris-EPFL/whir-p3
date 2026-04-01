@@ -734,7 +734,7 @@ mod tests {
         let acc_perm = Perm::new_from_rng_128(&mut SmallRng::seed_from_u64(99));
         let poseidon_perm = Perm::new_from_rng_128(&mut SmallRng::seed_from_u64(99));
         let poseidon_config = crate::circuit::poseidon2::Poseidon2CircuitConfig::<F, 16>::from_rng(
-            8, 13, &mut SmallRng::seed_from_u64(99),
+            8, 13, 7, &mut SmallRng::seed_from_u64(99),
         );
         let step = crate::ivc::step::TrivialStepCircuit::new(1);
 
@@ -756,7 +756,7 @@ mod tests {
             let poseidon_perm_probe = Perm::new_from_rng_128(&mut SmallRng::seed_from_u64(99));
             let poseidon_config_probe =
                 crate::circuit::poseidon2::Poseidon2CircuitConfig::<F, 16>::from_rng(
-                    8, 13, &mut SmallRng::seed_from_u64(99),
+                    8, 13, 7, &mut SmallRng::seed_from_u64(99),
                 );
             let mut probe_builder = CircuitBuilder::<F>::new();
             let mut probe_challenger = CircuitChallenger::<F, 16, 8>::new(&mut probe_builder);
@@ -915,7 +915,7 @@ mod tests {
 
         let poseidon_perm = Perm::new_from_rng_128(&mut SmallRng::seed_from_u64(99));
         let poseidon_config = crate::circuit::poseidon2::Poseidon2CircuitConfig::<F, 16>::from_rng(
-            8, 13, &mut SmallRng::seed_from_u64(99),
+            8, 13, 7, &mut SmallRng::seed_from_u64(99),
         );
         let step = crate::ivc::step::TrivialStepCircuit::new(1);
 
