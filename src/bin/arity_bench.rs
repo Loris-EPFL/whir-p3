@@ -31,8 +31,11 @@ use whir_p3::{
         accumulator::{
             FreshInstance, WarpAccumulator, WarpAccumulatorInstance, WarpAccumulatorWitness,
         },
-        encoding::{merkle_commit_codeword, rs_encode},
-        fold::{evaluate_bundled_r1cs, evaluate_mle_lsb, warp_fold_prove_rs_committed, RSEncodingConfig, WarpFoldResult},
+        encoding::{build_union_codeword, merkle_commit_codeword, rs_encode, union_folding_factor},
+        fold::{
+            derive_fold_challenges_union, evaluate_bundled_r1cs, evaluate_mle_lsb,
+            warp_fold_prove_rs_committed, warp_fold_prove_rs_union, RSEncodingConfig, WarpFoldResult,
+        },
     },
     poly::evals::EvaluationsList,
     spartan::{
@@ -343,6 +346,162 @@ fn run_fold_at_arity(
     (spartan_us, fold_us, num_fold_steps, soundness_ok)
 }
 
+/// Same as `run_fold_at_arity` but uses Quasar union commitment + union FS derivation.
+///
+/// The algebraic fold is identical — only the commitment layer and FS absorption differ.
+/// The prover commits all ℓ codewords into a single union Merkle tree, and the FS
+/// challenger absorbs 1 union root instead of ℓ individual roots.
+fn run_fold_at_arity_union(
+    shape: &R1CSShape<F>,
+    instance: &R1CSInstance<F>,
+    total_instances: usize,
+    arity: usize,
+    num_witness: usize,
+    log_code: usize,
+    log_m: usize,
+    num_inputs: usize,
+    verify: bool,
+) -> (f64, f64, usize, bool) {
+    let spartan = R1CSProver::new();
+    let dft = Radix2DFTSmallBatch::<F>::default();
+    let (mh, mc) = make_hc();
+    let rs_config = RSEncodingConfig::new(2, RS_LOG_INV_RATE);
+    let mut acc = make_zero_acc(num_witness, log_code, log_m, num_inputs);
+
+    let fresh_per_step = arity - 1;
+    let num_fold_steps = (total_instances + fresh_per_step - 1) / fresh_per_step;
+
+    let mut spartan_us = 0.0;
+    let mut fold_us = 0.0;
+    let mut soundness_ok = true;
+    let mut remaining = total_instances;
+
+    for step in 0..num_fold_steps {
+        let batch_size = remaining.min(fresh_per_step);
+
+        // Spartan-linearize batch_size instances (same as non-union)
+        let t1 = Instant::now();
+        let mut fresh_instances = Vec::with_capacity(batch_size);
+        for j in 0..batch_size {
+            let mut ch = make_challenger(step as u64 * 100 + j as u64 + 200);
+            let _ = spartan.prove::<EF, _>(instance, &mut ch);
+            let w = spartan.prepare_witness(instance);
+            let z = w.as_slice();
+            let pi = z[..num_inputs].to_vec();
+            let mut wpart = z[num_inputs..].to_vec();
+            wpart.resize(num_witness, F::ZERO);
+            fresh_instances.push(FreshInstance {
+                public_input: pi,
+                witness: wpart,
+            });
+        }
+        spartan_us += t1.elapsed().as_micros() as f64;
+
+        let t2 = Instant::now();
+
+        // RS-encode fresh witnesses to build the union codeword for FS
+        let fresh_codewords: Vec<Vec<F>> = fresh_instances
+            .iter()
+            .map(|fi| {
+                let wp = EvaluationsList::new(fi.witness.clone());
+                rs_encode(&wp, rs_config.folding_factor, rs_config.log_inv_rate, &dft)
+                    .as_slice()
+                    .to_vec()
+            })
+            .collect();
+
+        // Build the union codeword and compute its root for FS derivation.
+        // Include the accumulator's codeword at index 0, then fresh, then zero-padding.
+        let l = (1 + batch_size).next_power_of_two();
+        let code_len = acc.witness.codeword.as_slice().len();
+        let mut all_codewords: Vec<Vec<F>> = Vec::with_capacity(l);
+        all_codewords.push(acc.witness.codeword.as_slice().to_vec());
+        all_codewords.extend(fresh_codewords);
+        while all_codewords.len() < l {
+            all_codewords.push(vec![F::ZERO; code_len]);
+        }
+        let union_cw = build_union_codeword(&all_codewords);
+        let union_ff = union_folding_factor(rs_config.folding_factor, l);
+        let union_ev = EvaluationsList::new(union_cw);
+        let (union_root, _) = merkle_commit_codeword::<F, F, _, _, MyHash, MyCompress, DIGEST>(
+            &union_ev,
+            union_ff,
+            mh.clone(),
+            mc.clone(),
+        );
+
+        // Derive challenges using the union root — O(1) FS absorption instead of O(ℓ)
+        let mut fold_chal = make_challenger(77 + step as u64);
+        let (omega, tau, fresh_betas) = derive_fold_challenges_union(
+            &acc.instance.commitment_root,
+            acc.instance.eval_claim,
+            &acc.instance.eval_point,
+            acc.instance.pesat_target,
+            &union_root,
+            batch_size,
+            log_m,
+            &mut fold_chal,
+        );
+
+        let mhc = mh.clone();
+        let mcc = mc.clone();
+        let mh2 = mh.clone();
+        let mc2 = mc.clone();
+        let result = warp_fold_prove_rs_union(
+            shape,
+            &fresh_instances,
+            &acc,
+            omega,
+            &tau,
+            &fresh_betas,
+            &rs_config,
+            &dft,
+            |round_evals| {
+                for &e in round_evals {
+                    fold_chal.observe(e);
+                }
+                fold_chal.sample()
+            },
+            // commit_fn for the folded codeword
+            |cw, ff| {
+                let (root, _) = merkle_commit_codeword::<F, F, _, _, MyHash, MyCompress, DIGEST>(
+                    cw, ff, mhc.clone(), mcc.clone(),
+                );
+                root
+            },
+            // union_commit_fn — the union is already committed above for FS,
+            // but the fold function re-builds it internally for consistency.
+            // This closure commits the interleaved codeword.
+            |ucw, uff| {
+                let uev = EvaluationsList::new(ucw.to_vec());
+                let (root, _) = merkle_commit_codeword::<F, F, _, _, MyHash, MyCompress, DIGEST>(
+                    &uev, uff, mh2.clone(), mc2.clone(),
+                );
+                root
+            },
+        );
+        fold_us += t2.elapsed().as_micros() as f64;
+
+        // Verify soundness if requested
+        if verify && soundness_ok {
+            if let Err(e) = verify_fold_soundness(shape, &result, &acc) {
+                eprintln!("  SOUNDNESS ERROR (union) at step {step}, arity {arity}: {e}");
+                soundness_ok = false;
+            }
+            // Also verify the union root was set
+            if result.union_commitment_root.is_none() {
+                eprintln!("  SOUNDNESS ERROR (union) at step {step}: union root missing");
+                soundness_ok = false;
+            }
+        }
+
+        acc = rebuild_acc(&result);
+        remaining -= batch_size;
+    }
+
+    (spartan_us, fold_us, num_fold_steps, soundness_ok)
+}
+
 fn main() {
     let args: Vec<String> = env::args().collect();
     let sizes_str = args.get(1).map(|s| s.as_str()).unwrap_or("12,14");
@@ -385,6 +544,8 @@ fn main() {
             .trailing_zeros() as usize;
 
         let test_instances = 16;
+        println!("  {:>8} | {:>6} {:>6} | {:>10} {:>10}", "arity", "folds", "N", "warp", "union");
+        println!("  {}", "-".repeat(55));
         for &arity in &arities {
             let (_, _, fold_steps, ok) = run_fold_at_arity(
                 &shape,
@@ -395,12 +556,24 @@ fn main() {
                 log_code,
                 log_m,
                 num_inputs,
-                true, // verify soundness
+                true,
             );
-            let status = if ok { "PASS" } else { "FAIL" };
+            let (_, _, _, ok_union) = run_fold_at_arity_union(
+                &shape,
+                &instance,
+                test_instances,
+                arity,
+                num_witness,
+                log_code,
+                log_m,
+                num_inputs,
+                true,
+            );
+            let warp_status = if ok { "PASS" } else { "FAIL" };
+            let union_status = if ok_union { "PASS" } else { "FAIL" };
             println!(
-                "  arity={:<3} | {} instances -> {} fold steps | soundness: {}",
-                arity, test_instances, fold_steps, status,
+                "  {:>8} | {:>6} {:>6} | {:>10} {:>10}",
+                arity, fold_steps, test_instances, warp_status, union_status,
             );
         }
     }
@@ -437,13 +610,17 @@ fn main() {
             }
         };
 
-        // Collect all results first, then print
+        // Collect WARP (non-union) results
         // results_map[n_idx][arity_idx] = (fold_steps, spartan_us, fold_us, total_us)
         let mut results_map: Vec<Vec<(usize, f64, f64, f64)>> = Vec::new();
+        // Collect union results (same shape)
+        let mut union_results_map: Vec<Vec<(usize, f64, f64, f64)>> = Vec::new();
 
         for &total_instances in &instances_list {
             let mut row = Vec::new();
+            let mut union_row = Vec::new();
             for &arity in &arities {
+                // --- WARP (non-union) ---
                 let mut spartan_v = Vec::new();
                 let mut fold_v = Vec::new();
                 let mut total_v = Vec::new();
@@ -473,34 +650,65 @@ fn main() {
                 let fo = median(&mut fold_v);
                 let tot = median(&mut total_v);
                 row.push((fold_steps, sp, fo, tot));
+
+                // --- Union (Quasar multicast) ---
+                let mut u_spartan_v = Vec::new();
+                let mut u_fold_v = Vec::new();
+                let mut u_total_v = Vec::new();
+
+                for rep in 0..(repeats + 1) {
+                    let (sp, fo, _steps, _) = run_fold_at_arity_union(
+                        &shape,
+                        &instance,
+                        total_instances,
+                        arity,
+                        num_witness,
+                        log_code,
+                        log_m,
+                        num_inputs,
+                        false,
+                    );
+                    if rep > 0 {
+                        u_spartan_v.push(sp);
+                        u_fold_v.push(fo);
+                        u_total_v.push(sp + fo);
+                    }
+                }
+
+                let u_sp = median(&mut u_spartan_v);
+                let u_fo = median(&mut u_fold_v);
+                let u_tot = median(&mut u_total_v);
+                union_row.push((fold_steps, u_sp, u_fo, u_tot));
             }
             results_map.push(row);
+            union_results_map.push(union_row);
         }
 
-        // Print detailed table: one row per (N, arity) pair
+        // Print detailed comparison table: WARP vs Union per (N, arity)
         println!(
-            "  {:>6} {:>6} | {:>8} {:>12} {:>12} {:>12} {:>10} {:>8}",
-            "N", "arity", "folds", "spartan", "fold", "total", "/inst", "vs l=2",
+            "  {:>6} {:>6} | {:>6} {:>12} {:>12} {:>12} {:>10}",
+            "N", "arity", "folds", "warp_fold", "union_fold", "overhead", "vs l=2",
         );
-        println!("  {}", "-".repeat(90));
+        println!("  {}", "-".repeat(80));
 
         for (n_idx, &total_instances) in instances_list.iter().enumerate() {
-            let base_total = results_map[n_idx][0].3; // l=2 total
+            let base_total = results_map[n_idx][0].3; // l=2 WARP total
             for (a_idx, &arity) in arities.iter().enumerate() {
-                let (fold_steps, sp, fo, tot) = results_map[n_idx][a_idx];
-                let per_inst = tot / total_instances as f64;
+                let (fold_steps, _sp, fo, tot) = results_map[n_idx][a_idx];
+                let (_u_steps, _u_sp, u_fo, _u_tot) = union_results_map[n_idx][a_idx];
+                let overhead = if fo > 0.0 { u_fo / fo } else { 1.0 };
                 let speedup = base_total / tot;
                 println!(
-                    "  {:>6} {:>6} | {:>8} {:>12} {:>12} {:>12} {:>10} {:>7.2}x",
+                    "  {:>6} {:>6} | {:>6} {:>12} {:>12} {:>11.2}x {:>9.2}x",
                     total_instances, arity, fold_steps,
-                    fmt(sp), fmt(fo), fmt(tot), fmt(per_inst), speedup,
+                    fmt(fo), fmt(u_fo), overhead, speedup,
                 );
             }
             println!();
         }
 
-        // Compact speedup summary
-        println!("  Speedup summary (total time, higher = better):");
+        // Compact speedup summary (WARP only, for higher-arity benefit)
+        println!("  Speedup summary (WARP total time, higher = better):");
         println!(
             "  {:>6} | {:>10} {:>10} {:>10} {:>10}",
             "N", "l=2", "l=4", "l=8", "l=16",
@@ -516,14 +724,36 @@ fn main() {
             println!();
         }
         println!();
+
+        // Union overhead summary (prover cost ratio: union_fold / warp_fold)
+        println!("  Union prover overhead (fold time ratio, ~1.0 = no extra cost):");
+        println!(
+            "  {:>6} | {:>10} {:>10} {:>10} {:>10}",
+            "N", "l=2", "l=4", "l=8", "l=16",
+        );
+        println!("  {}", "-".repeat(50));
+        for (n_idx, &total_instances) in instances_list.iter().enumerate() {
+            print!("  {:>6} |", total_instances);
+            for a_idx in 0..arities.len() {
+                let warp_fo = results_map[n_idx][a_idx].2;
+                let union_fo = union_results_map[n_idx][a_idx].2;
+                let overhead = if warp_fo > 0.0 { union_fo / warp_fo } else { 1.0 };
+                print!(" {:>9.2}x", overhead);
+            }
+            println!();
+        }
+        println!();
     }
 
     println!("Legend:");
-    println!("  N         = Total computation instances to process");
-    println!("  l=X folds = Number of fold steps (ceil(N/(l-1)))");
-    println!("  spartan   = Total Spartan linearization time");
-    println!("  fold      = Total WARP fold time (RS encode + Merkle + twin-sumcheck + shift + OOD + eval-batch)");
-    println!("  total     = spartan + fold");
-    println!("  /inst     = Total time per computation instance");
-    println!("  spdup     = Speedup over l=2 (l=2 total / l=X total)");
+    println!("  N          = Total computation instances to process");
+    println!("  folds      = Number of fold steps (ceil(N/(l-1)))");
+    println!("  warp_fold  = Total WARP fold time (per-codeword Merkle commits, O(l) FS absorption)");
+    println!("  union_fold = Total Quasar union fold time (single union Merkle commit, O(1) FS absorption)");
+    println!("  overhead   = union_fold / warp_fold (prover cost ratio, ~1.0 expected)");
+    println!("  vs l=2     = Speedup over l=2 baseline (WARP total time)");
+    println!();
+    println!("Note: The union (Quasar multicast) benefits the VERIFIER, not the prover.");
+    println!("  The verifier absorbs 1 union root instead of l individual roots (sublinear FS).");
+    println!("  This overhead column validates that the prover pays ~no extra cost for the union.");
 }

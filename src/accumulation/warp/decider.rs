@@ -126,6 +126,56 @@ pub fn warp_decide_algebraic_rs<F: Field>(
     Ok(())
 }
 
+/// Full algebraic decider for RS-encoded accumulators: all 3 WARP conditions.
+///
+/// Checks:
+/// 1. **Eval claim**: f̂(α) = μ
+/// 2. **PESAT satisfaction**: P*(β, z) = η
+/// 3. **Codeword validity**: f = RS_encode(w) (re-encodes witness and compares)
+///
+/// This is the complete terminal check per the WARP paper's decider D_ACC.
+/// Use this at the end of the IVC chain before generating the succinct WHIR proof.
+pub fn warp_decide_full_rs<F, Dft>(
+    shape: &R1CSShape<F>,
+    acc: &WarpAccumulator<F, F, F, 8>,
+    folding_factor: usize,
+    log_inv_rate: usize,
+    dft: &Dft,
+) -> Result<(), WarpDeciderError>
+where
+    F: p3_field::TwoAdicField + p3_field::PrimeField64,
+    Dft: p3_dft::TwoAdicSubgroupDft<F>,
+{
+    // Check 1: Evaluation claim f̂(α) = μ
+    let computed_mu = super::fold::evaluate_mle_lsb(
+        &acc.witness.codeword,
+        &acc.instance.eval_point,
+    );
+    if computed_mu != acc.instance.eval_claim {
+        return Err(WarpDeciderError::EvaluationClaimFailed);
+    }
+
+    // Check 2: PESAT satisfaction P*(β, z) = η
+    let z = build_z_vector(&acc.instance.pesat_x, &acc.witness.witness);
+    let computed_eta = evaluate_bundled_r1cs(shape, &acc.instance.pesat_tau, &z);
+    if computed_eta != acc.instance.pesat_target {
+        return Err(WarpDeciderError::PesatSatisfactionFailed);
+    }
+
+    // Check 3: Codeword validity f = RS_encode(w)
+    // Witness must be padded to power-of-2 for RS encoding (same as fold pipeline).
+    let wit_len = acc.witness.witness.len().next_power_of_two();
+    let mut wit_padded = acc.witness.witness.clone();
+    wit_padded.resize(wit_len, F::ZERO);
+    let witness_poly = crate::poly::evals::EvaluationsList::new(wit_padded);
+    let expected_codeword = super::encoding::rs_encode(&witness_poly, folding_factor, log_inv_rate, dft);
+    if expected_codeword.as_slice() != acc.witness.codeword.as_slice() {
+        return Err(WarpDeciderError::CodewordValidityFailed);
+    }
+
+    Ok(())
+}
+
 /// Verify the decider conditions using only the public instance + claimed values.
 ///
 /// This is the verifier-side check. It cannot check the evaluation claim or

@@ -89,13 +89,160 @@ pub struct ShiftQueryOpening<F: Field, const DIGEST_ELEMS: usize = 8> {
     pub expected_folded: Vec<F>,
 }
 
+/// Materialize Merkle authentication paths for shift query openings.
+///
+/// After the fold, the shift queries have positions and values but empty
+/// `auth_paths`. This function rebuilds the Merkle tree for each input
+/// codeword and opens at each query position, populating the auth paths.
+///
+/// Used by the CP-SNARK pipeline to commit shift query proofs for deferred
+/// terminal verification, avoiding in-circuit Poseidon2 Merkle verification.
+///
+/// # Type parameters
+/// In all our usage, `W = F` (the base field is its own packed value).
+/// The Merkle proof type is `Vec<[F; DIGEST_ELEMS]>`, matching `ShiftQueryOpening.auth_paths`.
+pub fn materialize_shift_query_proofs<F, H, C, const DIGEST_ELEMS: usize>(
+    shift_queries: &mut [ShiftQueryOpening<F, DIGEST_ELEMS>],
+    input_codewords: &[Vec<F>],
+    folding_factor: usize,
+    merkle_hash: &H,
+    merkle_compress: &C,
+) where
+    F: p3_field::TwoAdicField,
+    <F as p3_field::Field>::Packing: Eq + Send + Sync,
+    H: p3_symmetric::CryptographicHasher<F, [F; DIGEST_ELEMS]>
+        + p3_symmetric::CryptographicHasher<<F as p3_field::Field>::Packing, [<F as p3_field::Field>::Packing; DIGEST_ELEMS]>
+        + Sync
+        + Clone,
+    C: p3_symmetric::PseudoCompressionFunction<[F; DIGEST_ELEMS], 2>
+        + p3_symmetric::PseudoCompressionFunction<[<F as p3_field::Field>::Packing; DIGEST_ELEMS], 2>
+        + Sync
+        + Clone,
+    [F; DIGEST_ELEMS]: serde::Serialize + for<'de> serde::Deserialize<'de>,
+{
+    if shift_queries.is_empty() {
+        return;
+    }
+
+    // Build Merkle trees for each input codeword
+    let trees: Vec<_> = input_codewords
+        .iter()
+        .map(|cw| {
+            let cw_evals = crate::poly::evals::EvaluationsList::new(cw.clone());
+            let (_root, tree) = super::encoding::merkle_commit_codeword::<
+                F, F, <F as p3_field::Field>::Packing, <F as p3_field::Field>::Packing, H, C, DIGEST_ELEMS,
+            >(&cw_evals, folding_factor, merkle_hash.clone(), merkle_compress.clone());
+            tree
+        })
+        .collect();
+
+    // For each shift query, open each tree at the query position
+    for sq in shift_queries.iter_mut() {
+        let mut paths = Vec::with_capacity(trees.len());
+        for tree in &trees {
+            let (_row_values, proof) = super::encoding::merkle_open_at::<
+                F, F, <F as p3_field::Field>::Packing, <F as p3_field::Field>::Packing, H, C, DIGEST_ELEMS,
+            >(tree, sq.position, merkle_hash.clone(), merkle_compress.clone());
+            // proof: Vec<[F; DIGEST_ELEMS]> — directly compatible with auth_paths
+            paths.push(proof);
+        }
+        sq.auth_paths = paths;
+    }
+}
+
+/// Open shift query authentication paths from pre-built Merkle trees.
+///
+/// Like [`materialize_shift_query_proofs`] but takes **already-constructed** trees
+/// instead of rebuilding them. This avoids redundant O(n) Merkle tree construction
+/// per input codeword — the trees are built once at the IVC layer and reused here.
+///
+/// The trees must correspond to the input codewords in the same order as the fold
+/// processed them: `[running_acc, fresh_0, ..., fresh_{l-2}, padding...]`.
+/// RS encoding is deterministic, so trees built from the same witnesses produce
+/// identical roots and auth paths regardless of when they are constructed.
+pub fn open_shift_queries_from_trees<F, H, C, const DIGEST_ELEMS: usize>(
+    shift_queries: &mut [ShiftQueryOpening<F, DIGEST_ELEMS>],
+    trees: &[p3_merkle_tree::MerkleTree<F, F, p3_matrix::dense::RowMajorMatrix<F>, DIGEST_ELEMS>],
+    merkle_hash: &H,
+    merkle_compress: &C,
+) where
+    F: p3_field::TwoAdicField,
+    <F as p3_field::Field>::Packing: Eq + Send + Sync,
+    H: p3_symmetric::CryptographicHasher<F, [F; DIGEST_ELEMS]>
+        + p3_symmetric::CryptographicHasher<<F as p3_field::Field>::Packing, [<F as p3_field::Field>::Packing; DIGEST_ELEMS]>
+        + Sync
+        + Clone,
+    C: p3_symmetric::PseudoCompressionFunction<[F; DIGEST_ELEMS], 2>
+        + p3_symmetric::PseudoCompressionFunction<[<F as p3_field::Field>::Packing; DIGEST_ELEMS], 2>
+        + Sync
+        + Clone,
+    [F; DIGEST_ELEMS]: serde::Serialize + for<'de> serde::Deserialize<'de>,
+{
+    for sq in shift_queries.iter_mut() {
+        let mut paths = Vec::with_capacity(trees.len());
+        for tree in trees {
+            let (_row_values, proof) = super::encoding::merkle_open_at::<
+                F, F, <F as p3_field::Field>::Packing, <F as p3_field::Field>::Packing, H, C, DIGEST_ELEMS,
+            >(tree, sq.position, merkle_hash.clone(), merkle_compress.clone());
+            paths.push(proof);
+        }
+        sq.auth_paths = paths;
+    }
+}
+
+/// Open shift query authentication paths from the Quasar **union Merkle tree**.
+///
+/// Per Quasar §4, the union commitment C∪ replaces individual codeword
+/// commitments. The union codeword interleaves all ℓ input codewords:
+/// `union[p*l + i] = codewords[i][p]`. With `union_ff = base_ff + log₂(l)`,
+/// each row of the union tree contains all ℓ codewords' values at one position.
+/// Opening the union tree at row `p` gives all values needed for the shift query
+/// at position `p` — ONE auth path covers ALL inputs.
+///
+/// After this call, each shift query's `auth_paths` has **1 entry** (the single
+/// union auth path), not ℓ entries. The terminal verifier reconstructs the union
+/// row from the per-codeword `input_values` and verifies against the union root.
+pub fn open_shift_queries_from_union_tree<F, H, C, const DIGEST_ELEMS: usize>(
+    shift_queries: &mut [ShiftQueryOpening<F, DIGEST_ELEMS>],
+    union_tree: &p3_merkle_tree::MerkleTree<F, F, p3_matrix::dense::RowMajorMatrix<F>, DIGEST_ELEMS>,
+    merkle_hash: &H,
+    merkle_compress: &C,
+) where
+    F: p3_field::TwoAdicField,
+    <F as p3_field::Field>::Packing: Eq + Send + Sync,
+    H: p3_symmetric::CryptographicHasher<F, [F; DIGEST_ELEMS]>
+        + p3_symmetric::CryptographicHasher<<F as p3_field::Field>::Packing, [<F as p3_field::Field>::Packing; DIGEST_ELEMS]>
+        + Sync
+        + Clone,
+    C: p3_symmetric::PseudoCompressionFunction<[F; DIGEST_ELEMS], 2>
+        + p3_symmetric::PseudoCompressionFunction<[<F as p3_field::Field>::Packing; DIGEST_ELEMS], 2>
+        + Sync
+        + Clone,
+    [F; DIGEST_ELEMS]: serde::Serialize + for<'de> serde::Deserialize<'de>,
+{
+    for sq in shift_queries.iter_mut() {
+        // Open the union tree at the query position — one opening covers all ℓ inputs
+        let (_union_row, union_proof) = super::encoding::merkle_open_at::<
+            F, F, <F as p3_field::Field>::Packing, <F as p3_field::Field>::Packing, H, C, DIGEST_ELEMS,
+        >(union_tree, sq.position, merkle_hash.clone(), merkle_compress.clone());
+        // Store as single entry: 1 auth path for the union tree
+        sq.auth_paths = vec![union_proof];
+    }
+}
+
 /// Result of a WARP fold step.
 #[derive(Clone, Debug)]
 pub struct WarpFoldResult<F: Field, const DIGEST_ELEMS: usize = 8> {
     /// Merkle root of the folded codeword (zero if not committed).
     pub commitment_root: [F; DIGEST_ELEMS],
     /// Merkle roots of the fresh input codewords (empty if not committed).
+    /// When `union_commitment_root` is set, this is empty (union replaces individual roots).
     pub fresh_commitment_roots: Vec<[F; DIGEST_ELEMS]>,
+    /// Merkle root of the union codeword (Quasar multicast).
+    /// When set, replaces `fresh_commitment_roots`: the verifier absorbs this single
+    /// root instead of ℓ individual roots, achieving sublinear FS absorption.
+    /// The union codeword interleaves all ℓ input codewords in column-major order.
+    pub union_commitment_root: Option<[F; DIGEST_ELEMS]>,
     /// The output accumulator instance (public).
     pub instance: WarpFoldedInstance<F>,
     /// The output accumulator witness (prover only).
@@ -182,6 +329,126 @@ pub fn build_z_vector<F: Field>(public_input: &[F], witness: &[F]) -> Vec<F> {
     z.extend_from_slice(public_input);
     z.extend_from_slice(witness);
     z
+}
+
+/// Fiat-Shamir challenge derivation for the WARP fold (per-codeword roots).
+///
+/// Absorbs the running accumulator instance and ℓ fresh instance roots into
+/// the challenger, then samples (omega, tau, fresh_betas).
+///
+/// The verifier cost is **O(ℓ)** — linear in the number of fresh instances —
+/// because each fresh root, eval claim, eval point, and PESAT target are
+/// individually absorbed. For sublinear verifier cost, use
+/// `derive_fold_challenges_union` instead.
+///
+/// # Returns
+/// `(omega, tau, fresh_betas)` where:
+/// - `omega`: batching challenge combining codeword proximity + R1CS
+/// - `tau`: log_l challenges for the eq polynomial in twin-constraint sumcheck
+/// - `fresh_betas`: PESAT points for each fresh instance (log_m elements each)
+pub fn derive_fold_challenges<F, C>(
+    acc_root: &[F],
+    acc_eval_claim: F,
+    acc_eval_point: &[F],
+    acc_pesat_target: F,
+    fresh_roots: &[[F; 8]],
+    log_code: usize,
+    log_m: usize,
+    chal: &mut C,
+) -> (F, Vec<F>, Vec<Vec<F>>)
+where
+    F: Field,
+    C: p3_challenger::CanObserve<F> + p3_challenger::CanSample<F>,
+{
+    let num_fresh = fresh_roots.len();
+    let l = (1 + num_fresh).next_power_of_two();
+    let log_l = l.trailing_zeros() as usize;
+
+    // Observe running accumulator
+    for &val in acc_root {
+        chal.observe(val);
+    }
+    chal.observe(acc_eval_claim);
+    for &val in acc_eval_point {
+        chal.observe(val);
+    }
+    chal.observe(acc_pesat_target);
+
+    // Observe each fresh instance — O(ℓ) absorptions
+    for root in fresh_roots {
+        for &val in root {
+            chal.observe(val);
+        }
+        chal.observe(F::ZERO); // fresh eval_claim (zero for new instances)
+        for _ in 0..log_code {
+            chal.observe(F::ZERO); // fresh eval_point (zero)
+        }
+        chal.observe(F::ZERO); // fresh pesat_target (zero)
+    }
+
+    // Sample challenges
+    let omega: F = chal.sample();
+    let tau: Vec<F> = (0..log_l).map(|_| chal.sample()).collect();
+    let fresh_betas: Vec<Vec<F>> = (0..num_fresh)
+        .map(|_| (0..log_m).map(|_| chal.sample()).collect())
+        .collect();
+
+    (omega, tau, fresh_betas)
+}
+
+/// Fiat-Shamir challenge derivation for the WARP fold (Quasar union root).
+///
+/// Absorbs the running accumulator instance and a **single** union commitment
+/// root into the challenger, then samples (omega, tau, fresh_betas).
+///
+/// The verifier cost is **O(1)** in commitment absorptions — sublinear in ℓ.
+/// The union root replaces the ℓ individual fresh roots. The challenger still
+/// samples ℓ−1 fresh_betas (O(ℓ·log_m) field operations), which is unavoidable.
+///
+/// # Soundness
+/// The union root commits to the column-major interleaving of all ℓ codewords
+/// BEFORE the challenges are derived. This binding prevents the prover from
+/// adapting the codewords to the challenges after seeing them.
+pub fn derive_fold_challenges_union<F, C>(
+    acc_root: &[F],
+    acc_eval_claim: F,
+    acc_eval_point: &[F],
+    acc_pesat_target: F,
+    union_root: &[F],
+    num_fresh: usize,
+    log_m: usize,
+    chal: &mut C,
+) -> (F, Vec<F>, Vec<Vec<F>>)
+where
+    F: Field,
+    C: p3_challenger::CanObserve<F> + p3_challenger::CanSample<F>,
+{
+    let l = (1 + num_fresh).next_power_of_two();
+    let log_l = l.trailing_zeros() as usize;
+
+    // Observe running accumulator
+    for &val in acc_root {
+        chal.observe(val);
+    }
+    chal.observe(acc_eval_claim);
+    for &val in acc_eval_point {
+        chal.observe(val);
+    }
+    chal.observe(acc_pesat_target);
+
+    // Observe the union commitment root — O(1) instead of O(ℓ)
+    for &val in union_root {
+        chal.observe(val);
+    }
+
+    // Sample challenges (same structure as non-union)
+    let omega: F = chal.sample();
+    let tau: Vec<F> = (0..log_l).map(|_| chal.sample()).collect();
+    let fresh_betas: Vec<Vec<F>> = (0..num_fresh)
+        .map(|_| (0..log_m).map(|_| chal.sample()).collect())
+        .collect();
+
+    (omega, tau, fresh_betas)
 }
 
 /// Run the WARP fold prover.
@@ -365,11 +632,15 @@ pub fn warp_fold_prove<F: Field>(
         })
         .collect();
 
+    // Pad z to num_vars_y to accommodate the constant "1" slot and public input
+    // positions in the matrix's column layout (num_vars_y = 1 << shape.num_poly_vars_y()).
+    let num_vars_y_fresh = 1usize << shape.num_poly_vars_y();
     let fresh_pesat_targets: Vec<F> = fresh_instances
         .iter()
         .enumerate()
         .map(|(i, inst)| {
-            let z = build_z_vector(&inst.public_input, &inst.witness);
+            let mut z = build_z_vector(&inst.public_input, &inst.witness);
+            z.resize(num_vars_y_fresh, F::ZERO);
             let beta = if i < fresh_betas.len() {
                 &fresh_betas[i]
             } else {
@@ -382,6 +653,7 @@ pub fn warp_fold_prove<F: Field>(
     WarpFoldResult {
         commitment_root: [F::ZERO; 8],
         fresh_commitment_roots: vec![],
+        union_commitment_root: None,
         instance,
         witness,
         sumcheck_round_polys: round_polys,
@@ -421,7 +693,9 @@ where
 {
     warp_fold_prove_rs_inner(
         shape, fresh_instances, acc, omega, tau_challenges, fresh_betas,
-        rs_config, dft, &mut transcript_round, None::<fn(&crate::poly::evals::EvaluationsList<F>, usize) -> [F; 8]>,
+        rs_config, dft, &mut transcript_round,
+        None::<fn(&crate::poly::evals::EvaluationsList<F>, usize) -> [F; 8]>,
+        None::<fn(&[F], usize) -> [F; 8]>,
     )
 }
 
@@ -449,6 +723,7 @@ where
     warp_fold_prove_rs_inner(
         shape, fresh_instances, acc, omega, tau_challenges, fresh_betas,
         rs_config, dft, &mut transcript_round, Some(commit_fn),
+        None::<fn(&[F], usize) -> [F; 8]>,
     )
 }
 
@@ -606,6 +881,38 @@ fn evaluation_batching_sumcheck<F: Field>(
     (new_eval_point, new_eval_claim, round_polys, challenges)
 }
 
+/// WARP fold prover with RS encoding, Merkle commitment, and Quasar union commitment.
+///
+/// Same as `warp_fold_prove_rs_committed` but additionally builds a column-major
+/// union codeword from all ℓ input codewords, commits it to a single Merkle tree,
+/// and uses it for shift query verification. The verifier only needs to absorb
+/// 1 union root instead of ℓ fresh roots (sublinear Fiat-Shamir absorption).
+///
+/// The `union_commit_fn` receives the flat union codeword and the union folding
+/// factor, and returns a Merkle root.
+pub fn warp_fold_prove_rs_union<F, Dft>(
+    shape: &R1CSShape<F>,
+    fresh_instances: &[FreshInstance<F>],
+    acc: &WarpAccumulator<F, F, F, 8>,
+    omega: F,
+    tau_challenges: &[F],
+    fresh_betas: &[Vec<F>],
+    rs_config: &RSEncodingConfig,
+    dft: &Dft,
+    mut transcript_round: impl FnMut(&[F]) -> F,
+    commit_fn: impl Fn(&crate::poly::evals::EvaluationsList<F>, usize) -> [F; 8],
+    union_commit_fn: impl Fn(&[F], usize) -> [F; 8],
+) -> WarpFoldResult<F>
+where
+    F: TwoAdicField + PrimeField64,
+    Dft: TwoAdicSubgroupDft<F>,
+{
+    warp_fold_prove_rs_inner(
+        shape, fresh_instances, acc, omega, tau_challenges, fresh_betas,
+        rs_config, dft, &mut transcript_round, Some(commit_fn), Some(union_commit_fn),
+    )
+}
+
 fn warp_fold_prove_rs_inner<F, Dft>(
     shape: &R1CSShape<F>,
     fresh_instances: &[FreshInstance<F>],
@@ -617,6 +924,7 @@ fn warp_fold_prove_rs_inner<F, Dft>(
     dft: &Dft,
     transcript_round: &mut impl FnMut(&[F]) -> F,
     commit_fn: Option<impl Fn(&crate::poly::evals::EvaluationsList<F>, usize) -> [F; 8]>,
+    union_commit_fn: Option<impl Fn(&[F], usize) -> [F; 8]>,
 ) -> WarpFoldResult<F>
 where
     F: TwoAdicField + PrimeField64,
@@ -660,13 +968,18 @@ where
     let mut codewords: Vec<Vec<F>> = Vec::with_capacity(l);
     codewords.push(acc.witness.codeword.as_slice().to_vec());
 
+    let use_union = union_commit_fn.is_some();
+
+    // RS-encode fresh witnesses. When NOT using union, commit each individually.
     let mut fresh_commitment_roots = Vec::new();
     for inst in fresh_instances {
         let witness_poly = crate::poly::evals::EvaluationsList::new(inst.witness.clone());
         let cw = rs_encode(&witness_poly, rs_config.folding_factor, rs_config.log_inv_rate, dft);
-        // Commit fresh codeword if commit function provided
-        if let Some(ref f) = commit_fn {
-            fresh_commitment_roots.push(f(&cw, rs_config.folding_factor));
+        // Commit fresh codeword individually only when NOT using union commitment
+        if !use_union {
+            if let Some(ref f) = commit_fn {
+                fresh_commitment_roots.push(f(&cw, rs_config.folding_factor));
+            }
         }
         codewords.push(cw.as_slice().to_vec());
     }
@@ -674,12 +987,27 @@ where
         codewords.push(vec![F::ZERO; code_len]);
     }
 
+    // Build and commit the union codeword (Quasar multicast) when enabled.
+    // Column-major interleaving: union[p*l + i] = codewords[i][p]
+    // This replaces the ℓ individual roots with a single union root.
+    let union_commitment_root = if let Some(ref ucf) = union_commit_fn {
+        let union_cw = super::encoding::build_union_codeword(&codewords);
+        let union_ff = super::encoding::union_folding_factor(rs_config.folding_factor, l);
+        Some(ucf(&union_cw, union_ff))
+    } else {
+        None
+    };
+
     #[cfg(feature = "bench-timing")]
     {
         timings.rs_encode_us = _phase_start.elapsed().as_micros() as u64;
     }
 
-    // Save original codewords for shift query verification (before sumcheck consumes them)
+    // Save original codewords for shift query verification (before sumcheck consumes them).
+    // With union mode, the shift queries read from the union codeword instead of
+    // individual saved codewords, but the per-codeword values are the same —
+    // just reorganized. We still need the per-codeword vectors for building the
+    // union column at query time.
     #[cfg(feature = "bench-timing")]
     let _phase_start = std::time::Instant::now();
     let saved_codewords = if num_shift_queries > 0 {
@@ -792,11 +1120,15 @@ where
     // Captured before the sumcheck consumed the codeword tables.
     let fresh_eval_claims = fresh_codeword_first_elems;
 
+    // Pad z to num_vars_y to accommodate the constant "1" slot and public input
+    // positions in the matrix's column layout (num_vars_y = 1 << shape.num_poly_vars_y()).
+    let num_vars_y_fresh = 1usize << shape.num_poly_vars_y();
     let fresh_pesat_targets: Vec<F> = fresh_instances
         .iter()
         .enumerate()
         .map(|(i, inst)| {
-            let z = build_z_vector(&inst.public_input, &inst.witness);
+            let mut z = build_z_vector(&inst.public_input, &inst.witness);
+            z.resize(num_vars_y_fresh, F::ZERO);
             let beta = if i < fresh_betas.len() {
                 &fresh_betas[i]
             } else {
@@ -1010,6 +1342,7 @@ where
     WarpFoldResult {
         commitment_root,
         fresh_commitment_roots,
+        union_commitment_root,
         instance, witness,
         sumcheck_round_polys: round_polys,
         sumcheck_challenges: challenges,
@@ -1908,5 +2241,284 @@ mod tests {
                 result.witness,
             );
         }
+    }
+
+    /// Test that `warp_fold_prove_rs_union` produces a valid fold result
+    /// with a union commitment root and no individual fresh roots.
+    #[test]
+    fn warp_fold_union_produces_union_root() {
+        use p3_baby_bear::Poseidon2BabyBear;
+        use p3_symmetric::{PaddingFreeSponge, TruncatedPermutation};
+        use rand::{rngs::SmallRng, SeedableRng};
+
+        type Perm = Poseidon2BabyBear<16>;
+        type MyHash = PaddingFreeSponge<Perm, 16, 8, 8>;
+        type MyCompress = TruncatedPermutation<Perm, 2, 8, 16>;
+        const DIGEST: usize = 8;
+
+        let perm = Perm::new_from_rng_128(&mut SmallRng::seed_from_u64(42));
+        let hash = MyHash::new(perm.clone());
+        let compress = MyCompress::new(perm);
+        let dft = p3_dft::Radix2DFTSmallBatch::<F>::default();
+
+        let shape = make_square_shape();
+        let num_vars_y = 1 << shape.num_poly_vars_y();
+        let rs_config = RSEncodingConfig::new(2, 1);
+        let code_len = num_vars_y << rs_config.log_inv_rate;
+        let log_m = shape.num_cons().next_power_of_two().trailing_zeros() as usize;
+
+        let acc = make_initial_accumulator(code_len, log_m);
+
+        // 3 fresh instances → l=4 (1 acc + 3 fresh, padded to 4)
+        // Witnesses must be padded to num_vars_y (= 2*num_vars = 8 for this shape)
+        // so that RS encoding produces codewords of size code_len.
+        let nvy = num_vars_y;
+        let make_witness = |root: u64| {
+            let mut w = vec![F::from_u64(root), F::from_u64(root * root), F::ZERO, F::ZERO];
+            w.resize(nvy, F::ZERO);
+            w
+        };
+        let fresh = vec![
+            FreshInstance { public_input: vec![F::ZERO; 2], witness: make_witness(2) },
+            FreshInstance { public_input: vec![F::ZERO; 2], witness: make_witness(3) },
+            FreshInstance { public_input: vec![F::ZERO; 2], witness: make_witness(5) },
+        ];
+
+        let l = (1 + fresh.len()).next_power_of_two();
+        let log_l = l.trailing_zeros() as usize;
+        let tau = vec![F::from_u64(7), F::from_u64(13)]; // log_l = 2
+        assert_eq!(tau.len(), log_l);
+        let omega = F::from_u64(5);
+        let fresh_betas: Vec<Vec<F>> = (0..fresh.len())
+            .map(|i| vec![F::from_u64(100 + i as u64); log_m])
+            .collect();
+
+        let mut counter = 0u64;
+        let h = hash.clone();
+        let c = compress.clone();
+        let h2 = hash.clone();
+        let c2 = compress.clone();
+        let result = warp_fold_prove_rs_union(
+            &shape,
+            &fresh,
+            &acc,
+            omega,
+            &tau,
+            &fresh_betas,
+            &rs_config,
+            &dft,
+            |_round_evals| {
+                counter += 1;
+                F::from_u64(counter + 500)
+            },
+            // commit_fn for the folded codeword
+            |cw, ff| {
+                let (root, _) = crate::accumulation::warp::encoding::merkle_commit_codeword::<
+                    F, F,
+                    <F as p3_field::Field>::Packing, <F as p3_field::Field>::Packing,
+                    MyHash, MyCompress, DIGEST,
+                >(cw, ff, h.clone(), c.clone());
+                root
+            },
+            // union_commit_fn for the interleaved union codeword
+            |union_cw, union_ff| {
+                let union_ev = crate::poly::evals::EvaluationsList::new(union_cw.to_vec());
+                let (root, _) = crate::accumulation::warp::encoding::merkle_commit_codeword::<
+                    F, F,
+                    <F as p3_field::Field>::Packing, <F as p3_field::Field>::Packing,
+                    MyHash, MyCompress, DIGEST,
+                >(&union_ev, union_ff, h2.clone(), c2.clone());
+                root
+            },
+        );
+
+        // Union root should be set
+        assert!(
+            result.union_commitment_root.is_some(),
+            "union path should produce a union root"
+        );
+        let union_root = result.union_commitment_root.unwrap();
+        assert_ne!(union_root, [F::ZERO; DIGEST], "union root should be nonzero");
+
+        // Individual fresh roots should be empty (replaced by union)
+        assert!(
+            result.fresh_commitment_roots.is_empty(),
+            "union path should NOT produce individual fresh roots"
+        );
+
+        // Folded commitment root should still be set
+        assert_ne!(
+            result.commitment_root,
+            [F::ZERO; DIGEST],
+            "folded codeword root should be nonzero"
+        );
+
+        // The fold result should still be algebraically valid
+        assert_eq!(result.sumcheck_round_polys.len(), log_l);
+        assert_eq!(result.sumcheck_challenges.len(), log_l);
+
+        // Decider should accept the folded accumulator
+        let eval_claim = evaluate_mle_lsb(
+            &result.witness.codeword,
+            &result.instance.eval_point,
+        );
+        let final_acc = WarpAccumulator::new(
+            WarpAccumulatorInstance {
+                commitment_root: result.commitment_root,
+                eval_point: result.instance.eval_point,
+                eval_claim,
+                pesat_tau: result.instance.pesat_tau,
+                pesat_x: result.instance.pesat_x,
+                pesat_target: result.instance.pesat_target,
+            },
+            result.witness,
+        );
+        // Use the RS decider (skips codeword validity check, deferred to WHIR)
+        let decide = crate::accumulation::warp::decider::warp_decide_algebraic_rs(&shape, &final_acc);
+        assert!(decide.is_ok(), "decider should accept union fold: {decide:?}");
+    }
+
+    /// Test that union fold and non-union fold produce identical algebraic
+    /// results (same folded witness, same eval point, same PESAT target).
+    /// Only the commitment roots differ.
+    #[test]
+    fn warp_fold_union_matches_non_union_algebra() {
+        use p3_baby_bear::Poseidon2BabyBear;
+        use p3_symmetric::{PaddingFreeSponge, TruncatedPermutation};
+        use rand::{rngs::SmallRng, SeedableRng};
+
+        type Perm = Poseidon2BabyBear<16>;
+        type MyHash = PaddingFreeSponge<Perm, 16, 8, 8>;
+        type MyCompress = TruncatedPermutation<Perm, 2, 8, 16>;
+        const DIGEST: usize = 8;
+
+        let perm = Perm::new_from_rng_128(&mut SmallRng::seed_from_u64(42));
+        let hash = MyHash::new(perm.clone());
+        let compress = MyCompress::new(perm);
+        let dft = p3_dft::Radix2DFTSmallBatch::<F>::default();
+
+        let shape = make_square_shape();
+        let num_vars_y = 1 << shape.num_poly_vars_y();
+        let rs_config = RSEncodingConfig::new(2, 1);
+        let code_len = num_vars_y << rs_config.log_inv_rate;
+        let log_m = shape.num_cons().next_power_of_two().trailing_zeros() as usize;
+
+        let acc = make_initial_accumulator(code_len, log_m);
+
+        let nvy = num_vars_y;
+        let make_w = |root: u64| {
+            let mut w = vec![F::from_u64(root), F::from_u64(root * root), F::ZERO, F::ZERO];
+            w.resize(nvy, F::ZERO);
+            w
+        };
+        let fresh = vec![
+            FreshInstance { public_input: vec![F::ZERO; 2], witness: make_w(3) },
+            FreshInstance { public_input: vec![F::ZERO; 2], witness: make_w(7) },
+            FreshInstance { public_input: vec![F::ZERO; 2], witness: make_w(11) },
+        ];
+        let tau = vec![F::from_u64(17), F::from_u64(19)];
+        let omega = F::from_u64(3);
+        let fresh_betas: Vec<Vec<F>> = (0..fresh.len())
+            .map(|i| vec![F::from_u64(200 + i as u64); log_m])
+            .collect();
+
+        // Run non-union path
+        let mut counter1 = 0u64;
+        let h1 = hash.clone();
+        let c1 = compress.clone();
+        let result_non_union = warp_fold_prove_rs_committed(
+            &shape, &fresh, &acc, omega, &tau, &fresh_betas, &rs_config, &dft,
+            |_| { counter1 += 1; F::from_u64(counter1 + 500) },
+            |cw, ff| {
+                let (root, _) = crate::accumulation::warp::encoding::merkle_commit_codeword::<
+                    F, F,
+                    <F as p3_field::Field>::Packing, <F as p3_field::Field>::Packing,
+                    MyHash, MyCompress, DIGEST,
+                >(cw, ff, h1.clone(), c1.clone());
+                root
+            },
+        );
+
+        // Run union path with same FS seed
+        let mut counter2 = 0u64;
+        let h2 = hash.clone();
+        let c2 = compress.clone();
+        let h3 = hash.clone();
+        let c3 = compress.clone();
+        let result_union = warp_fold_prove_rs_union(
+            &shape, &fresh, &acc, omega, &tau, &fresh_betas, &rs_config, &dft,
+            |_| { counter2 += 1; F::from_u64(counter2 + 500) },
+            |cw, ff| {
+                let (root, _) = crate::accumulation::warp::encoding::merkle_commit_codeword::<
+                    F, F,
+                    <F as p3_field::Field>::Packing, <F as p3_field::Field>::Packing,
+                    MyHash, MyCompress, DIGEST,
+                >(cw, ff, h2.clone(), c2.clone());
+                root
+            },
+            |union_cw, union_ff| {
+                let union_ev = crate::poly::evals::EvaluationsList::new(union_cw.to_vec());
+                let (root, _) = crate::accumulation::warp::encoding::merkle_commit_codeword::<
+                    F, F,
+                    <F as p3_field::Field>::Packing, <F as p3_field::Field>::Packing,
+                    MyHash, MyCompress, DIGEST,
+                >(&union_ev, union_ff, h3.clone(), c3.clone());
+                root
+            },
+        );
+
+        // Algebraic outputs must be identical
+        assert_eq!(
+            result_non_union.instance.eval_point,
+            result_union.instance.eval_point,
+            "eval_point mismatch"
+        );
+        assert_eq!(
+            result_non_union.instance.pesat_tau,
+            result_union.instance.pesat_tau,
+            "pesat_tau mismatch"
+        );
+        assert_eq!(
+            result_non_union.instance.pesat_x,
+            result_union.instance.pesat_x,
+            "pesat_x mismatch"
+        );
+        assert_eq!(
+            result_non_union.instance.pesat_target,
+            result_union.instance.pesat_target,
+            "pesat_target mismatch"
+        );
+        assert_eq!(
+            result_non_union.witness.codeword.as_slice(),
+            result_union.witness.codeword.as_slice(),
+            "folded codeword mismatch"
+        );
+        assert_eq!(
+            result_non_union.witness.witness,
+            result_union.witness.witness,
+            "folded witness mismatch"
+        );
+        assert_eq!(
+            result_non_union.sumcheck_round_polys,
+            result_union.sumcheck_round_polys,
+            "sumcheck round polys mismatch"
+        );
+        assert_eq!(
+            result_non_union.sumcheck_challenges,
+            result_union.sumcheck_challenges,
+            "sumcheck challenges mismatch"
+        );
+
+        // Folded codeword commitment should be identical (same folded codeword)
+        assert_eq!(
+            result_non_union.commitment_root,
+            result_union.commitment_root,
+            "folded commitment root should match"
+        );
+
+        // But fresh roots differ: non-union has individual roots, union has none + union root
+        assert!(!result_non_union.fresh_commitment_roots.is_empty());
+        assert!(result_union.fresh_commitment_roots.is_empty());
+        assert!(result_union.union_commitment_root.is_some());
     }
 }

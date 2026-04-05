@@ -11,7 +11,7 @@
 //! For l=2 (1 running + 1 fresh), the sumcheck has only 1 round: very cheap.
 //! All arithmetic is in the BASE FIELD — no extension field needed.
 
-use alloc::vec::Vec;
+use alloc::{vec, vec::Vec};
 
 use p3_field::{Field, PrimeCharacteristicRing, PrimeField64};
 use p3_poseidon2::GenericPoseidon2LinearLayers;
@@ -43,6 +43,10 @@ pub struct WarpFoldVerifierWitness<F: Field> {
     pub num_rounds: usize,
     /// The batching challenge ω used in twin-constraint: target_i = μ_i + ω·η_i.
     pub omega: F,
+    /// Quasar union commitment root. When `Some`, replaces individual fresh roots
+    /// in Phase 1 FS absorption: the circuit absorbs running acc (index 0) + this
+    /// single union root instead of ℓ individual roots. This is O(1) in ℓ.
+    pub union_commitment_root: Option<Vec<F>>,
 }
 
 impl<F: Field + PrimeField64> WarpFoldVerifierWitness<F> {
@@ -70,6 +74,40 @@ impl<F: Field + PrimeField64> WarpFoldVerifierWitness<F> {
             sumcheck_evals,
             num_rounds: sumcheck_round_polys.len(),
             omega,
+            union_commitment_root: None,
+        }
+    }
+
+    /// Build a union-mode witness from fold result data.
+    ///
+    /// Only the running accumulator's instance data (index 0) is stored
+    /// individually. The ℓ−1 fresh roots are replaced by a single union root.
+    /// The in-circuit Phase 1 absorbs: running acc + union root → O(1) in ℓ.
+    pub fn from_fold_result_union(
+        running_root: Vec<F>,
+        running_eval_claim: F,
+        running_eval_point: Vec<F>,
+        running_pesat_target: F,
+        union_root: Vec<F>,
+        sumcheck_round_polys: &[Vec<F>],
+        omega: F,
+    ) -> Self {
+        let sumcheck_evals: Vec<[F; 3]> = sumcheck_round_polys
+            .iter()
+            .map(|evals| {
+                assert!(evals.len() >= 3);
+                [evals[0], evals[1], evals[2]]
+            })
+            .collect();
+        Self {
+            input_commitment_roots: vec![running_root],
+            input_eval_claims: vec![running_eval_claim],
+            input_eval_points: vec![running_eval_point],
+            input_pesat_targets: vec![running_pesat_target],
+            sumcheck_evals,
+            num_rounds: sumcheck_round_polys.len(),
+            omega,
+            union_commitment_root: Some(union_root),
         }
     }
 }
@@ -98,45 +136,89 @@ where
     L: GenericPoseidon2LinearLayers<WIDTH>,
     P: Permutation<[F; WIDTH]>,
 {
-    let k = witness.input_commitment_roots.len();
-
     // ═══════════════════════════════════════════
     // Phase 1: Observe input accumulators → derive challenges
     // ═══════════════════════════════════════════
-    for i in 0..k {
-        // Observe commitment root
-        let root_vars: Vec<Var> = witness.input_commitment_roots[i]
+    if let Some(ref union_root) = witness.union_commitment_root {
+        // UNION PATH (Quasar multicast): absorb running acc (index 0) + union root.
+        // Cost is O(1) in ℓ — only 2 absorptions regardless of how many fresh instances.
+        // Matches the native `derive_fold_challenges_union` in fold.rs.
+
+        // Running accumulator: root + μ + α + η
+        let root_vars: Vec<Var> = witness.input_commitment_roots[0]
             .iter()
             .map(|&val| builder.alloc_witness(val))
             .collect();
         challenger.observe_slice::<L, P>(
             builder, poseidon_config, perm,
-            &root_vars, &witness.input_commitment_roots[i],
+            &root_vars, &witness.input_commitment_roots[0],
         );
-
-        // Observe eval claim μ_i
-        let mu_var = builder.alloc_witness(witness.input_eval_claims[i]);
+        let mu_var = builder.alloc_witness(witness.input_eval_claims[0]);
         challenger.observe_slice::<L, P>(
             builder, poseidon_config, perm,
-            &[mu_var], &[witness.input_eval_claims[i]],
+            &[mu_var], &[witness.input_eval_claims[0]],
         );
-
-        // Observe eval point α_i
-        let alpha_vars: Vec<Var> = witness.input_eval_points[i]
+        let alpha_vars: Vec<Var> = witness.input_eval_points[0]
             .iter()
             .map(|&val| builder.alloc_witness(val))
             .collect();
         challenger.observe_slice::<L, P>(
             builder, poseidon_config, perm,
-            &alpha_vars, &witness.input_eval_points[i],
+            &alpha_vars, &witness.input_eval_points[0],
         );
-
-        // Observe PESAT target η_i
-        let eta_var = builder.alloc_witness(witness.input_pesat_targets[i]);
+        let eta_var = builder.alloc_witness(witness.input_pesat_targets[0]);
         challenger.observe_slice::<L, P>(
             builder, poseidon_config, perm,
-            &[eta_var], &[witness.input_pesat_targets[i]],
+            &[eta_var], &[witness.input_pesat_targets[0]],
         );
+
+        // Union root: 8 elements — replaces all ℓ−1 fresh roots+claims+points+targets
+        let union_vars: Vec<Var> = union_root
+            .iter()
+            .map(|&val| builder.alloc_witness(val))
+            .collect();
+        challenger.observe_slice::<L, P>(
+            builder, poseidon_config, perm,
+            &union_vars, union_root,
+        );
+    } else {
+        // NON-UNION PATH: absorb all k accumulators individually — O(ℓ).
+        let k = witness.input_commitment_roots.len();
+        for i in 0..k {
+            // Observe commitment root
+            let root_vars: Vec<Var> = witness.input_commitment_roots[i]
+                .iter()
+                .map(|&val| builder.alloc_witness(val))
+                .collect();
+            challenger.observe_slice::<L, P>(
+                builder, poseidon_config, perm,
+                &root_vars, &witness.input_commitment_roots[i],
+            );
+
+            // Observe eval claim μ_i
+            let mu_var = builder.alloc_witness(witness.input_eval_claims[i]);
+            challenger.observe_slice::<L, P>(
+                builder, poseidon_config, perm,
+                &[mu_var], &[witness.input_eval_claims[i]],
+            );
+
+            // Observe eval point α_i
+            let alpha_vars: Vec<Var> = witness.input_eval_points[i]
+                .iter()
+                .map(|&val| builder.alloc_witness(val))
+                .collect();
+            challenger.observe_slice::<L, P>(
+                builder, poseidon_config, perm,
+                &alpha_vars, &witness.input_eval_points[i],
+            );
+
+            // Observe PESAT target η_i
+            let eta_var = builder.alloc_witness(witness.input_pesat_targets[i]);
+            challenger.observe_slice::<L, P>(
+                builder, poseidon_config, perm,
+                &[eta_var], &[witness.input_pesat_targets[i]],
+            );
+        }
     }
 
     // Derive omega (batching challenge) from Poseidon2 and constrain it
@@ -358,6 +440,7 @@ mod tests {
             sumcheck_evals: vec![[F::from_u64(15), F::from_u64(15), F::from_u64(25)]],
             num_rounds: 1,
             omega,
+            union_commitment_root: None,
         };
 
         let mut builder = CircuitBuilder::<F>::new();
@@ -394,6 +477,7 @@ mod tests {
             sumcheck_evals: vec![[F::ZERO; 3]],
             num_rounds: 1,
             omega: F::ZERO,
+            union_commitment_root: None,
         };
 
         let mut builder_with = CircuitBuilder::<F>::new();
@@ -443,6 +527,7 @@ mod tests {
             sumcheck_evals: vec![[F::ZERO; 3]],
             num_rounds: 1,
             omega: F::ZERO,
+            union_commitment_root: None,
         };
         let mut warp_builder = CircuitBuilder::<F>::new();
         let mut warp_chal = CircuitChallenger::<F, 16, 8>::new(&mut warp_builder);
@@ -483,5 +568,209 @@ mod tests {
             "WARP verifier should have fewer witness vars: {} vs {}",
             warp_witness_vars, v2_witness_vars,
         );
+    }
+
+    #[test]
+    fn warp_fold_verifier_circuit_union_satisfiable() {
+        use p3_challenger::{CanObserve, CanSample};
+        use p3_field::Field;
+
+        let poseidon_perm = Perm::new_from_rng_128(&mut SmallRng::seed_from_u64(99));
+        let poseidon_config = Poseidon2CircuitConfig::<F, 16>::from_rng(
+            8, 13, 7, &mut SmallRng::seed_from_u64(99),
+        );
+
+        // l=4: 1 running acc + 3 fresh → union root replaces the 3 fresh roots
+        let running_root = vec![F::from_u64(1); 8];
+        let running_eval_claim = F::from_u64(10);
+        let running_eval_point = vec![F::from_u64(2); 3];
+        let running_pesat_target = F::from_u64(5);
+        let union_root = vec![F::from_u64(42); 8];
+
+        // Derive omega natively via the union FS path:
+        // absorb running acc, then union root
+        let mut native_chal = MyChal::new(poseidon_perm.clone());
+        for &val in &running_root { native_chal.observe(val); }
+        native_chal.observe(running_eval_claim);
+        for &val in &running_eval_point { native_chal.observe(val); }
+        native_chal.observe(running_pesat_target);
+        for &val in &union_root { native_chal.observe(val); }
+        let omega: F = native_chal.sample();
+
+        // Sample tau challenges (2 for l=4)
+        let _tau_0: F = native_chal.sample();
+        let _tau_1: F = native_chal.sample();
+
+        // l=4 → log_l=2 → 2 sumcheck rounds
+        // Construct round polys that satisfy the sumcheck relation:
+        // Round 0: h(0)+h(1) = initial_claim
+        let e0_r0 = F::from_u64(15);
+        let e1_r0 = F::from_u64(15);
+        let initial_claim = e0_r0 + e1_r0; // = 30
+        // e2 can be anything — it sets the degree-2 coefficient
+        let e2_r0 = F::from_u64(25);
+
+        // Observe round 0 into native challenger to get challenge r_0
+        native_chal.observe(e0_r0);
+        native_chal.observe(e1_r0);
+        native_chal.observe(e2_r0);
+        let r_0: F = native_chal.sample();
+
+        // Compute h_0(r_0) for round consistency
+        let d = e1_r0 - e0_r0;
+        let c2 = (e2_r0 - e1_r0.double() + e0_r0) * F::TWO.inverse();
+        let h0_at_r0 = e0_r0 + d * r_0 + c2 * r_0 * (r_0 - F::ONE);
+
+        // Round 1: e0' + e1' = h_0(r_0)
+        // Split h0_at_r0 evenly
+        let e0_r1 = h0_at_r0;
+        let e1_r1 = F::ZERO;
+        let e2_r1 = e0_r1; // degree-2 coeff = 0
+
+        let witness = WarpFoldVerifierWitness::from_fold_result_union(
+            running_root,
+            running_eval_claim,
+            running_eval_point,
+            running_pesat_target,
+            union_root,
+            &[
+                vec![e0_r0, e1_r0, e2_r0],
+                vec![e0_r1, e1_r1, e2_r1],
+            ],
+            omega,
+        );
+
+        let mut builder = CircuitBuilder::<F>::new();
+        let mut challenger = CircuitChallenger::<F, 16, 8>::new(&mut builder);
+
+        let (challenges, _final_var, _final_val) =
+            synthesize_warp_fold_verifier::<
+                F, GenericPoseidon2LinearLayersBabyBear, _, 16, 8,
+            >(&mut builder, &mut challenger, &poseidon_config, &poseidon_perm, &witness);
+
+        assert_eq!(challenges.len(), 2, "expected 2 sumcheck rounds for l=4");
+
+        let (shape, instance) = builder.build();
+        assert!(
+            shape.is_sat(instance.witness(), instance.input()),
+            "union-mode WARP fold verifier circuit is not satisfiable"
+        );
+    }
+
+    #[test]
+    fn union_verifier_fewer_constraints_than_nonunion() {
+        let poseidon_perm = Perm::new_from_rng_128(&mut SmallRng::seed_from_u64(99));
+        let poseidon_config = Poseidon2CircuitConfig::<F, 16>::from_rng(
+            8, 13, 7, &mut SmallRng::seed_from_u64(99),
+        );
+
+        let log_n = 3; // eval point dimension
+
+        // Non-union l=4: absorbs 4 accumulators individually
+        let nonunion_witness = WarpFoldVerifierWitness {
+            input_commitment_roots: vec![vec![F::ZERO; 8]; 4],
+            input_eval_claims: vec![F::ZERO; 4],
+            input_eval_points: vec![vec![F::ZERO; log_n]; 4],
+            input_pesat_targets: vec![F::ZERO; 4],
+            sumcheck_evals: vec![[F::ZERO; 3]; 2], // log_l=2 rounds
+            num_rounds: 2,
+            omega: F::ZERO,
+            union_commitment_root: None,
+        };
+
+        let mut nonunion_builder = CircuitBuilder::<F>::new();
+        let mut nonunion_chal = CircuitChallenger::<F, 16, 8>::new(&mut nonunion_builder);
+        let _ = synthesize_warp_fold_verifier::<
+            F, GenericPoseidon2LinearLayersBabyBear, _, 16, 8,
+        >(&mut nonunion_builder, &mut nonunion_chal, &poseidon_config, &poseidon_perm, &nonunion_witness);
+        let nonunion_constraints = nonunion_builder.num_constraints();
+
+        // Union l=4: absorbs 1 running acc + 1 union root
+        let union_witness = WarpFoldVerifierWitness::from_fold_result_union(
+            vec![F::ZERO; 8],
+            F::ZERO,
+            vec![F::ZERO; log_n],
+            F::ZERO,
+            vec![F::ZERO; 8],
+            &vec![vec![F::ZERO; 3]; 2],
+            F::ZERO,
+        );
+
+        let mut union_builder = CircuitBuilder::<F>::new();
+        let mut union_chal = CircuitChallenger::<F, 16, 8>::new(&mut union_builder);
+        let _ = synthesize_warp_fold_verifier::<
+            F, GenericPoseidon2LinearLayersBabyBear, _, 16, 8,
+        >(&mut union_builder, &mut union_chal, &poseidon_config, &poseidon_perm, &union_witness);
+        let union_constraints = union_builder.num_constraints();
+
+        // Union should have significantly fewer constraints (Phase 1 savings)
+        assert!(
+            union_constraints < nonunion_constraints,
+            "union verifier should have fewer constraints: {} vs {} (non-union)",
+            union_constraints, nonunion_constraints,
+        );
+
+        // At l=4, expect significant savings (>30%)
+        let savings_pct = 100.0 * (1.0 - union_constraints as f64 / nonunion_constraints as f64);
+        assert!(
+            savings_pct > 30.0,
+            "expected >30% savings at l=4, got {savings_pct:.1}%"
+        );
+    }
+
+    #[test]
+    fn union_verifier_constraint_scaling() {
+        let poseidon_perm = Perm::new_from_rng_128(&mut SmallRng::seed_from_u64(99));
+        let poseidon_config = Poseidon2CircuitConfig::<F, 16>::from_rng(
+            8, 13, 7, &mut SmallRng::seed_from_u64(99),
+        );
+        let log_n = 3;
+
+        // Verify constraint scaling across arities
+
+        for &arity in &[2usize, 4, 8, 16] {
+            let log_l = arity.trailing_zeros() as usize;
+
+            // Non-union: absorb `arity` accumulators
+            let nonunion_witness = WarpFoldVerifierWitness {
+                input_commitment_roots: vec![vec![F::ZERO; 8]; arity],
+                input_eval_claims: vec![F::ZERO; arity],
+                input_eval_points: vec![vec![F::ZERO; log_n]; arity],
+                input_pesat_targets: vec![F::ZERO; arity],
+                sumcheck_evals: vec![[F::ZERO; 3]; log_l],
+                num_rounds: log_l,
+                omega: F::ZERO,
+                union_commitment_root: None,
+            };
+
+            let mut b1 = CircuitBuilder::<F>::new();
+            let mut c1 = CircuitChallenger::<F, 16, 8>::new(&mut b1);
+            let _ = synthesize_warp_fold_verifier::<
+                F, GenericPoseidon2LinearLayersBabyBear, _, 16, 8,
+            >(&mut b1, &mut c1, &poseidon_config, &poseidon_perm, &nonunion_witness);
+            let nc = b1.num_constraints();
+
+            // Union: absorb 1 running + 1 union root
+            let union_witness = WarpFoldVerifierWitness::from_fold_result_union(
+                vec![F::ZERO; 8], F::ZERO, vec![F::ZERO; log_n], F::ZERO,
+                vec![F::ZERO; 8],
+                &vec![vec![F::ZERO; 3]; log_l],
+                F::ZERO,
+            );
+
+            let mut b2 = CircuitBuilder::<F>::new();
+            let mut c2 = CircuitChallenger::<F, 16, 8>::new(&mut b2);
+            let _ = synthesize_warp_fold_verifier::<
+                F, GenericPoseidon2LinearLayersBabyBear, _, 16, 8,
+            >(&mut b2, &mut c2, &poseidon_config, &poseidon_perm, &union_witness);
+            let uc = b2.num_constraints();
+
+            // Union should never be more expensive
+            assert!(uc <= nc, "union should not add constraints at arity {arity}");
+            // At arity >= 4, union should be strictly cheaper
+            if arity >= 4 {
+                assert!(uc < nc, "union should be cheaper at arity {arity}");
+            }
+        }
     }
 }

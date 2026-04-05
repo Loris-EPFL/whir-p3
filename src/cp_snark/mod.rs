@@ -20,7 +20,7 @@
 //! The binding property of SHA-256 prevents the prover from altering the
 //! transcript data after committing, ensuring FS challenges are honestly derived.
 
-use std::vec::Vec;
+use std::{vec, vec::Vec};
 
 use p3_challenger::{CanObserve, CanSample};
 use p3_field::{Field, PrimeField64};
@@ -58,6 +58,33 @@ pub struct FoldTranscriptData<F: Field> {
     pub tau_challenges: Vec<F>,
     /// Per-round sumcheck challenges `r_i` derived from the transcript.
     pub sumcheck_challenges: Vec<F>,
+    /// Fresh PESAT betas — random points sampled after tau, before sumcheck rounds.
+    /// One Vec<F> of `log_m` elements per fresh instance. Must be replayed to keep
+    /// the Fiat-Shamir challenger state in sync between prover and terminal verifier.
+    pub fresh_betas: Vec<Vec<F>>,
+    /// Shift query openings with Merkle authentication paths.
+    ///
+    /// Each entry contains: position, per-input row values, auth paths, expected folded.
+    /// Empty if the fold step did not generate shift queries (e.g., non-committed mode).
+    pub shift_query_positions: Vec<usize>,
+    /// Per-query, per-input: the row values opened from the codeword at `position`.
+    pub shift_query_values: Vec<Vec<Vec<F>>>,
+    /// Per-query, per-input: Merkle authentication path (sibling digests from leaf to root).
+    pub shift_query_auth_paths: Vec<Vec<Vec<[F; 8]>>>,
+    /// Per-query: expected folded row = Σ_i eq(γ, i) * input_i[pos].
+    pub shift_query_expected: Vec<Vec<F>>,
+    /// Commitment roots of the input codewords (acc + fresh) for Merkle path verification.
+    /// These are the roots against which shift query auth paths are verified.
+    pub input_codeword_roots: Vec<[F; 8]>,
+    /// Quasar union commitment root (when using multicast commitment).
+    ///
+    /// When `Some`, the terminal FS replay uses the **union path**: absorbs only the
+    /// running accumulator instance + this single union root (O(1) absorptions).
+    /// When `None`, the replay uses the standard path: absorbs all k input accumulators
+    /// individually (O(ℓ) absorptions).
+    ///
+    /// `input_commitment_roots` stores only the running accumulator when union is active.
+    pub union_commitment_root: Option<Vec<F>>,
 }
 
 /// A committed fold transcript: binding commitment + data + opening.
@@ -104,6 +131,10 @@ pub enum CpSnarkDeciderError {
     CommitmentBindingFailed { step: usize },
     /// Fiat-Shamir challenge mismatch after binding verification.
     ChallengeMismatch { step: usize },
+    /// Shift query Merkle proof invalid — authentication path does not match root.
+    ShiftQueryMerkleInvalid { step: usize, query: usize, input: usize },
+    /// Shift query linear combination mismatch — folded value ≠ Σ eq(γ,i) * val_i.
+    ShiftQueryValueMismatch { step: usize, query: usize },
 }
 
 // ─── Serialization ────────────────────────────────────────────────────
@@ -159,18 +190,83 @@ pub fn serialize_fold_data<F: Field + PrimeField64>(data: &FoldTranscriptData<F>
     write_vec(&mut bytes, &data.tau_challenges);
     write_vec(&mut bytes, &data.sumcheck_challenges);
 
+    // fresh_betas: Vec<Vec<F>>
+    bytes.extend_from_slice(&(data.fresh_betas.len() as u64).to_le_bytes());
+    for betas in &data.fresh_betas {
+        write_vec(&mut bytes, betas);
+    }
+
+    // Shift query data
+    // positions
+    bytes.extend_from_slice(&(data.shift_query_positions.len() as u64).to_le_bytes());
+    for &pos in &data.shift_query_positions {
+        bytes.extend_from_slice(&(pos as u64).to_le_bytes());
+    }
+
+    // values: Vec<Vec<Vec<F>>> — [query][input][value]
+    bytes.extend_from_slice(&(data.shift_query_values.len() as u64).to_le_bytes());
+    for query_vals in &data.shift_query_values {
+        bytes.extend_from_slice(&(query_vals.len() as u64).to_le_bytes());
+        for input_vals in query_vals {
+            write_vec(&mut bytes, input_vals);
+        }
+    }
+
+    // auth_paths: Vec<Vec<Vec<[F; 8]>>> — [query][input][sibling_digests]
+    bytes.extend_from_slice(&(data.shift_query_auth_paths.len() as u64).to_le_bytes());
+    for query_paths in &data.shift_query_auth_paths {
+        bytes.extend_from_slice(&(query_paths.len() as u64).to_le_bytes());
+        for input_path in query_paths {
+            bytes.extend_from_slice(&(input_path.len() as u64).to_le_bytes());
+            for digest in input_path {
+                for &f in digest {
+                    write_f(&mut bytes, f);
+                }
+            }
+        }
+    }
+
+    // expected folded: Vec<Vec<F>> — [query][folded_values]
+    bytes.extend_from_slice(&(data.shift_query_expected.len() as u64).to_le_bytes());
+    for expected in &data.shift_query_expected {
+        write_vec(&mut bytes, expected);
+    }
+
+    // input_codeword_roots: Vec<[F; 8]>
+    bytes.extend_from_slice(&(data.input_codeword_roots.len() as u64).to_le_bytes());
+    for root in &data.input_codeword_roots {
+        for &f in root {
+            write_f(&mut bytes, f);
+        }
+    }
+
+    // union_commitment_root: Option<Vec<F>>
+    match &data.union_commitment_root {
+        Some(root) => {
+            bytes.push(1);
+            write_vec(&mut bytes, root);
+        }
+        None => {
+            bytes.push(0);
+        }
+    }
+
     bytes
 }
 
 // ─── Commitment ───────────────────────────────────────────────────────
 
-/// Build a committed fold transcript using Symphony's `HashCommitment`.
+/// Build a committed fold transcript including shift query Merkle proofs.
 ///
 /// Serializes the fold data deterministically, then commits via
 /// `SHA-256(r ‖ data)` where `r` is 32 bytes of fresh randomness.
 /// The commitment is binding (collision resistance of SHA-256) and
 /// straightline extractable (ROM).
-pub fn commit_fold_transcript<F: Field + PrimeField64>(
+///
+/// Includes shift query openings and their Merkle authentication paths,
+/// plus `fresh_betas` (PESAT randomness sampled between tau and sumcheck).
+/// The terminal verifier replays these to keep FS state in sync.
+pub fn commit_fold_transcript_with_shift_queries<F: Field + PrimeField64>(
     step: usize,
     input_commitment_roots: Vec<Vec<F>>,
     input_eval_claims: Vec<F>,
@@ -180,6 +276,10 @@ pub fn commit_fold_transcript<F: Field + PrimeField64>(
     omega: F,
     tau_challenges: Vec<F>,
     sumcheck_challenges: Vec<F>,
+    fresh_betas: Vec<Vec<F>>,
+    shift_queries: &[crate::accumulation::warp::fold::ShiftQueryOpening<F>],
+    input_codeword_roots: &[[F; 8]],
+    union_commitment_root: Option<Vec<F>>,
 ) -> CommittedFoldTranscript<F> {
     let sumcheck_evals = sumcheck_round_polys
         .iter()
@@ -198,6 +298,13 @@ pub fn commit_fold_transcript<F: Field + PrimeField64>(
         omega,
         tau_challenges,
         sumcheck_challenges,
+        fresh_betas,
+        shift_query_positions: shift_queries.iter().map(|sq| sq.position).collect(),
+        shift_query_values: shift_queries.iter().map(|sq| sq.input_values.clone()).collect(),
+        shift_query_auth_paths: shift_queries.iter().map(|sq| sq.auth_paths.clone()).collect(),
+        shift_query_expected: shift_queries.iter().map(|sq| sq.expected_folded.clone()).collect(),
+        input_codeword_roots: input_codeword_roots.to_vec(),
+        union_commitment_root,
     };
 
     let serialized = serialize_fold_data(&data);
@@ -246,17 +353,38 @@ where
         let mut challenger = make_challenger();
         let t = &ct.data;
 
-        // Observe input accumulators in the same order as the prover
-        let k = t.input_commitment_roots.len();
-        for i in 0..k {
-            for &val in &t.input_commitment_roots[i] {
+        if let Some(ref union_root) = t.union_commitment_root {
+            // ── Union path (Quasar): absorb running acc + single union root ──
+            // Matches derive_fold_challenges_union: O(1) in number of fresh instances.
+            assert!(
+                !t.input_commitment_roots.is_empty(),
+                "union transcript must have at least the running accumulator"
+            );
+            for &val in &t.input_commitment_roots[0] {
                 challenger.observe(val);
             }
-            challenger.observe(t.input_eval_claims[i]);
-            for &val in &t.input_eval_points[i] {
+            challenger.observe(t.input_eval_claims[0]);
+            for &val in &t.input_eval_points[0] {
                 challenger.observe(val);
             }
-            challenger.observe(t.input_pesat_targets[i]);
+            challenger.observe(t.input_pesat_targets[0]);
+            // Absorb union commitment root
+            for &val in union_root {
+                challenger.observe(val);
+            }
+        } else {
+            // ── Standard path: absorb all k input accumulators individually ──
+            let k = t.input_commitment_roots.len();
+            for i in 0..k {
+                for &val in &t.input_commitment_roots[i] {
+                    challenger.observe(val);
+                }
+                challenger.observe(t.input_eval_claims[i]);
+                for &val in &t.input_eval_points[i] {
+                    challenger.observe(val);
+                }
+                challenger.observe(t.input_pesat_targets[i]);
+            }
         }
 
         // Derive and check ω
@@ -273,6 +401,16 @@ where
             }
         }
 
+        // Derive and check fresh_betas (PESAT randomness, sampled between tau and sumcheck)
+        for expected_betas in &t.fresh_betas {
+            for &expected_beta in expected_betas {
+                let beta: F = challenger.sample();
+                if beta != expected_beta {
+                    return Err(CpSnarkDeciderError::ChallengeMismatch { step: ct.step });
+                }
+            }
+        }
+
         // For each sumcheck round: observe round poly, derive and check r
         for (round, &expected_r) in t.sumcheck_challenges.iter().enumerate() {
             let [e0, e1, e2] = t.sumcheck_evals[round];
@@ -282,6 +420,127 @@ where
             let r: F = challenger.sample();
             if r != expected_r {
                 return Err(CpSnarkDeciderError::ChallengeMismatch { step: ct.step });
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Verify shift query Merkle proofs for all committed transcripts at terminal.
+///
+/// For each transcript that includes shift query data:
+/// 1. Verify each Merkle authentication path against the committed root
+/// 2. Verify the linear combination: `expected_folded = Σ_i eq(γ, i) * values_i`
+///
+/// This defers the expensive Poseidon2 Merkle verification from the recursive
+/// circuit to terminal, where it runs natively (~100ms for 100 steps).
+pub fn verify_shift_query_merkle_proofs<F, H, C>(
+    transcripts: &[CommittedFoldTranscript<F>],
+    folding_factor: usize,
+    merkle_hash: &H,
+    merkle_compress: &C,
+) -> Result<(), CpSnarkDeciderError>
+where
+    F: p3_field::TwoAdicField + PrimeField64,
+    <F as p3_field::Field>::Packing: Eq + Send + Sync,
+    H: p3_symmetric::CryptographicHasher<F, [F; 8]>
+        + p3_symmetric::CryptographicHasher<<F as p3_field::Field>::Packing, [<F as p3_field::Field>::Packing; 8]>
+        + Sync
+        + Clone,
+    C: p3_symmetric::PseudoCompressionFunction<[F; 8], 2>
+        + p3_symmetric::PseudoCompressionFunction<[<F as p3_field::Field>::Packing; 8], 2>
+        + Sync
+        + Clone,
+    [F; 8]: serde::Serialize + for<'de> serde::Deserialize<'de>,
+{
+    use crate::accumulation::warp::encoding::merkle_verify_opening;
+
+    for ct in transcripts {
+        let t = &ct.data;
+        let num_queries = t.shift_query_positions.len();
+        if num_queries == 0 {
+            continue;
+        }
+
+        let base_width = 1usize << folding_factor;
+
+        if t.union_commitment_root.is_some() {
+            // ── Union mode (Quasar §4): single union auth path per query ──
+            // The union tree interleaves all ℓ codewords: union[p*l + i] = cw[i][p].
+            // Each auth_paths[q] has 1 entry: the union tree auth path.
+            // We reconstruct the union row from the per-codeword input_values
+            // and verify the single auth path against the union root.
+            assert_eq!(
+                t.input_codeword_roots.len(), 1,
+                "union mode must have exactly 1 root (the union root)"
+            );
+            let union_root = &t.input_codeword_roots[0];
+
+            for q in 0..num_queries {
+                let pos = t.shift_query_positions[q];
+                let values_per_cw = &t.shift_query_values[q];
+                let l = values_per_cw.len();
+
+                // Reconstruct the union row by interleaving per-codeword values.
+                // union_row[k * l + i] = values_per_cw[i][k]
+                let mut union_row = vec![F::ZERO; l * base_width];
+                for (i, cw_vals) in values_per_cw.iter().enumerate() {
+                    for (k, &v) in cw_vals.iter().enumerate() {
+                        union_row[k * l + i] = v;
+                    }
+                }
+
+                // auth_paths[q] has 1 entry for union mode
+                if t.shift_query_auth_paths[q].is_empty() {
+                    return Err(CpSnarkDeciderError::ShiftQueryMerkleInvalid {
+                        step: ct.step, query: q, input: 0,
+                    });
+                }
+                let proof = &t.shift_query_auth_paths[q][0];
+                let tree_height = 1usize << proof.len();
+                let union_width = l * base_width;
+
+                let valid = merkle_verify_opening::<
+                    F, F, <F as p3_field::Field>::Packing, <F as p3_field::Field>::Packing, H, C, 8,
+                >(union_root, pos, &union_row, proof, union_width, tree_height,
+                  merkle_hash.clone(), merkle_compress.clone());
+
+                if !valid {
+                    return Err(CpSnarkDeciderError::ShiftQueryMerkleInvalid {
+                        step: ct.step, query: q, input: 0,
+                    });
+                }
+            }
+        } else {
+            // ── Non-union mode (WARP standard): per-input auth paths ──
+            let num_inputs = t.input_codeword_roots.len();
+
+            for q in 0..num_queries {
+                let pos = t.shift_query_positions[q];
+
+                for inp in 0..num_inputs {
+                    if inp >= t.shift_query_values[q].len()
+                        || inp >= t.shift_query_auth_paths[q].len()
+                    {
+                        continue;
+                    }
+                    let row_values = &t.shift_query_values[q][inp];
+                    let proof = &t.shift_query_auth_paths[q][inp];
+                    let root = &t.input_codeword_roots[inp];
+                    let tree_height = 1usize << proof.len();
+
+                    let valid = merkle_verify_opening::<
+                        F, F, <F as p3_field::Field>::Packing, <F as p3_field::Field>::Packing, H, C, 8,
+                    >(root, pos, row_values, proof, base_width, tree_height,
+                      merkle_hash.clone(), merkle_compress.clone());
+
+                    if !valid {
+                        return Err(CpSnarkDeciderError::ShiftQueryMerkleInvalid {
+                            step: ct.step, query: q, input: inp,
+                        });
+                    }
+                }
             }
         }
     }
@@ -316,6 +575,47 @@ where
 
     // Step 3: Algebraic decider (eval claim + PESAT; codeword deferred to WHIR)
     warp_decide_algebraic_rs(shape, acc).map_err(CpSnarkDeciderError::AlgebraicCheck)
+}
+
+/// CP-SNARK terminal verification with shift query Merkle proof checking.
+///
+/// Extends `cp_snark_terminal_verify` with a fourth phase:
+///
+/// 4. **Shift query Merkle verification**: verify that each shift query opening
+///    has a valid Merkle authentication path against the committed codeword root.
+///    This closes the proximity gap — the prover can't fabricate shift query values
+///    because they're bound by the SHA-256 commitment AND verified by Merkle paths.
+pub fn cp_snark_terminal_verify_with_merkle<F, Challenger, H, C>(
+    shape: &R1CSShape<F>,
+    acc: &WarpAccumulator<F, F, F, 8>,
+    transcripts: &[CommittedFoldTranscript<F>],
+    make_challenger: impl FnMut() -> Challenger,
+    folding_factor: usize,
+    merkle_hash: &H,
+    merkle_compress: &C,
+) -> Result<(), CpSnarkDeciderError>
+where
+    F: p3_field::TwoAdicField + PrimeField64,
+    <F as p3_field::Field>::Packing: Eq + Send + Sync,
+    Challenger: CanObserve<F> + CanSample<F>,
+    H: p3_symmetric::CryptographicHasher<F, [F; 8]>
+        + p3_symmetric::CryptographicHasher<<F as p3_field::Field>::Packing, [<F as p3_field::Field>::Packing; 8]>
+        + Sync
+        + Clone,
+    C: p3_symmetric::PseudoCompressionFunction<[F; 8], 2>
+        + p3_symmetric::PseudoCompressionFunction<[<F as p3_field::Field>::Packing; 8], 2>
+        + Sync
+        + Clone,
+    [F; 8]: serde::Serialize + for<'de> serde::Deserialize<'de>,
+{
+    // Steps 1+2: Verify commitment binding + FS replay
+    verify_committed_transcripts(transcripts, make_challenger)?;
+
+    // Step 3: Algebraic decider
+    warp_decide_algebraic_rs(shape, acc).map_err(CpSnarkDeciderError::AlgebraicCheck)?;
+
+    // Step 4: Shift query Merkle proof verification
+    verify_shift_query_merkle_proofs(transcripts, folding_factor, merkle_hash, merkle_compress)
 }
 
 #[cfg(test)]
@@ -372,7 +672,7 @@ mod tests {
         let r: F = prover_chal.sample();
 
         // Build committed transcript using Symphony's HashCommitment
-        let ct = commit_fold_transcript(
+        let ct = commit_fold_transcript_with_shift_queries(
             0,
             roots,
             eval_claims,
@@ -382,6 +682,10 @@ mod tests {
             omega,
             tau,
             vec![r],
+            vec![],  // no fresh_betas in this test (log_m=0)
+            &[],     // no shift queries
+            &[],     // no input codeword roots
+            None,    // no union
         );
 
         // Verify: should pass
@@ -427,6 +731,13 @@ mod tests {
             omega: F::from_u64(7),
             tau_challenges: vec![F::from_u64(11)],
             sumcheck_challenges: vec![F::from_u64(13)],
+            fresh_betas: vec![],
+            shift_query_positions: vec![],
+            shift_query_values: vec![],
+            shift_query_auth_paths: vec![],
+            shift_query_expected: vec![],
+            input_codeword_roots: vec![],
+            union_commitment_root: None,
         };
 
         let bytes1 = serialize_fold_data(&data);
@@ -446,6 +757,13 @@ mod tests {
             omega: F::from_u64(7),
             tau_challenges: vec![F::from_u64(3)],
             sumcheck_challenges: vec![F::from_u64(9)],
+            fresh_betas: vec![],
+            shift_query_positions: vec![],
+            shift_query_values: vec![],
+            shift_query_auth_paths: vec![],
+            shift_query_expected: vec![],
+            input_codeword_roots: vec![],
+            union_commitment_root: None,
         };
 
         let serialized = serialize_fold_data(&data);

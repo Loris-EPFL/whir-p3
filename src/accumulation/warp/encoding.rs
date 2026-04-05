@@ -11,6 +11,8 @@
 //! (transpose → pad → DFT) but decoupled from the WHIR proof flow so it can
 //! be used during each fold step.
 
+use alloc::{vec, vec::Vec};
+
 use p3_commit::Mmcs;
 use p3_dft::TwoAdicSubgroupDft;
 use p3_field::TwoAdicField;
@@ -99,6 +101,106 @@ where
     expected.as_slice() == codeword.as_slice()
 }
 
+/// Build a union codeword by column-major interleaving of ℓ codewords.
+///
+/// Given ℓ codewords of size n, produces a union codeword of size ℓ·n where:
+///   `union[p * ℓ + i] = codewords[i][p]`
+///
+/// Column-major layout ensures that one Merkle leaf (when committed with
+/// `folding_factor = base_ff + log2(ℓ)`) contains all ℓ values at one
+/// position block. This lets the verifier check shift queries with a
+/// single Merkle path per query position instead of ℓ separate paths.
+///
+/// # Arguments
+/// - `codewords`: ℓ codewords, each of size n (must all be equal size)
+///
+/// # Returns
+/// A flat vector of size ℓ·n in column-major interleaved order.
+pub fn build_union_codeword<F: Copy + Default>(codewords: &[Vec<F>]) -> Vec<F> {
+    let l = codewords.len();
+    assert!(l > 0, "need at least one codeword");
+    let n = codewords[0].len();
+    assert!(
+        codewords.iter().all(|cw| cw.len() == n),
+        "all codewords must have equal length"
+    );
+
+    let mut union = vec![F::default(); l * n];
+    for (i, cw) in codewords.iter().enumerate() {
+        for (p, &val) in cw.iter().enumerate() {
+            union[p * l + i] = val;
+        }
+    }
+    union
+}
+
+/// Extract the column of ℓ values at a given position from a union codeword.
+///
+/// The inverse of `build_union_codeword` for a single position:
+///   `column[i] = union[position * ℓ + i]` for `i ∈ [ℓ]`
+///
+/// Used by shift queries to read all ℓ codeword values at a query position
+/// from a single Merkle authentication path on the union tree.
+pub fn union_column_at<F: Copy>(union: &[F], l: usize, position: usize) -> Vec<F> {
+    let start = position * l;
+    union[start..start + l].to_vec()
+}
+
+/// Compute the Merkle folding factor for a union codeword.
+///
+/// The union tree uses `base_folding_factor + log2(ℓ)` so that each
+/// Merkle leaf contains exactly one position-block of ℓ elements (times
+/// the base leaf width). This ensures one Merkle path reveals all ℓ
+/// codeword values at a position.
+pub fn union_folding_factor(base_folding_factor: usize, l: usize) -> usize {
+    assert!(l.is_power_of_two(), "ℓ must be a power of two");
+    base_folding_factor + l.trailing_zeros() as usize
+}
+
+/// Commit a union codeword to a Merkle tree.
+///
+/// Uses `union_folding_factor(base_ff, ℓ)` so that each Merkle leaf
+/// groups one position-block of ℓ values, enabling single-path shift
+/// query openings.
+pub fn merkle_commit_union_codeword<F, W, P, PW, H, C, const DIGEST_ELEMS: usize>(
+    union_codeword: &[F],
+    l: usize,
+    base_folding_factor: usize,
+    merkle_hash: H,
+    merkle_compress: C,
+) -> (
+    [W; DIGEST_ELEMS],
+    p3_merkle_tree::MerkleTree<F, W, RowMajorMatrix<F>, DIGEST_ELEMS>,
+)
+where
+    F: TwoAdicField,
+    W: p3_field::PackedValue<Value = W> + Eq + Send + Sync + Copy + Default,
+    P: p3_field::PackedValue<Value = F> + Eq + Send + Sync,
+    PW: p3_field::PackedValue<Value = W> + Eq + Send + Sync,
+    H: p3_symmetric::CryptographicHasher<F, [W; DIGEST_ELEMS]>
+        + p3_symmetric::CryptographicHasher<P, [PW; DIGEST_ELEMS]>
+        + Sync,
+    C: p3_symmetric::PseudoCompressionFunction<[W; DIGEST_ELEMS], 2>
+        + p3_symmetric::PseudoCompressionFunction<[PW; DIGEST_ELEMS], 2>
+        + Sync,
+    [W; DIGEST_ELEMS]: serde::Serialize + for<'de> serde::Deserialize<'de>,
+{
+    let ff = union_folding_factor(base_folding_factor, l);
+    let width = 1usize << ff;
+    let total = union_codeword.len();
+    let height = total / width;
+    assert_eq!(
+        height * width, total,
+        "union codeword length {} not divisible by 2^{} = {}",
+        total, ff, width,
+    );
+
+    let matrix = RowMajorMatrix::new(union_codeword.to_vec(), width);
+    let mmcs = MerkleTreeMmcs::<P, PW, H, C, DIGEST_ELEMS>::new(merkle_hash, merkle_compress);
+    let (root, tree) = mmcs.commit_matrix(matrix);
+    (*root.as_ref(), tree)
+}
+
 /// Compute the codeword size from witness parameters.
 #[inline]
 pub const fn codeword_size(num_variables: usize, log_inv_rate: usize) -> usize {
@@ -146,6 +248,75 @@ where
     let mmcs = MerkleTreeMmcs::<P, PW, H, C, DIGEST_ELEMS>::new(merkle_hash, merkle_compress);
     let (root, tree) = mmcs.commit_matrix(matrix);
     (*root.as_ref(), tree)
+}
+
+/// Open a Merkle tree at a given row position, returning the authentication path.
+///
+/// Uses Plonky3's `Mmcs::open_batch` to extract the sibling digests along
+/// the path from leaf to root. The returned proof is `Vec<[W; DIGEST_ELEMS]>`.
+pub fn merkle_open_at<F, W, P, PW, H, C, const DIGEST_ELEMS: usize>(
+    tree: &p3_merkle_tree::MerkleTree<F, W, RowMajorMatrix<F>, DIGEST_ELEMS>,
+    position: usize,
+    merkle_hash: H,
+    merkle_compress: C,
+) -> (Vec<F>, Vec<[W; DIGEST_ELEMS]>)
+where
+    F: TwoAdicField,
+    W: p3_field::PackedValue<Value = W> + Eq + Send + Sync + Copy + Default,
+    P: p3_field::PackedValue<Value = F> + Eq + Send + Sync,
+    PW: p3_field::PackedValue<Value = W> + Eq + Send + Sync,
+    H: p3_symmetric::CryptographicHasher<F, [W; DIGEST_ELEMS]>
+        + p3_symmetric::CryptographicHasher<P, [PW; DIGEST_ELEMS]>
+        + Sync,
+    C: p3_symmetric::PseudoCompressionFunction<[W; DIGEST_ELEMS], 2>
+        + p3_symmetric::PseudoCompressionFunction<[PW; DIGEST_ELEMS], 2>
+        + Sync,
+    [W; DIGEST_ELEMS]: serde::Serialize + for<'de> serde::Deserialize<'de>,
+{
+    let mmcs = MerkleTreeMmcs::<P, PW, H, C, DIGEST_ELEMS>::new(merkle_hash, merkle_compress);
+    let opening = p3_commit::Mmcs::open_batch(&mmcs, position, tree);
+    let (opened_values, proof) = opening.unpack();
+    // For a single-matrix commitment, opened_values has one entry: the row values
+    let row_values = opened_values.into_iter().next().unwrap_or_default();
+    (row_values, proof)
+}
+
+/// Verify a Merkle opening proof against a commitment root.
+///
+/// Checks that the claimed `row_values` at `position` are consistent with
+/// the committed Merkle root via the authentication path `proof`.
+pub fn merkle_verify_opening<F, W, P, PW, H, C, const DIGEST_ELEMS: usize>(
+    root: &[W; DIGEST_ELEMS],
+    position: usize,
+    row_values: &[F],
+    proof: &Vec<[W; DIGEST_ELEMS]>,
+    row_width: usize,
+    tree_height: usize,
+    merkle_hash: H,
+    merkle_compress: C,
+) -> bool
+where
+    F: TwoAdicField,
+    W: p3_field::PackedValue<Value = W> + Eq + Send + Sync + Copy + Default,
+    P: p3_field::PackedValue<Value = F> + Eq + Send + Sync,
+    PW: p3_field::PackedValue<Value = W> + Eq + Send + Sync,
+    H: p3_symmetric::CryptographicHasher<F, [W; DIGEST_ELEMS]>
+        + p3_symmetric::CryptographicHasher<P, [PW; DIGEST_ELEMS]>
+        + Sync,
+    C: p3_symmetric::PseudoCompressionFunction<[W; DIGEST_ELEMS], 2>
+        + p3_symmetric::PseudoCompressionFunction<[PW; DIGEST_ELEMS], 2>
+        + Sync,
+    [W; DIGEST_ELEMS]: serde::Serialize + for<'de> serde::Deserialize<'de>,
+{
+    use p3_commit::Mmcs;
+    use p3_matrix::Dimensions;
+
+    let mmcs = MerkleTreeMmcs::<P, PW, H, C, DIGEST_ELEMS>::new(merkle_hash, merkle_compress);
+    let dimensions = [Dimensions { width: row_width, height: tree_height }];
+    let opened_values = [row_values.to_vec()];
+    let opening_ref = p3_commit::BatchOpeningRef::new(&opened_values, proof);
+    let hash_root: p3_symmetric::Hash<F, W, DIGEST_ELEMS> = (*root).into();
+    mmcs.verify_batch(&hash_root, &dimensions, position, opening_ref).is_ok()
 }
 
 #[cfg(test)]
@@ -406,5 +577,141 @@ mod tests {
             MyHash, MyCompress, DIGEST,
         >(&codeword2, folding_factor, hash, compress);
         assert_ne!(root, root3, "Different codewords should have different roots");
+    }
+
+    #[test]
+    fn union_codeword_interleaving() {
+        // 4 codewords of length 8
+        let codewords: Vec<Vec<F>> = (0..4)
+            .map(|i| (0..8).map(|j| F::from_u64(i * 100 + j)).collect())
+            .collect();
+
+        let union = build_union_codeword(&codewords);
+        assert_eq!(union.len(), 4 * 8);
+
+        // Check column-major layout: union[p*l + i] = codewords[i][p]
+        for i in 0..4 {
+            for p in 0..8 {
+                assert_eq!(
+                    union[p * 4 + i],
+                    codewords[i][p],
+                    "union[{p}*4+{i}] should equal codewords[{i}][{p}]"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn union_column_extraction() {
+        let codewords: Vec<Vec<F>> = (0..4)
+            .map(|i| (0..8).map(|j| F::from_u64(i * 10 + j)).collect())
+            .collect();
+
+        let union = build_union_codeword(&codewords);
+
+        // Column at position 3 should be [cw_0[3], cw_1[3], cw_2[3], cw_3[3]]
+        let col = union_column_at(&union, 4, 3);
+        assert_eq!(col.len(), 4);
+        for i in 0..4 {
+            assert_eq!(col[i], codewords[i][3]);
+        }
+    }
+
+    #[test]
+    fn union_folding_factor_calculation() {
+        assert_eq!(union_folding_factor(2, 1), 2); // l=1: no change
+        assert_eq!(union_folding_factor(2, 2), 3); // l=2: +1
+        assert_eq!(union_folding_factor(2, 4), 4); // l=4: +2
+        assert_eq!(union_folding_factor(2, 8), 5); // l=8: +3
+        assert_eq!(union_folding_factor(2, 16), 6); // l=16: +4
+    }
+
+    #[test]
+    fn union_merkle_commit_deterministic() {
+        use p3_baby_bear::Poseidon2BabyBear;
+        use p3_symmetric::{PaddingFreeSponge, TruncatedPermutation};
+        use rand::{rngs::SmallRng, SeedableRng};
+
+        type Perm = Poseidon2BabyBear<16>;
+        type MyHash = PaddingFreeSponge<Perm, 16, 8, 8>;
+        type MyCompress = TruncatedPermutation<Perm, 2, 8, 16>;
+        const DIGEST: usize = 8;
+
+        let perm = Perm::new_from_rng_128(&mut SmallRng::seed_from_u64(42));
+        let hash = MyHash::new(perm.clone());
+        let compress = MyCompress::new(perm);
+
+        let dft = Radix2DFTSmallBatch::<F>::default();
+        let base_ff = 2;
+        let log_inv_rate = 1;
+        let l: usize = 4;
+
+        // Create 4 RS-encoded codewords
+        let codewords: Vec<Vec<F>> = (0..l)
+            .map(|i| {
+                let w = EvaluationsList::new(
+                    (0..16).map(|j| F::from_u64((i * 100 + j) as u64)).collect(),
+                );
+                rs_encode(&w, base_ff, log_inv_rate, &dft)
+                    .as_slice()
+                    .to_vec()
+            })
+            .collect();
+
+        let union = build_union_codeword(&codewords);
+
+        let (root1, _) = merkle_commit_union_codeword::<
+            F, F, <F as p3_field::Field>::Packing, <F as p3_field::Field>::Packing,
+            MyHash, MyCompress, DIGEST,
+        >(&union, l, base_ff, hash.clone(), compress.clone());
+
+        let (root2, _) = merkle_commit_union_codeword::<
+            F, F, <F as p3_field::Field>::Packing, <F as p3_field::Field>::Packing,
+            MyHash, MyCompress, DIGEST,
+        >(&union, l, base_ff, hash, compress);
+
+        assert_eq!(root1, root2, "union Merkle commit should be deterministic");
+    }
+
+    #[test]
+    fn union_shift_query_consistency() {
+        // The core soundness property: at any position p, reading from the
+        // union codeword and computing the eq-weighted sum should match the
+        // folded codeword at that position.
+        let l = 4usize;
+        let n = 16usize;
+
+        let codewords: Vec<Vec<F>> = (0..l)
+            .map(|i| (0..n).map(|j| F::from_u64(i as u64 * 100 + j as u64)).collect())
+            .collect();
+
+        let union = build_union_codeword(&codewords);
+
+        // Simulate sumcheck challenges → eq weights
+        let challenges = vec![F::from_u64(7), F::from_u64(13)]; // log_l = 2 challenges
+        let eq_weights: Vec<F> = (0..l)
+            .map(|idx| {
+                crate::spartan::encoding::eq_poly_at_index::<F, F>(idx, &challenges)
+            })
+            .collect();
+
+        // Compute folded codeword: f[p] = Σ eq(γ,i) * cw_i[p]
+        let folded: Vec<F> = (0..n)
+            .map(|p| {
+                (0..l)
+                    .map(|i| eq_weights[i] * codewords[i][p])
+                    .sum()
+            })
+            .collect();
+
+        // Verify: at each position, the union column gives the same result
+        for p in 0..n {
+            let col = union_column_at(&union, l, p);
+            let from_union: F = (0..l).map(|i| eq_weights[i] * col[i]).sum();
+            assert_eq!(
+                from_union, folded[p],
+                "shift query at position {p}: union-derived != folded"
+            );
+        }
     }
 }
