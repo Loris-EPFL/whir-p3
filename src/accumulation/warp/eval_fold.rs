@@ -140,7 +140,7 @@ pub fn eval_fold_prove<F, Dft, const DIGEST_ELEMS: usize>(
     accumulators: &[EvalAccumulator<F, DIGEST_ELEMS>],
     tau_challenges: &[F],
     rs_config: &RSEncodingConfig,
-    dft: &Dft,
+    _dft: &Dft,
     num_ood_samples: usize,
     num_shift_queries: usize,
     mut transcript_round: impl FnMut(&[F]) -> F,
@@ -163,7 +163,7 @@ where
     // Phase 1: Eval-claim sumcheck
     // ═══════════════════════════════════════════
     // Precompute μ_i = f̃_i(α_i) for each accumulator
-    let mut mu_table: Vec<F> = accumulators
+    let _mu_table: Vec<F> = accumulators
         .iter()
         .map(|acc| compute_mu(acc.witness.codeword.as_slice(), &acc.instance.eval_point))
         .collect();
@@ -269,7 +269,7 @@ where
     }
 
     // Compute folded eval claim: μ_folded = f̃_folded(α_folded)
-    let folded_mu = compute_mu(&folded_codeword, &folded_alpha);
+    let _folded_mu = compute_mu(&folded_codeword, &folded_alpha);
     let folded_witness_poly = EvaluationsList::new(folded_witness);
 
     // ═══════════════════════════════════════════
@@ -336,7 +336,7 @@ where
     let (final_eval_point, final_mu, batch_round_polys, batch_challenges) = if has_extra_claims {
         let mut all_eval_claims: Vec<(Vec<F>, F)> = Vec::new();
         all_eval_claims.push((folded_alpha_wit.clone(), folded_mu_wit));
-        for (pt, &val) in ood_points.iter().zip(ood_answers.iter()) {
+        for (pt, &_val) in ood_points.iter().zip(ood_answers.iter()) {
             // OOD claims are on the codeword — convert to witness domain
             let wit_pt = if pt.len() > wit_log_n { pt[..wit_log_n].to_vec() } else { pt.clone() };
             let wit_val = folded_witness_poly.evaluate_hypercube_base(
@@ -344,7 +344,7 @@ where
             );
             all_eval_claims.push((wit_pt, wit_val));
         }
-        for (k, &pos) in shift_query_positions.iter().enumerate() {
+        for (_k, &pos) in shift_query_positions.iter().enumerate() {
             let bool_point: Vec<F> = (0..wit_log_n)
                 .map(|bit| if (pos >> bit) & 1 == 1 { F::ONE } else { F::ZERO })
                 .collect();
@@ -530,7 +530,7 @@ where
     // Verify eval claim: the codeword MLE at eval_point should equal eval_claim
     #[cfg(debug_assertions)]
     {
-        let computed = codeword.evaluate_hypercube_base(
+        let _computed = codeword.evaluate_hypercube_base(
             &crate::poly::multilinear::MultilinearPoint::new(eval_point.clone()),
         );
         // Note: eval_point is in the message domain, not the code domain.

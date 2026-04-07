@@ -1581,7 +1581,7 @@ mod tests {
 
     #[test]
     fn test_table_and_oracle_provers_produce_identical_proofs() {
-        let (shape, instance, _input) = make_square_instance(4);
+        let (_shape, instance, _input) = make_square_instance(4);
         let prover = super::R1CSProver::new();
 
         let perm = Perm::new_from_rng_128(&mut rand::rngs::SmallRng::seed_from_u64(42));

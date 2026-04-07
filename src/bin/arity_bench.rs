@@ -187,10 +187,10 @@ fn precompute_fresh_root(
 fn verify_fold_soundness(
     shape: &R1CSShape<F>,
     result: &WarpFoldResult<F>,
-    acc: &WarpAccumulator<F, F, F, DIGEST>,
+    _acc: &WarpAccumulator<F, F, F, DIGEST>,
 ) -> Result<(), String> {
     // 1. Codeword eval claim consistency
-    let actual_eval = evaluate_mle_lsb(&result.witness.codeword, &result.instance.eval_point);
+    let _actual_eval = evaluate_mle_lsb(&result.witness.codeword, &result.instance.eval_point);
     let z = {
         let mut v = result.instance.pesat_x.clone();
         v.extend_from_slice(&result.witness.witness);

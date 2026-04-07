@@ -31,7 +31,7 @@ use crate::{
             },
             encoding::{merkle_commit_codeword, rs_encode},
             fold::{
-                evaluate_bundled_r1cs, warp_fold_prove_rs_committed, RSEncodingConfig,
+                warp_fold_prove_rs_committed, RSEncodingConfig,
                 WarpFoldResult,
             },
         },
@@ -40,7 +40,7 @@ use crate::{
     ivc::warp_fold_verifier_circuit::{
         WarpFoldVerifierWitness, synthesize_warp_ivc_circuit,
     },
-    poly::{evals::EvaluationsList, multilinear::MultilinearPoint},
+    poly::evals::EvaluationsList,
     spartan::{
         r1cs::{R1CSInstance, R1CSShape},
         r1cs_prover::R1CSProver,
@@ -1258,7 +1258,7 @@ where
 #[allow(clippy::too_many_arguments)]
 pub fn warp_ivc_init_recursive_union<F, EF, Dft, H, C, Challenger, L, Perm2, S, FoldChal>(
     shape: &R1CSShape<F>,
-    instance: &R1CSInstance<F>,
+    _instance: &R1CSInstance<F>,
     spartan_challenger: &mut Challenger,
     ivc_config: &WarpIVCConfig,
     dft: &Dft,
@@ -1297,7 +1297,7 @@ where
     let log_m = shape.num_cons().next_power_of_two().trailing_zeros() as usize;
 
     // Compute target witness count by building a dummy recursive circuit with verifier
-    let (target_witness, _, target_poly_vars_y) = compute_recursive_circuit_size_union::<
+    let (target_witness, _, _target_poly_vars_y) = compute_recursive_circuit_size_union::<
         F, L, Perm2, S,
     >(
         step_circuit, step_input_state, poseidon_config, poseidon_perm,
@@ -1457,7 +1457,7 @@ where
 use crate::{
     cp_snark::{commit_fold_transcript_with_shift_queries, CommittedFoldTranscript},
     ivc::warp_fold_verifier_algebraic::{
-        AlgebraicFoldVerifierWitness, compute_cp_circuit_size, synthesize_warp_ivc_circuit_cp,
+        AlgebraicFoldVerifierWitness, synthesize_warp_ivc_circuit_cp,
     },
 };
 
@@ -1681,8 +1681,6 @@ where
     S: crate::ivc::step::StepCircuit<F>,
     FoldChal: CanObserve<F> + CanSample<F>,
 {
-    let shape = &prev_state.shape;
-
     // ── Build algebraic verifier witness from previous fold ──
     let verifier_witness = prev_state.last_fold_result.as_ref().map(|fold_result| {
         AlgebraicFoldVerifierWitness::from_fold_data(
@@ -2717,7 +2715,7 @@ mod tests {
         let step = TrivialStepCircuit::new(1);
 
         // Measure with verifier (the full recursive circuit)
-        let (num_witness, num_constraints, num_poly_vars_y) =
+        let (num_witness, num_constraints, _num_poly_vars_y) =
             compute_recursive_circuit_size::<
                 F, GenericPoseidon2LinearLayersBabyBear, _, _,
             >(
@@ -2730,7 +2728,7 @@ mod tests {
         let mut step_only_builder = CircuitBuilder::<F>::new();
         let input = vec![step_only_builder.alloc_witness(F::ZERO)];
         let _ = step.synthesize(&mut step_only_builder, &input);
-        let step_only_witness = step_only_builder.num_witness_vars();
+        let _step_only_witness = step_only_builder.num_witness_vars();
         let step_only_constraints = step_only_builder.num_constraints();
 
         // Measure Poseidon2-only: build verifier without step
@@ -2754,7 +2752,7 @@ mod tests {
             &mut verifier_only_builder, &mut verifier_chal,
             &poseidon_config, &poseidon_perm, &dummy_witness,
         );
-        let verifier_only_witness = verifier_only_builder.num_witness_vars();
+        let _verifier_only_witness = verifier_only_builder.num_witness_vars();
         let verifier_only_constraints = verifier_only_builder.num_constraints();
 
         // Print breakdown (visible with --nocapture)
@@ -2810,7 +2808,7 @@ mod tests {
         use p3_baby_bear::GenericPoseidon2LinearLayersBabyBear;
         use crate::ivc::step::TrivialStepCircuit;
 
-        let shape = make_shape();
+        let _shape = make_shape();
         let dft = Radix2DFTSmallBatch::<F>::default();
         let ivc_config = WarpIVCConfig::default();
         let (mh, mc) = make_hash_compress();
@@ -2993,7 +2991,7 @@ mod tests {
         let (mh, mc) = make_hash_compress();
 
         // Init: create initial accumulator
-        let rs_config = RSEncodingConfig::new(ivc_config.rs_folding_factor, ivc_config.rs_log_inv_rate);
+        let _rs_config = RSEncodingConfig::new(ivc_config.rs_folding_factor, ivc_config.rs_log_inv_rate);
         let spartan_prover = crate::spartan::r1cs_prover::R1CSProver::new();
         let inst0 = make_instance(&shape, 3);
         let w0 = spartan_prover.prepare_witness(&inst0);

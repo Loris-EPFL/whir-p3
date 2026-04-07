@@ -431,16 +431,15 @@ mod tests {
     use alloc::vec;
 
     use p3_baby_bear::{BabyBear, GenericPoseidon2LinearLayersBabyBear, Poseidon2BabyBear};
-    use p3_challenger::{CanObserve, CanSample, DuplexChallenger, FieldChallenger};
+    use p3_challenger::DuplexChallenger;
     use p3_dft::Radix2DFTSmallBatch;
     use p3_field::{extension::BinomialExtensionField, BasedVectorSpace, Field, PrimeCharacteristicRing};
-    use p3_symmetric::{Hash, PaddingFreeSponge, TruncatedPermutation};
+    use p3_symmetric::{PaddingFreeSponge, TruncatedPermutation};
     use rand::{rngs::SmallRng, SeedableRng};
 
     use super::*;
     use crate::{
         accumulation::{
-            accumulator::AccumulatorInstance,
             linearized::initialize_accumulator_from_spartan,
             scheme::LinearizedAccumulationProver,
         },
@@ -526,7 +525,7 @@ mod tests {
             .unwrap();
 
         // 2. Build the witness for the recursive circuit
-        let to_arr = |ef: &EF| -> [F; 4] {
+        let _to_arr = |ef: &EF| -> [F; 4] {
             let s = ef.as_basis_coefficients_slice();
             [s[0], s[1], s[2], s[3]]
         };
@@ -540,7 +539,7 @@ mod tests {
             *acc1.public_instance.linear_claim.iter().next().unwrap().1,
         ];
 
-        let witness = AccumulationVerifierWitness::from_transcript(
+        let _witness = AccumulationVerifierWitness::from_transcript(
             &proof.transcript,
             input_roots,
             input_targets.clone(),
@@ -548,8 +547,8 @@ mod tests {
         );
 
         // 3. Synthesize the recursive circuit
-        let perm_circuit = Perm::new_from_rng_128(&mut SmallRng::seed_from_u64(99));
-        let poseidon_config = Poseidon2CircuitConfig::<F, 16>::from_rng(8, 13, 7, &mut SmallRng::seed_from_u64(99));
+        let _perm_circuit = Perm::new_from_rng_128(&mut SmallRng::seed_from_u64(99));
+        let _poseidon_config = Poseidon2CircuitConfig::<F, 16>::from_rng(8, 13, 7, &mut SmallRng::seed_from_u64(99));
 
         // We need to initialize the circuit challenger to match the prover's challenger.
         // The prover started with seed_challenger() which includes domain separator observation.
@@ -563,8 +562,8 @@ mod tests {
         // This is done by observing the same domain separator pattern.
         // For this test, we use the DomainSeparator to get the initial sponge state,
         // then set the circuit challenger to that state.
-        let real_challenger = seed_challenger(&config);
-        let mut circuit_challenger = CircuitChallenger::<F, 16, 8>::new(&mut builder);
+        let _real_challenger = seed_challenger(&config);
+        let _circuit_challenger = CircuitChallenger::<F, 16, 8>::new(&mut builder);
         // Override the circuit challenger's initial state to match the real one
         // by observing the domain separator elements.
         // TODO: In production, the domain separator observation would be done in-circuit.
@@ -576,7 +575,7 @@ mod tests {
         // we'd need to replicate this. For the test, let's use a simpler approach:
         // start both challengers from scratch (no domain separator).
         let fresh_perm = Perm::new_from_rng_128(&mut SmallRng::seed_from_u64(99));
-        let mut real_fresh = MyChallenger::new(fresh_perm.clone());
+        let _real_fresh = MyChallenger::new(fresh_perm.clone());
 
         // Re-accumulate with a fresh challenger (no domain separator)
         let mut fresh_prover_chal = MyChallenger::new(
@@ -603,7 +602,7 @@ mod tests {
         let mut builder2 = CircuitBuilder::<F>::new();
         let mut circuit_chal2 = CircuitChallenger::<F, 16, 8>::new(&mut builder2);
 
-        let (reduction_vars, combined_val) =
+        let (_reduction_vars, _combined_val) =
             synthesize_accumulation_verifier::<F, L, _, 16, 8>(
                 &mut builder2,
                 &mut circuit_chal2,

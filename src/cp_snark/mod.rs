@@ -110,6 +110,7 @@ pub struct CommittedFoldTranscript<F: Field> {
 /// Fiat-Shamir, produces the stored challenges. This is the relation R
 /// in Symphony's CP-SNARK: "the committed messages satisfy the fold
 /// verification protocol."
+#[derive(Debug)]
 pub struct WarpFoldRelation;
 
 impl symphony::CommittedRelation for WarpFoldRelation {

@@ -9,7 +9,7 @@
 
 use std::{env, time::Instant};
 
-use p3_koala_bear::{GenericPoseidon2LinearLayersKoalaBear, KoalaBear, Poseidon2KoalaBear};
+use p3_koala_bear::{KoalaBear, Poseidon2KoalaBear};
 use p3_challenger::DuplexChallenger;
 use p3_dft::Radix2DFTSmallBatch;
 use p3_field::{extension::BinomialExtensionField, Field, PrimeCharacteristicRing};
@@ -28,14 +28,13 @@ use whir_p3::{
             fold::{warp_fold_prove_rs_committed, RSEncodingConfig, WarpFoldResult},
         },
     },
-    circuit::{builder::CircuitBuilder, poseidon2::Poseidon2CircuitConfig, sponge::CircuitChallenger},
+    circuit::poseidon2::Poseidon2CircuitConfig,
     fiat_shamir::domain_separator::DomainSeparator,
     ivc::{
-        step::{TrivialStepCircuit, WorkloadStepCircuit},
-        warp_fold_verifier_circuit::{WarpFoldVerifierWitness, synthesize_warp_ivc_circuit},
+        step::WorkloadStepCircuit,
         warp_ivc::{
-            compute_recursive_circuit_size, compute_recursive_circuit_size_union,
-            warp_ivc_init, warp_ivc_step_recursive, warp_ivc_init_recursive_union,
+            compute_recursive_circuit_size_union,
+            warp_ivc_init, warp_ivc_init_recursive_union,
             warp_ivc_step_recursive_union, WarpIVCConfig,
         },
     },
@@ -648,7 +647,7 @@ fn main() {
     println!("{:>10} {:>12} {:>12}", "log_size", "prove(us)", "verify(us)");
     println!("{}", "-".repeat(38));
 
-    let dft_v = Radix2DFTSmallBatch::<F>::default();
+    let _dft_v = Radix2DFTSmallBatch::<F>::default();
     for &log_size in &sizes {
         let num_vars = 1 << log_size;
         let num_inputs = 8;

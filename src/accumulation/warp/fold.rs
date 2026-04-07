@@ -1318,7 +1318,7 @@ where
         let rho = transcript_round(&[F::from_usize(2000)]);
 
         // Run the evaluation batching sumcheck
-        let (new_eval_point, new_eval_claim, batch_round_polys, batch_challenges) =
+        let (new_eval_point, _new_eval_claim, batch_round_polys, batch_challenges) =
             evaluation_batching_sumcheck(
                 witness.codeword.as_slice(),
                 &eval_claims,

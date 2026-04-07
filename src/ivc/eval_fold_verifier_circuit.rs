@@ -313,7 +313,7 @@ mod tests {
     use p3_baby_bear::{BabyBear, GenericPoseidon2LinearLayersBabyBear, Poseidon2BabyBear};
     use p3_challenger::DuplexChallenger;
     use p3_field::PrimeCharacteristicRing;
-    use p3_symmetric::{PaddingFreeSponge, TruncatedPermutation};
+    
     use rand::{rngs::SmallRng, SeedableRng};
 
     use super::*;
@@ -341,7 +341,7 @@ mod tests {
         let mut builder = CircuitBuilder::<F>::new();
         let mut challenger = CircuitChallenger::<F, 16, 8>::new(&mut builder);
 
-        let (challenges, final_var, final_val) =
+        let (challenges, _final_var, final_val) =
             synthesize_eval_fold_verifier::<
                 F, GenericPoseidon2LinearLayersBabyBear, _, 16, 8,
             >(
@@ -431,7 +431,7 @@ mod tests {
             F, GenericPoseidon2LinearLayersBabyBear, _, 16, 8,
         >(&mut eval_builder, &mut eval_chal, &poseidon_config, &poseidon_perm, &eval_witness);
         let eval_constraints = eval_builder.num_constraints();
-        let eval_witness_vars = eval_builder.num_witness_vars();
+        let _eval_witness_vars = eval_builder.num_witness_vars();
 
         // V2 constraint-batch verifier (EF sumcheck, 3 rounds for 3-variable claims)
         let v2_witness = crate::ivc::verifier_circuit::AccumulationVerifierWitness {
@@ -451,7 +451,7 @@ mod tests {
             F, GenericPoseidon2LinearLayersBabyBear, _, 16, 8,
         >(&mut v2_builder, &mut v2_chal, &poseidon_config, &poseidon_perm, &v2_witness, F::from_u64(11));
         let v2_constraints = v2_builder.num_constraints();
-        let v2_witness_vars = v2_builder.num_witness_vars();
+        let _v2_witness_vars = v2_builder.num_witness_vars();
 
         // The eval-fold verifier should be meaningfully smaller.
         // Exact sizes depend on Poseidon2 round counts but the sumcheck portion

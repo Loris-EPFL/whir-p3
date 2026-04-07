@@ -179,7 +179,7 @@ mod tests {
         // RS-encode combined witness
         let codeword = rs_encode(&combined, rs_config.folding_factor, rs_config.log_inv_rate, &dft);
         let code_len = codeword.as_slice().len();
-        let log_n = code_len.trailing_zeros() as usize;
+        let _log_n = code_len.trailing_zeros() as usize;
 
         // Create eval claim on the WITNESS polynomial (not codeword).
         // Evaluate at zero → witness[0] = f̃_wit(0...0)
@@ -366,7 +366,7 @@ mod tests {
 
         let cw01 = rs_encode(&combined_01, rs_config.folding_factor, rs_config.log_inv_rate, &dft);
         let code_len = cw01.as_slice().len();
-        let log_n = code_len.trailing_zeros() as usize;
+        let _log_n = code_len.trailing_zeros() as usize;
 
         // Eval claim on WITNESS polynomial
         let fresh_acc_01 = EvalAccumulator {

@@ -16,13 +16,10 @@
 
 use p3_field::Field;
 
-use crate::{
-    poly::multilinear::MultilinearPoint,
-    spartan::r1cs::R1CSShape,
-};
+use crate::spartan::r1cs::R1CSShape;
 
 use super::{
-    accumulator::{WarpAccumulator, WarpAccumulatorInstance},
+    accumulator::WarpAccumulator,
     fold::{build_z_vector, evaluate_bundled_r1cs},
 };
 

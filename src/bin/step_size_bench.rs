@@ -16,7 +16,7 @@ use std::{env, time::Instant};
 use p3_koala_bear::{KoalaBear, Poseidon2KoalaBear};
 use p3_challenger::{CanObserve, CanSample, DuplexChallenger};
 use p3_dft::Radix2DFTSmallBatch;
-use p3_field::{extension::BinomialExtensionField, Field, PrimeCharacteristicRing};
+use p3_field::{extension::BinomialExtensionField, PrimeCharacteristicRing};
 use p3_symmetric::{PaddingFreeSponge, TruncatedPermutation};
 use rand::{rngs::SmallRng, SeedableRng};
 
@@ -28,7 +28,7 @@ use whir_p3::{
         encoding::{merkle_commit_codeword, rs_encode},
         fold::{evaluate_mle_lsb, warp_fold_prove_rs_committed, RSEncodingConfig, WarpFoldResult},
     },
-    circuit::builder::{CircuitBuilder, Var},
+    circuit::builder::CircuitBuilder,
     ivc::step::{StepCircuit, WorkloadStepCircuit},
     poly::evals::EvaluationsList,
     spartan::r1cs_prover::R1CSProver,

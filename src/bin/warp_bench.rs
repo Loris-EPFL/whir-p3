@@ -27,16 +27,14 @@ use whir_p3::{
         random_lc::random_linear_combination,
         warp::{
             accumulator::{FreshInstance, WarpAccumulator, WarpAccumulatorInstance, WarpAccumulatorWitness},
-            decider::warp_decide_algebraic_rs,
-            encoding::{codeword_size, merkle_commit_codeword},
-            fold::{warp_fold_prove_rs_committed, warp_fold_verify, FreshInstancePublic, RSEncodingConfig, WarpFoldResult},
+            encoding::merkle_commit_codeword,
+            fold::{warp_fold_prove_rs_committed, RSEncodingConfig, WarpFoldResult},
         },
     },
     circuit::poseidon2::Poseidon2CircuitConfig,
     fiat_shamir::domain_separator::DomainSeparator,
     ivc::warp_ivc::{
-        warp_ivc_init, warp_ivc_step_recursive, compute_recursive_circuit_size,
-        WarpIVCConfig,
+        compute_recursive_circuit_size, WarpIVCConfig,
     },
     parameters::{errors::SecurityAssumption, FoldingFactor, ProtocolParameters},
     poly::{evals::EvaluationsList, multilinear::MultilinearPoint},
@@ -548,7 +546,7 @@ fn run_recursive_ivc(
     shape: &R1CSShape<F>,
     num_steps: usize,
     num_cons: usize,
-    num_witness: usize,
+    _num_witness: usize,
     num_inputs: usize,
 ) -> (f64, f64, f64) {
     // Returns (circuit_build_us, spartan_prove_us, warp_fold_us) — all steps total
@@ -576,7 +574,7 @@ fn run_recursive_ivc(
 
     // Build a satisfying R1CS instance for init
     let mut rng = SmallRng::seed_from_u64(5);
-    let (_synth_shape, synth_instance) =
+    let (_synth_shape, _synth_instance) =
         R1CSInstance::<F>::produce_synthetic_r1cs(num_cons, shape.num_vars(), num_inputs, &mut rng);
 
     // Init step: build padded unified circuit (no verifier) to get consistent shape
@@ -676,7 +674,7 @@ fn run_recursive_ivc(
             &mut builder, &mut circuit_chal, &poseidon_config, &poseidon_perm,
             &step_circuit, &[F::ZERO], verifier_witness.as_ref(), Some(target_witness),
         );
-        let (unified_shape, unified_instance) = builder.build();
+        let (_unified_shape, unified_instance) = builder.build();
         total_circuit_us += circuit_start.elapsed().as_micros() as f64;
 
         // Phase 2: Spartan prove

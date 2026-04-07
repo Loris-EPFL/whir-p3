@@ -296,7 +296,7 @@ mod tests {
         let step = TrivialStepCircuit::new(1);
 
         // CP-SNARK mode: algebraic verifier
-        let (cp_witness, cp_constraints, _) =
+        let (_cp_witness, cp_constraints, _) =
             compute_cp_circuit_size(&step, &[F::ZERO]);
 
         // For comparison: algebraic-only (no step, no padding)

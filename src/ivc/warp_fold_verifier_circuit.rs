@@ -655,7 +655,7 @@ mod tests {
         // Round 0: h(0)+h(1) = initial_claim
         let e0_r0 = F::from_u64(15);
         let e1_r0 = F::from_u64(15);
-        let initial_claim = e0_r0 + e1_r0; // = 30
+        let _initial_claim = e0_r0 + e1_r0; // = 30
         // e2 can be anything — it sets the degree-2 coefficient
         let e2_r0 = F::from_u64(25);
 
