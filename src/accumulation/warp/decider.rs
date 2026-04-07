@@ -37,29 +37,16 @@ pub enum WarpDeciderError {
     CodewordValidityFailed,
 }
 
-/// Algebraic decider: checks all accumulated claims against the witness.
+/// Identity-encoding algebraic decider (test-only).
 ///
-/// This is the prover-side check that verifies the accumulator is valid
-/// before generating a succinct proof. All 3 WARP decider conditions are
-/// checked:
-///
-/// 1. f̂(α) = μ
-/// 2. P*(β, z) = η
-/// 3. f = encode(w)  (deferred — using identity encoding for now)
-///
-/// # Arguments
-/// - `shape`: R1CS constraint shape
-/// - `acc`: the final accumulated instance + witness
-///
-/// # Returns
-/// Ok(()) if all checks pass, Err with the first failing check otherwise.
+/// Uses identity encoding (codeword = witness) instead of RS encoding.
+/// Only useful for unit tests that don't go through the full RS pipeline.
+/// For production, use `warp_decide_algebraic_rs` or `warp_decide_full_rs`.
+#[cfg(test)]
 pub fn warp_decide_algebraic<F: Field>(
     shape: &R1CSShape<F>,
     acc: &WarpAccumulator<F, F, F, 8>,
 ) -> Result<(), WarpDeciderError> {
-    // Check 1: Evaluation claim f̂(α) = μ
-    // eval_point is in LSB-first convention (from the fold's compute_eq_table).
-    // evaluate_mle_lsb handles the reversal for evaluate_hypercube_base.
     let computed_mu = super::fold::evaluate_mle_lsb(
         &acc.witness.codeword,
         &acc.instance.eval_point,
@@ -69,8 +56,6 @@ pub fn warp_decide_algebraic<F: Field>(
         return Err(WarpDeciderError::EvaluationClaimFailed);
     }
 
-    // Check 2: PESAT satisfaction P*(β, z) = η
-    // evaluate_bundled_r1cs uses compute_eq_table (LSB-first), matching pesat_tau.
     let z = build_z_vector(&acc.instance.pesat_x, &acc.witness.witness);
     let computed_eta = evaluate_bundled_r1cs(shape, &acc.instance.pesat_tau, &z);
 
@@ -78,14 +63,9 @@ pub fn warp_decide_algebraic<F: Field>(
         return Err(WarpDeciderError::PesatSatisfactionFailed);
     }
 
-    // Check 3: Codeword validity f = encode(w)
-    // With identity encoding, the codeword IS the witness (padded).
-    // For real RS encoding, this would check f == RS::encode(w).
-    // For now, verify they share the same data in the witness portion.
     let witness_len = acc.witness.witness.len();
     let codeword_prefix = &acc.witness.codeword.as_slice()[..witness_len];
     if codeword_prefix != acc.witness.witness.as_slice() {
-        // Only check the prefix — identity encoding pads with zeros
         return Err(WarpDeciderError::CodewordValidityFailed);
     }
 
@@ -176,27 +156,119 @@ where
     Ok(())
 }
 
-/// Verify the decider conditions using only the public instance + claimed values.
+/// Terminal WHIR proof errors.
+#[derive(Debug, Clone)]
+pub enum TerminalWhirError {
+    /// The algebraic decider failed before WHIR.
+    Decider(WarpDeciderError),
+    /// WHIR commitment root does not match the accumulated root.
+    RootBindingMismatch,
+    /// WHIR prove failed.
+    ProveFailed,
+    /// WHIR verify failed.
+    VerifyFailed,
+}
+
+/// Terminal WHIR proof: full prover-side decider + WHIR prove + root binding + WHIR verify.
 ///
-/// This is the verifier-side check. It cannot check the evaluation claim or
-/// PESAT satisfaction directly (no witness access). In a full implementation,
-/// this would verify a WHIR proof. For now, it checks structural consistency.
-pub fn warp_decide_verify_instance<F: Field>(
-    instance: &WarpAccumulatorInstance<F, F, F, 8>,
-) -> Result<(), WarpDeciderError> {
-    // The verifier can only check that the instance is well-formed.
-    // The actual cryptographic verification (WHIR proof) is deferred
-    // to integration with the WHIR PCS layer.
+/// This is the complete succinct terminal verification per the WARP paper:
+///
+/// 1. **Full RS decider**: f̂(α) = μ, P*(β, z) = η, f = RS_encode(w)
+/// 2. **WHIR prove**: commit + prove RS proximity on the accumulated witness
+/// 3. **Root binding**: WHIR root == accumulated commitment root
+/// 4. **WHIR verify**: succinct verification (no witness access)
+///
+/// After this function returns `Ok(proof)`, anyone holding just the proof and
+/// the accumulated instance can verify succinctly via step 4 alone.
+pub fn terminal_whir_prove_and_verify<F, EF, Dft, H, C, Challenger>(
+    shape: &R1CSShape<F>,
+    acc: &WarpAccumulator<F, F, F, 8>,
+    folding_factor: usize,
+    log_inv_rate: usize,
+    dft: &Dft,
+    whir_config: &crate::whir::parameters::WhirConfig<EF, F, H, C, Challenger>,
+    mut make_whir_challenger: impl FnMut() -> Challenger,
+) -> Result<crate::whir::proof::WhirProof<F, EF, F, 8>, TerminalWhirError>
+where
+    F: p3_field::TwoAdicField + p3_field::PrimeField64,
+    EF: p3_field::ExtensionField<F> + p3_field::TwoAdicField,
+    Dft: p3_dft::TwoAdicSubgroupDft<F>,
+    H: p3_symmetric::CryptographicHasher<F, [F; 8]>
+        + p3_symmetric::CryptographicHasher<<F as p3_field::Field>::Packing, [<F as p3_field::Field>::Packing; 8]>
+        + Sync
+        + Clone,
+    C: p3_symmetric::PseudoCompressionFunction<[F; 8], 2>
+        + p3_symmetric::PseudoCompressionFunction<[<F as p3_field::Field>::Packing; 8], 2>
+        + Sync
+        + Clone,
+    <F as p3_field::Field>::Packing: Eq + Send + Sync,
+    Challenger: p3_challenger::FieldChallenger<F>
+        + p3_challenger::GrindingChallenger<Witness = F>
+        + p3_challenger::CanObserve<p3_symmetric::Hash<F, F, 8>>,
+{
+    use crate::{
+        poly::evals::EvaluationsList,
+        whir::{
+            committer::writer::CommitmentWriter,
+            committer::reader::CommitmentReader,
+            constraints::statement::{EqStatement, InitialClaim, LinearStatement},
+            proof::WhirProof,
+            prover::Prover as WhirProver,
+            verifier::Verifier as WhirVerifier,
+        },
+    };
 
-    // Structural checks:
-    if instance.eval_point.is_empty() {
-        return Err(WarpDeciderError::EvaluationClaimFailed);
-    }
-    if instance.pesat_tau.is_empty() {
-        return Err(WarpDeciderError::PesatSatisfactionFailed);
+    // Step 1: Full prover-side decider (all 3 WARP conditions)
+    warp_decide_full_rs(shape, acc, folding_factor, log_inv_rate, dft)
+        .map_err(TerminalWhirError::Decider)?;
+
+    // Step 2: Build witness polynomial and WHIR prove
+    let witness_raw = &acc.witness.witness;
+    let witness_len = witness_raw.len().next_power_of_two();
+    let mut witness_padded = witness_raw.clone();
+    witness_padded.resize(witness_len, F::ZERO);
+    let witness_poly = EvaluationsList::new(witness_padded);
+    let witness_num_vars = witness_poly.num_variables();
+
+    let linear_claim = LinearStatement::<F, EF>::initialize(witness_num_vars);
+    let mut statement = whir_config.initial_statement_with_linear(
+        witness_poly, linear_claim,
+    );
+    let mut whir_proof = WhirProof::<F, EF, F, 8>::from_whir_config(whir_config);
+    let mut prove_challenger = make_whir_challenger();
+
+    let commitment = CommitmentWriter::new(whir_config)
+        .commit::<_, <F as p3_field::Field>::Packing, F, <F as p3_field::Field>::Packing, 8>(
+            dft, &mut whir_proof, &mut prove_challenger, &mut statement,
+        )
+        .map_err(|_| TerminalWhirError::ProveFailed)?;
+
+    WhirProver(whir_config)
+        .prove::<_, <F as p3_field::Field>::Packing, F, <F as p3_field::Field>::Packing, 8>(
+            dft, &mut whir_proof, &mut prove_challenger, &statement, commitment,
+        )
+        .map_err(|_| TerminalWhirError::ProveFailed)?;
+
+    // Step 3: Root binding — WHIR root must match accumulated root
+    if whir_proof.initial_commitment != acc.instance.commitment_root {
+        return Err(TerminalWhirError::RootBindingMismatch);
     }
 
-    Ok(())
+    // Step 4: WHIR verify (succinct — no witness needed)
+    let initial_claim = InitialClaim {
+        eq_statement: EqStatement::initialize(witness_num_vars),
+        linear_statement: LinearStatement::<F, EF>::initialize(witness_num_vars),
+    };
+    let mut verify_challenger = make_whir_challenger();
+    let parsed = CommitmentReader::new(whir_config)
+        .parse_commitment::<F, 8>(&whir_proof, &mut verify_challenger);
+    WhirVerifier::new(whir_config)
+        .verify_with_initial_claim::<<F as p3_field::Field>::Packing, F, <F as p3_field::Field>::Packing, 8>(
+            &whir_proof, &mut verify_challenger, &parsed, initial_claim,
+        )
+        .map_err(|_| TerminalWhirError::VerifyFailed)?;
+
+    Ok(whir_proof)
 }
 
 #[cfg(test)]

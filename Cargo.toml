@@ -125,6 +125,10 @@ required-features = ["symphony"]
 name = "arity_bench"
 path = "src/bin/arity_bench.rs"
 
+[[bin]]
+name = "profile_spartan"
+path = "src/bin/profile_spartan.rs"
+
 [profile.profiling]
 inherits = "release"
 debug = true

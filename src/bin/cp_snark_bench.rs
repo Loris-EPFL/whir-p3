@@ -312,7 +312,7 @@ fn run_regular_recursive(
         GenericPoseidon2LinearLayersKoalaBear,
         _,
         _,
-    >(&step, &[F::ZERO], &poseidon_config, &poseidon_perm, probe_log_code);
+    >(&step, &[F::ZERO], &poseidon_config, &poseidon_perm, probe_log_code, probe_shape.num_cons().next_power_of_two().trailing_zeros() as usize);
 
     // Init: padded circuit (no verifier)
     let mut init_builder = CircuitBuilder::<F>::new();
@@ -461,6 +461,8 @@ fn run_regular_recursive(
             ],
             &last_fold.sumcheck_round_polys,
             prev_fold_omega,
+            1,
+            lm_rec,
         );
 
         let t1 = Instant::now();
@@ -543,6 +545,246 @@ fn run_regular_recursive(
         prev_inst = acc.instance.clone();
         acc = rebuild_acc(&result);
         last_fold = result;
+    }
+
+    (synth_spartan_us, circuit_us, rec_spartan_us, fold_us)
+}
+
+/// Run N steps of **recursive union IVC** with Poseidon2 in-circuit verifier (NO Symphony).
+///
+/// This is the fair comparison to `run_regular_recursive` but with Quasar union folding
+/// at arity `ℓ`. The recursive circuit contains:
+///   - User step circuit
+///   - Poseidon2 union verifier: O(1) FS absorptions (running acc + union root)
+///   - `log_ℓ` sumcheck round checks
+///
+/// Per step: builds `arity-1` recursive circuits, Spartan-proves each, union-folds them.
+/// Returns (synth_spartan, circuit_build, rec_spartan, fold) in us.
+fn run_regular_recursive_union(
+    _shape: &R1CSShape<F>,
+    instance: &R1CSInstance<F>,
+    num_steps: usize,
+    arity: usize,
+    step_muls: usize,
+) -> (f64, f64, f64, f64) {
+    use whir_p3::accumulation::warp::{
+        encoding::{build_union_codeword, union_folding_factor},
+        fold::warp_fold_prove_rs_union,
+    };
+    use whir_p3::ivc::warp_ivc::compute_recursive_circuit_size_union;
+
+    let step = WorkloadStepCircuit::new(step_muls);
+    let dft = Radix2DFTSmallBatch::<F>::default();
+    let (mh, mc) = make_hc();
+    let rs_config = RSEncodingConfig::new(2, RS_LOG_INV_RATE);
+    let (poseidon_perm, poseidon_config) = make_poseidon2_pair(99);
+    let spartan = R1CSProver::new();
+    let num_fresh = arity - 1;
+    let log_l = arity.trailing_zeros() as usize;
+
+    // Probe the step circuit to determine eval_point size
+    let mut probe_builder = CircuitBuilder::<F>::new();
+    let probe_in = probe_builder.alloc_witness(F::ZERO);
+    let _ = step.synthesize(&mut probe_builder, &[probe_in]);
+    let (probe_shape, probe_inst) = probe_builder.build();
+    let probe_w = spartan.prepare_witness(&probe_inst);
+    let probe_ni = probe_inst.input().len();
+    let probe_nw = (probe_w.num_evals() - probe_ni).next_power_of_two();
+    let probe_log_code = probe_nw.trailing_zeros() as usize + RS_LOG_INV_RATE;
+    let probe_log_m = probe_shape.num_cons().next_power_of_two().trailing_zeros() as usize;
+
+    // Compute recursive union circuit size (log_l sumcheck rounds + O(1) absorption)
+    let (target_w, _, _) = compute_recursive_circuit_size_union::<
+        F,
+        GenericPoseidon2LinearLayersKoalaBear,
+        _,
+        _,
+    >(&step, &[F::ZERO], &poseidon_config, &poseidon_perm, probe_log_code, arity, probe_log_m);
+
+    // Build a sample shape to extract dimensions
+    let dummy_witness_init = WarpFoldVerifierWitness::from_fold_result_union(
+        vec![F::ZERO; DIGEST],
+        F::ZERO,
+        vec![F::ZERO; probe_log_code],
+        F::ZERO,
+        vec![F::ZERO; DIGEST],
+        &vec![vec![F::ZERO; 3]; log_l],
+        F::ZERO,
+        num_fresh,
+        probe_log_m,
+    );
+    let mut sample_builder = CircuitBuilder::<F>::new();
+    let mut sample_chal = CircuitChallenger::<F, 16, 8>::new(&mut sample_builder);
+    let _ = synthesize_warp_ivc_circuit::<F, GenericPoseidon2LinearLayersKoalaBear, _, _, 16, 8>(
+        &mut sample_builder, &mut sample_chal, &poseidon_config, &poseidon_perm,
+        &step, &[F::ZERO], Some(&dummy_witness_init), Some(target_w),
+    );
+    let (sample_shape, sample_inst) = sample_builder.build();
+    let num_inputs = sample_inst.input().len();
+    let num_vars_y = 1usize << sample_shape.num_poly_vars_y();
+    let num_witness = num_vars_y;
+    let log_code = num_witness.trailing_zeros() as usize + RS_LOG_INV_RATE;
+    let log_m = sample_shape
+        .num_cons()
+        .next_power_of_two()
+        .trailing_zeros() as usize;
+
+    let mut acc = make_zero_acc(num_witness, log_code, log_m, num_inputs);
+    let mut last_union_root: [F; DIGEST] = [F::ZERO; DIGEST];
+    let mut last_fold_opt: Option<WarpFoldResult<F>> = None;
+    let mut prev_inst: Option<WarpAccumulatorInstance<F, F, F, DIGEST>> = None;
+
+    let mut synth_spartan_us = 0.0;
+    let mut circuit_us = 0.0;
+    let mut rec_spartan_us = 0.0;
+    let mut fold_us = 0.0;
+
+    for s in 0..num_steps {
+        // 1. Spartan prove the synthetic R1CS × num_fresh (application cost)
+        let t0 = Instant::now();
+        for f in 0..num_fresh {
+            let mut sch = make_challenger(s as u64 * 100 + f as u64 + 200);
+            let _ = spartan.prove::<EF, _>(instance, &mut sch);
+        }
+        synth_spartan_us += t0.elapsed().as_micros() as f64;
+
+        // 2. Build verifier witness (union mode). Use real data if available,
+        //    otherwise use zeros. In EITHER case, we must run the FS dry-run
+        //    to compute the omega that the in-circuit Poseidon2 verifier will
+        //    derive from the (possibly zero) data.
+        let (running_root, running_eval_claim, running_eval_point, running_pesat_target,
+             used_union_root, used_round_polys): (Vec<F>, F, Vec<F>, F, Vec<F>, Vec<Vec<F>>) =
+            if let (Some(p_inst), Some(fr)) = (prev_inst.as_ref(), last_fold_opt.as_ref()) {
+                if fr.sumcheck_round_polys.len() == log_l {
+                    (p_inst.commitment_root.to_vec(), p_inst.eval_claim,
+                     p_inst.eval_point.clone(), p_inst.pesat_target,
+                     last_union_root.to_vec(), fr.sumcheck_round_polys.clone())
+                } else {
+                    (vec![F::ZERO; DIGEST], F::ZERO, vec![F::ZERO; probe_log_code],
+                     F::ZERO, vec![F::ZERO; DIGEST], vec![vec![F::ZERO; 3]; log_l])
+                }
+            } else {
+                (vec![F::ZERO; DIGEST], F::ZERO, vec![F::ZERO; probe_log_code],
+                 F::ZERO, vec![F::ZERO; DIGEST], vec![vec![F::ZERO; 3]; log_l])
+            };
+
+        // Dry-run FS: observe the SAME data the circuit will observe, derive omega.
+        let mut dry_chal = make_challenger(99);
+        for &val in &running_root { dry_chal.observe(val); }
+        dry_chal.observe(running_eval_claim);
+        for &val in &running_eval_point { dry_chal.observe(val); }
+        dry_chal.observe(running_pesat_target);
+        for &val in &used_union_root { dry_chal.observe(val); }
+        let prev_fold_omega: F = dry_chal.sample();
+
+        let verifier_witness = WarpFoldVerifierWitness::from_fold_result_union(
+            running_root, running_eval_claim, running_eval_point, running_pesat_target,
+            used_union_root, &used_round_polys, prev_fold_omega,
+            num_fresh, log_m,
+        );
+
+        // 4. Build arity-1 recursive circuits (each with Poseidon2 UNION verifier)
+        let t1 = Instant::now();
+        let mut rec_instances = Vec::with_capacity(num_fresh);
+        for f in 0..num_fresh {
+            let mut builder = CircuitBuilder::<F>::new();
+            let mut challenger = CircuitChallenger::<F, 16, 8>::new(&mut builder);
+            let _ = synthesize_warp_ivc_circuit::<
+                F, GenericPoseidon2LinearLayersKoalaBear, _, _, 16, 8,
+            >(
+                &mut builder, &mut challenger, &poseidon_config, &poseidon_perm,
+                &step, &[F::from_u64(s as u64 * 100 + f as u64 + 10)],
+                Some(&verifier_witness), Some(target_w),
+            );
+            let (_shape, rec_inst) = builder.build();
+            rec_instances.push(rec_inst);
+        }
+        circuit_us += t1.elapsed().as_micros() as f64;
+
+        // 5. Spartan-prove each recursive circuit
+        let t2 = Instant::now();
+        let mut fresh_instances = Vec::with_capacity(num_fresh);
+        let mut fresh_codewords = Vec::with_capacity(num_fresh);
+        for (f, rec_inst) in rec_instances.iter().enumerate() {
+            let mut rch = make_challenger(s as u64 * 100 + f as u64 + 500);
+            let _ = spartan.prove::<EF, _>(rec_inst, &mut rch);
+            let wp = spartan.prepare_witness(rec_inst);
+            let z = wp.as_slice();
+            let pi = z[..num_inputs].to_vec();
+            let mut wpart = z[num_inputs..].to_vec();
+            wpart.resize(num_witness, F::ZERO);
+            let wp_list = EvaluationsList::new(wpart.clone());
+            let cw = rs_encode(&wp_list, rs_config.folding_factor, rs_config.log_inv_rate, &dft);
+            fresh_codewords.push(cw);
+            fresh_instances.push(FreshInstance { public_input: pi, witness: wpart });
+        }
+        rec_spartan_us += t2.elapsed().as_micros() as f64;
+
+        // 6. Union-fold with Poseidon2-derived challenges
+        let t3 = Instant::now();
+        let code_len = acc.witness.codeword.as_slice().len();
+        let l = arity;
+        let mut all_cw: Vec<Vec<F>> = Vec::with_capacity(l);
+        all_cw.push(acc.witness.codeword.as_slice().to_vec());
+        for cw in &fresh_codewords {
+            all_cw.push(cw.as_slice().to_vec());
+        }
+        while all_cw.len() < l {
+            all_cw.push(vec![F::ZERO; code_len]);
+        }
+        let union_cw = build_union_codeword(&all_cw);
+        let union_ff = union_folding_factor(rs_config.folding_factor, l);
+        let union_ev = EvaluationsList::new(union_cw);
+        let (union_root, _union_tree) = merkle_commit_codeword::<F, F, _, _, MyHash, MyCompress, DIGEST>(
+            &union_ev, union_ff, mh.clone(), mc.clone(),
+        );
+
+        // Inline the fold FS derivation so the sumcheck challenger state matches
+        // what the in-circuit Poseidon2 verifier expects. The circuit now samples
+        // fresh_betas from the same challenger, so we do the same here.
+        let mut fold_chal = make_challenger(99);
+        for &val in &acc.instance.commitment_root { fold_chal.observe(val); }
+        fold_chal.observe(acc.instance.eval_claim);
+        for &val in &acc.instance.eval_point { fold_chal.observe(val); }
+        fold_chal.observe(acc.instance.pesat_target);
+        for &val in &union_root { fold_chal.observe(val); }
+        let omega: F = fold_chal.sample();
+        let tau: Vec<F> = (0..log_l).map(|_| fold_chal.sample()).collect();
+        let fresh_betas: Vec<Vec<F>> = (0..num_fresh)
+            .map(|_| (0..log_m).map(|_| fold_chal.sample()).collect())
+            .collect();
+
+        let mhc = mh.clone();
+        let mcc = mc.clone();
+        let mh2 = mh.clone();
+        let mc2 = mc.clone();
+        let result = warp_fold_prove_rs_union(
+            &sample_shape, &fresh_instances, &acc, omega, &tau, &fresh_betas,
+            &rs_config, &dft,
+            |round_evals| {
+                for &e in round_evals { fold_chal.observe(e); }
+                fold_chal.sample()
+            },
+            |cw, ff| {
+                let (root, _) = merkle_commit_codeword::<F, F, _, _, MyHash, MyCompress, DIGEST>(
+                    cw, ff, mhc.clone(), mcc.clone(),
+                );
+                root
+            },
+            |ucw, uff| {
+                let uev = EvaluationsList::new(ucw.to_vec());
+                let (root, _) = merkle_commit_codeword::<F, F, _, _, MyHash, MyCompress, DIGEST>(
+                    &uev, uff, mh2.clone(), mc2.clone(),
+                );
+                root
+            },
+        );
+        fold_us += t3.elapsed().as_micros() as f64;
+
+        prev_inst = Some(acc.instance.clone());
+        acc = rebuild_acc(&result);
+        last_union_root = union_root;
+        last_fold_opt = Some(result);
     }
 
     (synth_spartan_us, circuit_us, rec_spartan_us, fold_us)
@@ -1186,6 +1428,106 @@ fn run_recursive_union_cp_snark(
     (synth_spartan_us, circuit_us, rec_spartan_us, fold_us, terminal_us)
 }
 
+/// Standalone verifier benchmark: isolates Quasar's sublinear verifier claim.
+///
+/// Per Quasar Lemma 3: the union verifier's RO queries are O(log ℓ) vs O(ℓ) for non-union.
+/// This measures the native Fiat-Shamir + algebraic sumcheck verification work
+/// (no Merkle opening, no Spartan) at increasing arities ℓ.
+///
+/// **Non-union verifier** (WARP standard):
+///   Observes running acc (8+log_code+2 elems) + ℓ-1 fresh accs each (8+log_code+2 elems)
+///   → O(ℓ) Poseidon2 absorptions
+///   + log_l sumcheck rounds (interpolation checks)
+///
+/// **Union verifier** (Quasar multicast):
+///   Observes running acc + single union root (8 elems)
+///   → O(1) Poseidon2 absorptions
+///   + log_l sumcheck rounds (same)
+///
+/// Returns (nonunion_us, union_us, ratio = nonunion/union).
+fn run_verifier_benchmark(arity: usize, log_code: usize, iters: usize) -> (f64, f64) {
+    use p3_field::{Field, PrimeCharacteristicRing};
+    let l = arity;
+    let log_l = l.trailing_zeros() as usize;
+
+    // Fake but well-sized fold data. Exact values don't matter for timing.
+    let acc_root = [F::from_u64(1); DIGEST];
+    let acc_eval_claim = F::from_u64(42);
+    let acc_eval_point: Vec<F> = (0..log_code).map(|i| F::from_u64(i as u64)).collect();
+    let acc_pesat_target = F::from_u64(3);
+    let fresh_roots: Vec<[F; DIGEST]> = (0..(l - 1))
+        .map(|i| [F::from_u64(i as u64 + 100); DIGEST])
+        .collect();
+    let union_root = [F::from_u64(7); DIGEST];
+    // Sumcheck polys that satisfy identities: zero polynomials (trivially pass checks).
+    let sumcheck_polys: Vec<[F; 3]> = vec![[F::ZERO; 3]; log_l];
+
+    // ── Non-union verifier (O(ℓ) absorptions) ──
+    let t_nu = Instant::now();
+    for _ in 0..iters {
+        let mut chal = make_challenger(42);
+        // Observe running acc
+        for &v in &acc_root { chal.observe(v); }
+        chal.observe(acc_eval_claim);
+        for &v in &acc_eval_point { chal.observe(v); }
+        chal.observe(acc_pesat_target);
+        // Observe ℓ-1 fresh accs individually — O(ℓ)
+        for fresh_root in &fresh_roots {
+            for &v in fresh_root { chal.observe(v); }
+            chal.observe(F::ZERO);
+            for _ in 0..log_code { chal.observe(F::ZERO); }
+            chal.observe(F::ZERO);
+        }
+        // Sample omega, tau
+        let _omega: F = chal.sample();
+        for _ in 0..log_l { let _: F = chal.sample(); }
+        // Sumcheck: observe round polys, sample r, verify algebraic identities
+        let mut claimed = sumcheck_polys[0][0] + sumcheck_polys[0][1];
+        for round in 0..log_l {
+            let [e0, e1, e2] = sumcheck_polys[round];
+            chal.observe(e0); chal.observe(e1); chal.observe(e2);
+            let r: F = chal.sample();
+            // e0+e1 = claimed check
+            assert_eq!(e0 + e1, claimed);
+            // Interpolate h(r)
+            let d = e1 - e0;
+            let c2 = (e2 - e1.double() + e0) * F::TWO.inverse();
+            claimed = e0 + d * r + c2 * r * (r - F::ONE);
+        }
+    }
+    let nonunion_us = t_nu.elapsed().as_micros() as f64 / iters as f64;
+
+    // ── Union verifier (O(1) absorptions) ──
+    let t_u = Instant::now();
+    for _ in 0..iters {
+        let mut chal = make_challenger(42);
+        // Observe running acc
+        for &v in &acc_root { chal.observe(v); }
+        chal.observe(acc_eval_claim);
+        for &v in &acc_eval_point { chal.observe(v); }
+        chal.observe(acc_pesat_target);
+        // Observe SINGLE union root — O(1), independent of ℓ
+        for &v in &union_root { chal.observe(v); }
+        // Sample omega, tau
+        let _omega: F = chal.sample();
+        for _ in 0..log_l { let _: F = chal.sample(); }
+        // Sumcheck: same as non-union (scales with log_l, not ℓ)
+        let mut claimed = sumcheck_polys[0][0] + sumcheck_polys[0][1];
+        for round in 0..log_l {
+            let [e0, e1, e2] = sumcheck_polys[round];
+            chal.observe(e0); chal.observe(e1); chal.observe(e2);
+            let r: F = chal.sample();
+            assert_eq!(e0 + e1, claimed);
+            let d = e1 - e0;
+            let c2 = (e2 - e1.double() + e0) * F::TWO.inverse();
+            claimed = e0 + d * r + c2 * r * (r - F::ONE);
+        }
+    }
+    let union_us = t_u.elapsed().as_micros() as f64 / iters as f64;
+
+    (nonunion_us, union_us)
+}
+
 fn main() {
     let args: Vec<String> = env::args().collect();
     let sizes_str = args.get(1).map(|s| s.as_str()).unwrap_or("10,12");
@@ -1213,7 +1555,7 @@ fn main() {
         _,
         _,
     >(
-        &workload, &[F::ZERO], &poseidon_config, &poseidon_perm, 3,
+        &workload, &[F::ZERO], &poseidon_config, &poseidon_perm, 3, 3,
     );
     let (cp_w, cp_c, cp_pv) = compute_cp_circuit_size(&workload, &[F::ZERO]);
 
@@ -1375,93 +1717,134 @@ fn main() {
         println!(
             "  Throughput comparison: union l={arity} ({fresh_per_step} fresh/step) vs l=2 (1 fresh/step)"
         );
-        // Apples-to-apples: all paths build recursive circuits (step + verifier).
-        // Union builds arity-1 circuits per step instead of 1, then union-folds them.
+        // Apples-to-apples: 4 recursive-circuit paths × T total instances
+        //   reg_ivc:   T steps × l=2, Poseidon2 in-circuit (baseline)
+        //   cp_ivc:    T steps × l=2, Symphony deferred
+        //   pu_ivc:    T/(ℓ-1) union steps, Poseidon2 in-circuit (no Symphony)
+        //   ru_ivc:    T/(ℓ-1) union steps, Symphony deferred
+        //
+        // Compare pu vs ru to isolate Symphony's benefit at this workload.
         println!(
-            "{:>6} {:>6} | {:>9} {:>9} {:>9} | {:>9} {:>9} {:>9} {:>9} {:>9} | {:>5} {:>5}",
+            "{:>6} {:>6} | {:>9} {:>9} | {:>9} {:>9} | {:>9} {:>9} | {:>5} {:>5} {:>5}",
             "insts", "u_step",
-            "nr_total", "reg_total", "cp_total",
-            "ru_synth", "ru_circ", "ru_spart", "ru_fold", "ru_term",
-            "vs_reg", "vs_cp",
+            "reg_tot", "cp_tot",
+            "pu_tot", "pu_fold",
+            "ru_tot", "ru_fold",
+            "pu/reg", "ru/reg", "ru/pu",
         );
-        println!("{}", "-".repeat(128));
+        println!("{}", "-".repeat(110));
 
         for &total_instances in &steps_list {
             let union_steps = (total_instances + fresh_per_step - 1) / fresh_per_step;
 
-            let mut nr_t_v = Vec::new();
             let mut reg_t_v = Vec::new();
             let mut cp_t_v = Vec::new();
-            let mut ru_sy_v = Vec::new();
-            let mut ru_ci_v = Vec::new();
-            let mut ru_sp_v = Vec::new();
-            let mut ru_fo_v = Vec::new();
-            let mut ru_te_v = Vec::new();
+            let mut pu_t_v = Vec::new();
+            let mut pu_f_v = Vec::new();
+            let mut ru_t_v = Vec::new();
+            let mut ru_f_v = Vec::new();
 
             for rep in 0..(repeats + 1) {
-                let (nr_sp, nr_fo) = run_non_recursive_fold(
-                    &shape, &instance, total_instances, num_witness, log_code, log_m, num_inputs,
-                );
                 let (rs, rc, rsp, rf) = run_regular_recursive(
                     &shape, &instance, total_instances, num_witness, log_code, log_m, num_inputs, step_muls,
                 );
                 let (cs, cc, csp, cf, ct_t) = run_cp_snark_recursive(
                     &shape, &instance, total_instances, num_witness, log_code, log_m, num_inputs, step_muls,
                 );
-                // Recursive union: builds arity-1 recursive circuits per step.
+                // Recursive union with Poseidon2 in-circuit (NO Symphony)
+                let (pus, puc, pusp, puf) = run_regular_recursive_union(
+                    &shape, &instance, union_steps, arity, step_muls,
+                );
+                // Recursive union with Symphony CP-SNARK (deferred hashing)
                 let (rus, ruc, rusp, ruf, rut) = run_recursive_union_cp_snark(
                     &shape, &instance, union_steps, arity, step_muls,
                 );
 
                 if rep > 0 {
-                    nr_t_v.push(nr_sp + nr_fo);
                     reg_t_v.push(rs + rc + rsp + rf);
                     cp_t_v.push(cs + cc + csp + cf + ct_t);
-                    ru_sy_v.push(rus);
-                    ru_ci_v.push(ruc);
-                    ru_sp_v.push(rusp);
-                    ru_fo_v.push(ruf);
-                    ru_te_v.push(rut);
+                    pu_t_v.push(pus + puc + pusp + puf);
+                    pu_f_v.push(puf);
+                    ru_t_v.push(rus + ruc + rusp + ruf + rut);
+                    ru_f_v.push(ruf);
                 }
             }
 
-            let nr_t = median(&mut nr_t_v);
             let reg_t = median(&mut reg_t_v);
             let cp_t = median(&mut cp_t_v);
-            let ru_sy = median(&mut ru_sy_v);
-            let ru_ci = median(&mut ru_ci_v);
-            let ru_sp = median(&mut ru_sp_v);
-            let ru_fo = median(&mut ru_fo_v);
-            let ru_te = median(&mut ru_te_v);
-            let ru_total = ru_sy + ru_ci + ru_sp + ru_fo + ru_te;
+            let pu_t = median(&mut pu_t_v);
+            let pu_f = median(&mut pu_f_v);
+            let ru_t = median(&mut ru_t_v);
+            let ru_f = median(&mut ru_f_v);
 
-            let vs_reg = reg_t / ru_total.max(1.0);
-            let vs_cp = cp_t / ru_total.max(1.0);
+            let pu_vs_reg = reg_t / pu_t.max(1.0);
+            let ru_vs_reg = reg_t / ru_t.max(1.0);
+            let ru_vs_pu = pu_t / ru_t.max(1.0);
 
             println!(
-                "{:>6} {:>6} | {:>9} {:>9} {:>9} | {:>9} {:>9} {:>9} {:>9} {:>9} | {:>4.1}x {:>4.1}x",
+                "{:>6} {:>6} | {:>9} {:>9} | {:>9} {:>9} | {:>9} {:>9} | {:>4.2}x {:>4.2}x {:>4.2}x",
                 total_instances, union_steps,
-                fmt(nr_t), fmt(reg_t), fmt(cp_t),
-                fmt(ru_sy), fmt(ru_ci), fmt(ru_sp), fmt(ru_fo), fmt(ru_te),
-                vs_reg, vs_cp,
+                fmt(reg_t), fmt(cp_t),
+                fmt(pu_t), fmt(pu_f),
+                fmt(ru_t), fmt(ru_f),
+                pu_vs_reg, ru_vs_reg, ru_vs_pu,
             );
         }
         println!();
     }
+
+    // ── Table 3: Verifier scaling (Quasar sublinear claim) ──
+    // Isolates native Fiat-Shamir + algebraic sumcheck verification costs.
+    // No Merkle openings, no Spartan, no circuit building — pure verifier work.
+    println!("Verifier scaling: native FS + sumcheck verification (no Merkle, no Spartan)");
+    println!("  Demonstrates Quasar's O(1) vs O(ℓ) Poseidon2 absorption claim.");
+    let verifier_log_code = 16; // realistic log_code size for illustrating scaling
+    let verifier_iters = 1000;
+    println!(
+        "  (log_code={verifier_log_code} for the eval_point absorbed per accumulator, averaged over {verifier_iters} iterations)"
+    );
+    println!();
+    println!(
+        "{:>6} | {:>13} {:>13} | {:>9} | {:>12}",
+        "arity", "nonunion_us", "union_us", "nu/un", "saved_absorb",
+    );
+    println!("{}", "-".repeat(70));
+    for &ar in &[2usize, 4, 8, 16, 32, 64] {
+        let (nu, u) = run_verifier_benchmark(ar, verifier_log_code, verifier_iters);
+        let ratio = nu / u.max(f64::EPSILON);
+        // Absorptions saved: (ℓ-1) fresh accs observed non-union vs 1 union root.
+        // Each fresh acc has (8 root + 1 μ + log_code α + 1 η) = 10+log_code elements.
+        // Union: 8 elements. Savings = (ℓ-1)(10+log_code) - 8.
+        let saved_elems = (ar - 1) * (10 + verifier_log_code) - 8;
+        println!(
+            "{:>6} | {:>10.2} us {:>10.2} us | {:>7.2}x | {:>12}",
+            ar, nu, u, ratio, saved_elems,
+        );
+    }
+    println!();
 
     println!("Legend (Table 1):");
     println!("  All l=2 paths: 1 instance per step. Times are totals across all steps.");
     println!("  r_spd = (reg_circuit+reg_spartan) / (cp_circuit+cp_spartan)");
     println!("  t_spd = reg_total / cp_total");
     println!();
-    println!("Legend (Table 2) — Recursive Union IVC (apples-to-apples):");
-    println!("  insts     = Total synthetic instances processed");
-    println!("  u_step    = Union fold steps (= ceil(insts / (arity-1)))");
-    println!("  ru_synth  = Spartan(synthetic R1CS) × (arity-1) per step");
-    println!("  ru_circ   = Build arity-1 recursive circuits per step");
-    println!("  ru_spart  = Spartan of the arity-1 recursive circuits per step");
-    println!("  ru_fold   = Union fold of arity-1 recursive circuit witnesses");
-    println!("  ru_term   = Terminal verify (SHA-256 binding + FS replay + decider + Merkle)");
-    println!("  vs_reg    = reg_total / recursive_union_total  (>1 = union faster)");
-    println!("  vs_cp     = cp_total  / recursive_union_total  (>1 = union faster)");
+    println!("Legend (Table 2) — Apples-to-apples recursive IVC:");
+    println!("  insts    = Total synthetic instances processed");
+    println!("  u_step   = Union fold steps (= ceil(insts / (arity-1)))");
+    println!("  reg_tot  = Regular IVC, l=2, Poseidon2 in-circuit");
+    println!("  cp_tot   = CP-SNARK IVC, l=2, Symphony deferred hashing");
+    println!("  pu_tot   = Poseidon2 Union IVC, l=arity, NO Symphony (pure WARP+Quasar)");
+    println!("  ru_tot   = Recursive Union CP-SNARK, l=arity, Symphony deferred");
+    println!("  pu_fold  = Union fold time for pu path");
+    println!("  ru_fold  = Union fold time for ru path");
+    println!("  pu/reg   = Regular/PoseidonUnion speedup  (>1 = union faster than l=2)");
+    println!("  ru/reg   = Regular/SymphonyUnion speedup");
+    println!("  ru/pu    = PoseidonUnion/SymphonyUnion speedup  (>1 = Symphony wins)");
+    println!();
+    println!("Legend (Table 3) — Verifier scaling (Quasar sublinear claim):");
+    println!("  arity        = Fold arity ℓ (number of codewords folded per step)");
+    println!("  nonunion_us  = WARP standard verifier: O(ℓ) Poseidon2 absorptions + log_l sumcheck");
+    println!("  union_us     = Quasar union verifier: O(1) Poseidon2 absorptions + log_l sumcheck");
+    println!("  nu/un        = Verifier speedup (>1 = union faster; grows with arity per Lemma 3)");
+    println!("  saved_absorb = Extra base-field elements the non-union verifier must absorb");
 }

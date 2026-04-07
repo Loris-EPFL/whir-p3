@@ -117,20 +117,22 @@ impl<F: Field> SparkCommitment<F> {
     }
 
     /// Evaluate the committed polynomial at point (rx, ry).
+    ///
+    /// Uses precomputed eq tables for O(1) lookups per entry instead of
+    /// O(log n) per-entry `compute_eq_poly_index` calls.
     pub fn evaluate(&self, rx: &[F], ry: &[F]) -> F {
+        self.evaluate_with_tables(
+            &super::r1cs_prover::compute_eq_table(rx),
+            &super::r1cs_prover::compute_eq_table(ry),
+        )
+    }
+
+    /// Evaluate using precomputed eq tables (avoids recomputing for A, B, C).
+    fn evaluate_with_tables(&self, eq_rx: &[F], eq_ry: &[F]) -> F {
         let mut result = F::ZERO;
-
         for k in 0..self.val_comm.len() {
-            let row_k = self.row_indices[k];
-            let col_k = self.col_indices[k];
-            let val_k = self.val_comm[k];
-
-            let eq_row = compute_eq_poly_index(row_k, rx);
-            let eq_col = compute_eq_poly_index(col_k, ry);
-
-            result += val_k * eq_row * eq_col;
+            result += self.val_comm[k] * eq_rx[self.row_indices[k]] * eq_ry[self.col_indices[k]];
         }
-
         result
     }
 
@@ -156,30 +158,45 @@ impl<F: Field> SparkCommitment<F> {
 
     /// Compressed digest that binds row/col/value and memory-check metadata.
     pub fn compressed_digest(&self, gamma: F) -> F {
-        let mut elems = Vec::with_capacity(
-            self.val_comm.len() * 6 + self.audit_ts_row.len() + self.audit_ts_col.len(),
-        );
+        let n = self.val_comm.len();
+        let gamma2 = gamma * gamma;
 
-        for k in 0..self.val_comm.len() {
+        // Compute multiset hash inline (product of (elem - gamma) terms)
+        // instead of allocating a Vec of 6*n + audit elements.
+        let mut product = F::ONE;
+
+        for k in 0..n {
             let row = F::from_usize(self.row_indices[k]);
             let col = F::from_usize(self.col_indices[k]);
             let val = self.val_comm[k];
-            elems.push(hash_gamma(row, val, self.read_ts_row[k], gamma));
-            elems.push(hash_gamma(row, val, self.write_ts_row[k], gamma));
-            elems.push(hash_gamma(col, val, self.read_ts_col[k], gamma));
-            elems.push(hash_gamma(col, val, self.write_ts_col[k], gamma));
-            elems.push(hash_gamma(row, col, val, gamma));
-            elems.push(hash_gamma(val, row, col, gamma));
+            // 6 hash_gamma terms per entry, inlined with precomputed γ²
+            let row_g2 = row * gamma2;
+            let col_g2 = col * gamma2;
+            let val_g = val * gamma;
+            let row_g = row * gamma;
+            let col_g = col * gamma;
+            let val_g2 = val * gamma2;
+            product *= (row_g2 + val_g + self.read_ts_row[k]) - gamma;
+            product *= (row_g2 + val_g + self.write_ts_row[k]) - gamma;
+            product *= (col_g2 + val_g + self.read_ts_col[k]) - gamma;
+            product *= (col_g2 + val_g + self.write_ts_col[k]) - gamma;
+            product *= (row_g2 + col_g + val) - gamma;
+            product *= (val_g2 + row_g + col) - gamma;
         }
 
+        // Audit timestamps
+        let zero_g2 = F::ZERO; // 0 * γ² = 0
+        let one_g = gamma;     // 1 * γ
         for &ts in &self.audit_ts_row {
-            elems.push(hash_gamma(F::ZERO, F::ONE, ts, gamma));
+            product *= (zero_g2 + one_g + ts) - gamma; // = ts
         }
+        let one_g2 = gamma2;   // 1 * γ²
+        let zero_g = F::ZERO;  // 0 * γ
         for &ts in &self.audit_ts_col {
-            elems.push(hash_gamma(F::ONE, F::ZERO, ts, gamma));
+            product *= (one_g2 + zero_g + ts) - gamma; // = γ² + ts - γ
         }
 
-        multiset_hash(&elems, gamma)
+        product
     }
 
     const fn cost_profile(&self) -> SparkCostProfile {
@@ -212,9 +229,14 @@ impl<F: Field> SparkProof<F> {
         let b_comm = SparkCommitment::commit(b);
         let c_comm = SparkCommitment::commit(c);
 
-        let a_eval = a_comm.evaluate(rx, ry);
-        let b_eval = b_comm.evaluate(rx, ry);
-        let c_eval = c_comm.evaluate(rx, ry);
+        // Precompute eq tables ONCE, share across A, B, C evaluations.
+        // This replaces 3 × nnz × O(log n) per-entry polynomial evaluations
+        // with 2 × O(2^s) table builds + 3 × nnz × O(1) lookups.
+        let eq_rx = super::r1cs_prover::compute_eq_table(rx);
+        let eq_ry = super::r1cs_prover::compute_eq_table(ry);
+        let a_eval = a_comm.evaluate_with_tables(&eq_rx, &eq_ry);
+        let b_eval = b_comm.evaluate_with_tables(&eq_rx, &eq_ry);
+        let c_eval = c_comm.evaluate_with_tables(&eq_rx, &eq_ry);
         let batched_eval = a_eval + challenges.eta * b_eval + challenges.eta.square() * c_eval;
 
         let a_digest = a_comm.compressed_digest(challenges.gamma);

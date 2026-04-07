@@ -605,7 +605,7 @@ impl<F: Field> R1CSVerifier<F> {
 ///
 /// Processes tau in reverse order so that bit j of the index maps to τ_j,
 /// matching `eq_poly_at_index`'s LSB-first convention.
-fn compute_eq_table<F: Field>(tau: &[F]) -> Vec<F> {
+pub(crate) fn compute_eq_table<F: Field>(tau: &[F]) -> Vec<F> {
     let s = tau.len();
     let n = 1usize << s;
     let mut table = vec![F::ZERO; n];

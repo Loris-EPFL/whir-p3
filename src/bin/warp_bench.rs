@@ -27,7 +27,7 @@ use whir_p3::{
         random_lc::random_linear_combination,
         warp::{
             accumulator::{FreshInstance, WarpAccumulator, WarpAccumulatorInstance, WarpAccumulatorWitness},
-            decider::warp_decide_algebraic,
+            decider::warp_decide_algebraic_rs,
             encoding::{codeword_size, merkle_commit_codeword},
             fold::{warp_fold_prove_rs_committed, warp_fold_verify, FreshInstancePublic, RSEncodingConfig, WarpFoldResult},
         },
@@ -572,7 +572,7 @@ fn run_recursive_ivc(
     // Compute target witness count for uniform circuit sizing
     let (target_witness, _, _) = compute_recursive_circuit_size::<
         F, GenericPoseidon2LinearLayersKoalaBear, _, _,
-    >(&step_circuit, &[F::ZERO], &poseidon_config, &poseidon_perm, 3);
+    >(&step_circuit, &[F::ZERO], &poseidon_config, &poseidon_perm, 3, 3);
 
     // Build a satisfying R1CS instance for init
     let mut rng = SmallRng::seed_from_u64(5);
@@ -662,6 +662,7 @@ fn run_recursive_ivc(
             Some(whir_p3::ivc::warp_fold_verifier_circuit::WarpFoldVerifierWitness::from_fold_result(
                 commitment_roots, eval_claims, eval_points, pesat_targets,
                 &fold_result.sumcheck_round_polys, F::from_u64(7),
+                1, log_m,
             ))
         } else {
             None

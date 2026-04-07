@@ -135,6 +135,12 @@ pub enum CpSnarkDeciderError {
     ShiftQueryMerkleInvalid { step: usize, query: usize, input: usize },
     /// Shift query linear combination mismatch — folded value ≠ Σ eq(γ,i) * val_i.
     ShiftQueryValueMismatch { step: usize, query: usize },
+    /// WHIR commitment root does not match accumulated root.
+    WhirRootBindingFailed,
+    /// WHIR prove failed.
+    WhirProveFailed,
+    /// WHIR verify failed.
+    WhirVerifyFailed,
 }
 
 // ─── Serialization ────────────────────────────────────────────────────
@@ -616,6 +622,68 @@ where
 
     // Step 4: Shift query Merkle proof verification
     verify_shift_query_merkle_proofs(transcripts, folding_factor, merkle_hash, merkle_compress)
+}
+
+/// CP-SNARK terminal verification with terminal WHIR proof (fully succinct).
+///
+/// Extends `cp_snark_terminal_verify_with_merkle` with a fifth phase:
+///
+/// 5. **Terminal WHIR**: full prover-side RS decider + WHIR prove + root binding +
+///    WHIR verify. This establishes that the accumulated codeword is RS-close,
+///    completing the succinct argument chain.
+///
+/// Returns the WHIR proof on success, which can be independently verified.
+pub fn cp_snark_terminal_verify_with_whir<F, EF, Challenger, H, C, Dft, WhirChallenger>(
+    shape: &R1CSShape<F>,
+    acc: &WarpAccumulator<F, F, F, 8>,
+    transcripts: &[CommittedFoldTranscript<F>],
+    make_challenger: impl FnMut() -> Challenger,
+    folding_factor: usize,
+    log_inv_rate: usize,
+    merkle_hash: &H,
+    merkle_compress: &C,
+    dft: &Dft,
+    whir_config: &crate::whir::parameters::WhirConfig<EF, F, H, C, WhirChallenger>,
+    make_whir_challenger: impl FnMut() -> WhirChallenger,
+) -> Result<crate::whir::proof::WhirProof<F, EF, F, 8>, CpSnarkDeciderError>
+where
+    F: p3_field::TwoAdicField + PrimeField64,
+    EF: p3_field::ExtensionField<F> + p3_field::TwoAdicField,
+    <F as p3_field::Field>::Packing: Eq + Send + Sync,
+    Challenger: CanObserve<F> + CanSample<F>,
+    H: p3_symmetric::CryptographicHasher<F, [F; 8]>
+        + p3_symmetric::CryptographicHasher<<F as p3_field::Field>::Packing, [<F as p3_field::Field>::Packing; 8]>
+        + Sync
+        + Clone,
+    C: p3_symmetric::PseudoCompressionFunction<[F; 8], 2>
+        + p3_symmetric::PseudoCompressionFunction<[<F as p3_field::Field>::Packing; 8], 2>
+        + Sync
+        + Clone,
+    Dft: p3_dft::TwoAdicSubgroupDft<F>,
+    WhirChallenger: p3_challenger::FieldChallenger<F>
+        + p3_challenger::GrindingChallenger<Witness = F>
+        + p3_challenger::CanObserve<p3_symmetric::Hash<F, F, 8>>,
+    [F; 8]: serde::Serialize + for<'de> serde::Deserialize<'de>,
+{
+    use crate::accumulation::warp::decider::{terminal_whir_prove_and_verify, TerminalWhirError};
+
+    // Steps 1+2: Verify commitment binding + FS replay
+    verify_committed_transcripts(transcripts, make_challenger)?;
+
+    // Steps 3-4: Shift query Merkle proof verification (includes algebraic decider
+    // via warp_decide_algebraic_rs internally in step 3)
+    verify_shift_query_merkle_proofs(transcripts, folding_factor, merkle_hash, merkle_compress)?;
+
+    // Step 5: Terminal WHIR (full RS decider + WHIR prove + root binding + WHIR verify)
+    terminal_whir_prove_and_verify(
+        shape, acc, folding_factor, log_inv_rate, dft, whir_config, make_whir_challenger,
+    )
+    .map_err(|e| match e {
+        TerminalWhirError::Decider(d) => CpSnarkDeciderError::AlgebraicCheck(d),
+        TerminalWhirError::RootBindingMismatch => CpSnarkDeciderError::WhirRootBindingFailed,
+        TerminalWhirError::ProveFailed => CpSnarkDeciderError::WhirProveFailed,
+        TerminalWhirError::VerifyFailed => CpSnarkDeciderError::WhirVerifyFailed,
+    })
 }
 
 #[cfg(test)]

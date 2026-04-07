@@ -467,6 +467,7 @@ where
             fold_result.fresh_pesat_targets.first().copied().unwrap_or(F::ZERO),
         ];
 
+        let log_m = prev_state.shape.num_cons().next_power_of_two().trailing_zeros() as usize;
         Some(WarpFoldVerifierWitness::from_fold_result(
             commitment_roots,
             eval_claims,
@@ -474,6 +475,8 @@ where
             pesat_targets,
             &fold_result.sumcheck_round_polys,
             prev_fold_omega,
+            1, // num_fresh: always 1 for l=2
+            log_m,
         ))
     } else {
         None
@@ -592,6 +595,7 @@ pub fn compute_recursive_circuit_size<F, L, Perm2, S>(
     poseidon_config: &Poseidon2CircuitConfig<F, 16>,
     poseidon_perm: &Perm2,
     num_eval_point_vars: usize,
+    log_m: usize,
 ) -> (usize, usize, usize) // (num_witness, num_constraints, num_poly_vars_y)
 where
     F: Field + PrimeCharacteristicRing + PrimeField64,
@@ -599,7 +603,7 @@ where
     Perm2: Permutation<[F; 16]>,
     S: crate::ivc::step::StepCircuit<F>,
 {
-    // Build a dummy verifier witness for l=2 (1 round)
+    // Build a dummy verifier witness for l=2 (1 round, 1 fresh instance)
     let dummy_witness = WarpFoldVerifierWitness {
         input_commitment_roots: vec![vec![F::ZERO; 8]; 2],
         input_eval_claims: vec![F::ZERO; 2],
@@ -608,6 +612,8 @@ where
         sumcheck_evals: vec![[F::ZERO; 3]], // 1 round for l=2
         num_rounds: 1,
         omega: F::ZERO,
+        num_fresh: 1,
+        log_m,
         union_commitment_root: None,
     };
 
@@ -644,6 +650,7 @@ pub fn compute_recursive_circuit_size_union<F, L, Perm2, S>(
     poseidon_perm: &Perm2,
     num_eval_point_vars: usize,
     fold_arity: usize,
+    log_m: usize,
 ) -> (usize, usize, usize)
 where
     F: Field + PrimeCharacteristicRing + PrimeField64,
@@ -652,6 +659,7 @@ where
     S: crate::ivc::step::StepCircuit<F>,
 {
     let log_l = fold_arity.trailing_zeros() as usize;
+    let num_fresh = fold_arity - 1;
 
     // Union-mode dummy witness: only 1 accumulator (running) + union root
     let dummy_witness = WarpFoldVerifierWitness::from_fold_result_union(
@@ -662,6 +670,8 @@ where
         vec![F::ZERO; 8],
         &vec![vec![F::ZERO; 3]; log_l],
         F::ZERO,
+        num_fresh,
+        log_m,
     );
 
     let mut builder = CircuitBuilder::<F>::new();
@@ -972,6 +982,470 @@ where
 }
 
 // ═══════════════════════════════════════════════════════════════════════
+// Recursive Union IVC (Poseidon2 in-circuit verifier, no CP-SNARK)
+// ═══════════════════════════════════════════════════════════════════════
+//
+// This is the "pure" pipeline: Quasar union commitment + Poseidon2 in-circuit
+// fold verification. No Symphony dependency. The in-circuit verifier absorbs
+// the running accumulator + union root → derives ω, τ, fresh_betas →
+// verifies the twin-constraint sumcheck. All Fiat-Shamir is enforced in-circuit.
+//
+// Counterpart: `warp_ivc_step_recursive_union_cp` defers Poseidon2 to terminal
+// via Symphony's CP-SNARK. Both pipelines are functionally identical except for
+// where FS verification happens (in-circuit vs terminal SHA-256 binding).
+
+/// Execute one recursive IVC step with Quasar union commitment and in-circuit
+/// Poseidon2 fold verification.
+///
+/// Builds `arity-1` recursive circuits, each containing:
+///   - User's step circuit
+///   - Poseidon2 WARP fold verifier (log_l sumcheck rounds)
+///
+/// Each circuit is Spartan-proved, then all are union-folded into the running
+/// accumulator. The in-circuit Poseidon2 verifier absorbs the previous fold's
+/// union root + running accumulator and verifies the twin-constraint sumcheck.
+///
+/// # Soundness
+///
+/// Unlike the CP-SNARK variant, all Fiat-Shamir challenges are derived and
+/// verified in-circuit via Poseidon2 permutations. The in-circuit verifier
+/// samples fresh_betas to keep the sponge state synchronized with the native
+/// prover's `derive_fold_challenges_union`.
+#[allow(clippy::too_many_arguments)]
+pub fn warp_ivc_step_recursive_union<F, EF, Dft, H, C, Challenger, L, Perm2, S, FoldChal>(
+    prev_state: &WarpIVCState<F>,
+    step_circuit: &S,
+    step_input_states: &[Vec<F>],
+    arity: usize,
+    spartan_challenger: &mut Challenger,
+    ivc_config: &WarpIVCConfig,
+    dft: &Dft,
+    merkle_hash: H,
+    merkle_compress: C,
+    poseidon_config: &Poseidon2CircuitConfig<F, 16>,
+    poseidon_perm: &Perm2,
+    target_num_witness: Option<usize>,
+    new_public_state: Vec<F>,
+    mut make_fold_challenger: impl FnMut() -> FoldChal,
+) -> WarpIVCState<F>
+where
+    F: TwoAdicField + PrimeField64 + Ord + PrimeCharacteristicRing,
+    EF: ExtensionField<F> + TwoAdicField,
+    Dft: TwoAdicSubgroupDft<F>,
+    Challenger: FieldChallenger<F> + GrindingChallenger<Witness = F>,
+    H: CryptographicHasher<F, [F; 8]>
+        + CryptographicHasher<<F as Field>::Packing, [<F as Field>::Packing; 8]>
+        + Sync
+        + Clone,
+    C: PseudoCompressionFunction<[F; 8], 2>
+        + PseudoCompressionFunction<[<F as Field>::Packing; 8], 2>
+        + Sync
+        + Clone,
+    <F as Field>::Packing: Eq + Send + Sync,
+    L: GenericPoseidon2LinearLayers<16>,
+    Perm2: Permutation<[F; 16]>,
+    S: crate::ivc::step::StepCircuit<F>,
+    FoldChal: CanObserve<F> + CanSample<F>,
+{
+    use crate::accumulation::warp::{
+        encoding::build_union_codeword,
+        fold::{derive_fold_challenges_union, warp_fold_prove_rs_union},
+    };
+
+    let num_fresh = step_input_states.len();
+    assert!(num_fresh > 0, "need at least one step input state");
+    assert!(arity.is_power_of_two(), "arity must be a power of two");
+    assert_eq!(
+        (1 + num_fresh).next_power_of_two(), arity,
+        "num_fresh+1 must equal arity for consistent union sizing"
+    );
+    let log_l = arity.trailing_zeros() as usize;
+    let shape = &prev_state.shape;
+    let rs_config = RSEncodingConfig::new(ivc_config.rs_folding_factor, ivc_config.rs_log_inv_rate);
+
+    // ── Pre-derive omega for verifier witness (must match what the fold will use) ──
+    // Replay the PREVIOUS fold's FS to recover its omega.
+    let (prev_fold_omega, prev_union_root) = if let (Some(fold_result), Some(prev_inst)) = (
+        &prev_state.last_fold_result,
+        &prev_state.prev_acc_instance,
+    ) {
+        let mut dry_chal = make_fold_challenger();
+        for &val in &prev_inst.commitment_root { dry_chal.observe(val); }
+        dry_chal.observe(prev_inst.eval_claim);
+        for &val in &prev_inst.eval_point { dry_chal.observe(val); }
+        dry_chal.observe(prev_inst.pesat_target);
+        // Absorb the previous fold's union root
+        let ur = fold_result.union_commitment_root
+            .unwrap_or([F::ZERO; 8]);
+        for &val in &ur { dry_chal.observe(val); }
+        let omega: F = dry_chal.sample();
+        (omega, ur.to_vec())
+    } else {
+        (F::ZERO, vec![F::ZERO; 8])
+    };
+
+    // ── Build verifier witness from previous fold ──
+    // Only include a verifier when the previous fold was a union fold with the
+    // correct number of rounds. The init step produces a standard l=2 fold
+    // (1 sumcheck round), so the first recursive step after init skips the
+    // verifier (uses padding instead). From step 3 onwards, all previous folds
+    // are union folds with log_l rounds.
+    let log_m_for_circuit = shape.num_cons().next_power_of_two().trailing_zeros() as usize;
+    let has_union_fold = prev_state.last_fold_result.as_ref()
+        .is_some_and(|fr| fr.sumcheck_round_polys.len() == log_l);
+    let verifier_witness = if has_union_fold {
+        let fold_result = prev_state.last_fold_result.as_ref().unwrap();
+        let prev_inst = prev_state.prev_acc_instance.as_ref().unwrap();
+        Some(WarpFoldVerifierWitness::from_fold_result_union(
+            prev_inst.commitment_root.to_vec(),
+            prev_inst.eval_claim,
+            prev_inst.eval_point.clone(),
+            prev_inst.pesat_target,
+            prev_union_root.clone(),
+            &fold_result.sumcheck_round_polys,
+            prev_fold_omega,
+            num_fresh,
+            log_m_for_circuit,
+        ))
+    } else {
+        None
+    };
+
+    // ── Build num_fresh recursive circuits, Spartan-prove each ──
+    let spartan_prover = R1CSProver::new();
+    let mut fresh_instances: Vec<FreshInstance<F>> = Vec::with_capacity(num_fresh);
+    let mut unified_shape_opt: Option<R1CSShape<F>> = None;
+
+    for step_input_state in step_input_states {
+        let mut builder = CircuitBuilder::<F>::new();
+        let mut circuit_challenger = CircuitChallenger::<F, 16, 8>::new(&mut builder);
+        let _output_vars = synthesize_warp_ivc_circuit::<F, L, Perm2, S, 16, 8>(
+            &mut builder,
+            &mut circuit_challenger,
+            poseidon_config,
+            poseidon_perm,
+            step_circuit,
+            step_input_state,
+            verifier_witness.as_ref(),
+            target_num_witness,
+        );
+        let (unified_shape, unified_instance) = builder.build();
+        assert!(
+            unified_shape.is_sat(unified_instance.witness(), unified_instance.input()),
+            "recursive union circuit is not satisfiable at step {}",
+            prev_state.step,
+        );
+
+        let _spartan_proof = spartan_prover.prove::<EF, _>(&unified_instance, spartan_challenger);
+        let witness_poly = spartan_prover.prepare_witness(&unified_instance);
+
+        let num_inputs = unified_instance.input().len();
+        let z = witness_poly.as_slice();
+        let public_input = z[..num_inputs].to_vec();
+        // Fresh witness must match accumulator dimensions: num_vars_y / 2
+        // (same as how warp_fold_prove_rs_inner constructs z-vectors).
+        let num_vars_y = 1usize << shape.num_poly_vars_y();
+        let num_witness = num_vars_y / 2;
+        let mut witness_part = z[num_inputs..].to_vec();
+        witness_part.resize(num_witness, F::ZERO);
+        fresh_instances.push(FreshInstance { public_input, witness: witness_part });
+
+        if unified_shape_opt.is_none() {
+            unified_shape_opt = Some(unified_shape);
+        }
+    }
+    // prev_state.shape is the init_shape (padded recursive circuit shape).
+    // unified_shape should match (same circuit structure).
+    let fold_shape = unified_shape_opt.as_ref().unwrap_or(shape);
+
+    // ── RS-encode all fresh witnesses ──
+    let fresh_codewords: Vec<EvaluationsList<F>> = fresh_instances
+        .iter()
+        .map(|fi| {
+            let wp = EvaluationsList::new(fi.witness.clone());
+            rs_encode(&wp, rs_config.folding_factor, rs_config.log_inv_rate, dft)
+        })
+        .collect();
+
+    // ── Build union codeword: [acc, fresh_0, ..., fresh_{num_fresh-1}, padding] ──
+    let l = (1 + num_fresh).next_power_of_two();
+    let code_len = prev_state.accumulator.witness.codeword.as_slice().len();
+    let mut all_codewords_raw: Vec<Vec<F>> = Vec::with_capacity(l);
+    all_codewords_raw.push(prev_state.accumulator.witness.codeword.as_slice().to_vec());
+    for cw in &fresh_codewords {
+        all_codewords_raw.push(cw.as_slice().to_vec());
+    }
+    while all_codewords_raw.len() < l {
+        all_codewords_raw.push(vec![F::ZERO; code_len]);
+    }
+    let union_cw = build_union_codeword(&all_codewords_raw);
+
+    // ── Commit union codeword ──
+    let union_ff = crate::accumulation::warp::encoding::union_folding_factor(
+        rs_config.folding_factor, l,
+    );
+    let union_ev = EvaluationsList::new(union_cw);
+    let (union_root, _) = merkle_commit_codeword::<
+        F, F, <F as Field>::Packing, <F as Field>::Packing, H, C, 8,
+    >(&union_ev, union_ff, merkle_hash.clone(), merkle_compress.clone());
+
+    // ── Derive challenges via union FS path: O(1) absorption ──
+    let prev_inst = &prev_state.accumulator.instance;
+    let log_m = fold_shape.num_cons().next_power_of_two().trailing_zeros() as usize;
+    let mut fold_chal = make_fold_challenger();
+    let (omega, tau, fresh_betas) = derive_fold_challenges_union(
+        &prev_inst.commitment_root,
+        prev_inst.eval_claim,
+        &prev_inst.eval_point,
+        prev_inst.pesat_target,
+        &union_root,
+        num_fresh,
+        log_m,
+        &mut fold_chal,
+    );
+
+    // ── WARP fold with union commitment ──
+    let mh = merkle_hash.clone();
+    let mc = merkle_compress.clone();
+    let mh2 = merkle_hash.clone();
+    let mc2 = merkle_compress.clone();
+    let result = warp_fold_prove_rs_union(
+        fold_shape,
+        &fresh_instances,
+        &prev_state.accumulator,
+        omega,
+        &tau,
+        &fresh_betas,
+        &rs_config,
+        dft,
+        |round_evals| {
+            for &e in round_evals { fold_chal.observe(e); }
+            fold_chal.sample()
+        },
+        |codeword, folding_factor| {
+            let (root, _tree) = merkle_commit_codeword::<
+                F, F, <F as Field>::Packing, <F as Field>::Packing, H, C, 8,
+            >(codeword, folding_factor, mh.clone(), mc.clone());
+            root
+        },
+        |ucw, uff| {
+            let uev = EvaluationsList::new(ucw.to_vec());
+            let (root, _tree) = merkle_commit_codeword::<
+                F, F, <F as Field>::Packing, <F as Field>::Packing, H, C, 8,
+            >(&uev, uff, mh2.clone(), mc2.clone());
+            root
+        },
+    );
+
+    let new_acc = rebuild_accumulator(&result);
+
+    WarpIVCState {
+        step: prev_state.step + 1,
+        accumulator: new_acc,
+        shape: fold_shape.clone(),
+        last_fold_result: Some(result),
+        prev_acc_instance: Some(prev_state.accumulator.instance.clone()),
+        public_state: new_public_state,
+    }
+}
+
+/// Initialize the recursive union IVC state (pure Poseidon2, no CP-SNARK).
+///
+/// Creates a zero accumulator with dimensions matching the recursive union
+/// circuit. The circuit includes a dummy Poseidon2 fold verifier with `log_l`
+/// sumcheck rounds so that the init step's witness size matches subsequent
+/// recursive steps.
+#[allow(clippy::too_many_arguments)]
+pub fn warp_ivc_init_recursive_union<F, EF, Dft, H, C, Challenger, L, Perm2, S, FoldChal>(
+    shape: &R1CSShape<F>,
+    instance: &R1CSInstance<F>,
+    spartan_challenger: &mut Challenger,
+    ivc_config: &WarpIVCConfig,
+    dft: &Dft,
+    merkle_hash: H,
+    merkle_compress: C,
+    poseidon_config: &Poseidon2CircuitConfig<F, 16>,
+    poseidon_perm: &Perm2,
+    step_circuit: &S,
+    step_input_state: &[F],
+    arity: usize,
+    new_public_state: Vec<F>,
+    mut make_fold_challenger: impl FnMut() -> FoldChal,
+) -> WarpIVCState<F>
+where
+    F: TwoAdicField + PrimeField64 + Ord + PrimeCharacteristicRing,
+    EF: ExtensionField<F> + TwoAdicField,
+    Dft: TwoAdicSubgroupDft<F>,
+    Challenger: FieldChallenger<F> + GrindingChallenger<Witness = F>,
+    H: CryptographicHasher<F, [F; 8]>
+        + CryptographicHasher<<F as Field>::Packing, [<F as Field>::Packing; 8]>
+        + Sync
+        + Clone,
+    C: PseudoCompressionFunction<[F; 8], 2>
+        + PseudoCompressionFunction<[<F as Field>::Packing; 8], 2>
+        + Sync
+        + Clone,
+    <F as Field>::Packing: Eq + Send + Sync,
+    L: GenericPoseidon2LinearLayers<16>,
+    Perm2: Permutation<[F; 16]>,
+    S: crate::ivc::step::StepCircuit<F>,
+    FoldChal: CanObserve<F> + CanSample<F>,
+{
+    let log_l = arity.trailing_zeros() as usize;
+    let num_fresh = arity - 1;
+    let rs_config = RSEncodingConfig::new(ivc_config.rs_folding_factor, ivc_config.rs_log_inv_rate);
+    let log_m = shape.num_cons().next_power_of_two().trailing_zeros() as usize;
+
+    // Compute target witness count by building a dummy recursive circuit with verifier
+    let (target_witness, _, target_poly_vars_y) = compute_recursive_circuit_size_union::<
+        F, L, Perm2, S,
+    >(
+        step_circuit, step_input_state, poseidon_config, poseidon_perm,
+        shape.num_poly_vars_y(), arity, log_m,
+    );
+
+    // Build init circuit WITH dummy verifier. To make it satisfiable, we need omega
+    // to match what the in-circuit Poseidon2 will derive from the dummy input data.
+    // We compute this by running the same FS transcript natively using the fold
+    // challenger (which uses the same Poseidon2 permutation as the circuit).
+    let log_code_dummy = shape.num_poly_vars_y(); // eval_point length
+    let mut dummy_chal = make_fold_challenger();
+    // Union path: observe running acc (all zeros)
+    for _ in 0..8 { dummy_chal.observe(F::ZERO); } // root
+    dummy_chal.observe(F::ZERO); // eval_claim
+    for _ in 0..log_code_dummy { dummy_chal.observe(F::ZERO); } // eval_point
+    dummy_chal.observe(F::ZERO); // pesat_target
+    // Union root (all zeros)
+    for _ in 0..8 { dummy_chal.observe(F::ZERO); }
+    let dummy_omega: F = dummy_chal.sample();
+
+    let dummy_verifier = WarpFoldVerifierWitness::from_fold_result_union(
+        vec![F::ZERO; 8],
+        F::ZERO,
+        vec![F::ZERO; log_code_dummy],
+        F::ZERO,
+        vec![F::ZERO; 8],
+        &vec![vec![F::ZERO; 3]; log_l],
+        dummy_omega,
+        num_fresh,
+        log_m,
+    );
+
+    let mut builder = CircuitBuilder::<F>::new();
+    let mut circuit_challenger = CircuitChallenger::<F, 16, 8>::new(&mut builder);
+    let _output_vars = synthesize_warp_ivc_circuit::<F, L, Perm2, S, 16, 8>(
+        &mut builder,
+        &mut circuit_challenger,
+        poseidon_config,
+        poseidon_perm,
+        step_circuit,
+        step_input_state,
+        Some(&dummy_verifier),
+        Some(target_witness),
+    );
+    let (init_shape, init_instance) = builder.build();
+    assert!(
+        init_shape.is_sat(init_instance.witness(), init_instance.input()),
+        "init recursive union circuit is not satisfiable. \
+         Make sure the fold challenger factory uses the same Poseidon2 permutation \
+         as the circuit's poseidon_perm."
+    );
+
+    // Spartan-prove the init circuit
+    let spartan_prover = R1CSProver::new();
+    let _spartan_proof = spartan_prover.prove::<EF, _>(&init_instance, spartan_challenger);
+    let witness_poly = spartan_prover.prepare_witness(&init_instance);
+
+    // Build zero accumulator with dimensions matching the recursive circuit.
+    // num_vars_y = 2^num_poly_vars_y = 2 * num_vars. The witness is num_vars_y / 2.
+    let num_inputs = init_instance.input().len();
+    let z = witness_poly.as_slice();
+    let num_vars_y = 1usize << init_shape.num_poly_vars_y();
+    let num_witness = num_vars_y / 2;
+    let mut init_witness = z[num_inputs..].to_vec();
+    init_witness.resize(num_witness, F::ZERO);
+
+    // Use init_shape's log_m (the padded recursive circuit) for the fold.
+    // This must be consistent with the shape stored in WarpIVCState.
+    let init_log_m = init_shape.num_cons().next_power_of_two().trailing_zeros() as usize;
+
+    // RS-encode zero witness to get initial codeword and root
+    let zero_witness_poly = EvaluationsList::new(vec![F::ZERO; num_witness]);
+    let zero_cw = rs_encode(&zero_witness_poly, rs_config.folding_factor, rs_config.log_inv_rate, dft);
+    let (zero_root, _) = merkle_commit_codeword::<
+        F, F, <F as Field>::Packing, <F as Field>::Packing, H, C, 8,
+    >(&zero_cw, rs_config.folding_factor, merkle_hash.clone(), merkle_compress.clone());
+
+    let log_code = zero_cw.as_slice().len().trailing_zeros() as usize;
+    let zero_acc = WarpAccumulator::new(
+        WarpAccumulatorInstance {
+            commitment_root: zero_root,
+            eval_point: vec![F::ZERO; log_code],
+            eval_claim: F::ZERO,
+            pesat_tau: vec![F::ZERO; init_log_m],
+            pesat_x: vec![F::ZERO; num_inputs],
+            pesat_target: F::ZERO,
+        },
+        WarpAccumulatorWitness {
+            codeword: zero_cw,
+            witness: vec![F::ZERO; num_witness],
+        },
+    );
+
+    // Fold init instance with zero accumulator
+    let fresh = FreshInstance {
+        public_input: z[..num_inputs].to_vec(),
+        witness: init_witness.clone(),
+    };
+
+    // RS-encode fresh witness to get its commitment root for FS
+    let fresh_wp = EvaluationsList::new(init_witness);
+    let fresh_cw = rs_encode(&fresh_wp, rs_config.folding_factor, rs_config.log_inv_rate, dft);
+    let (fresh_root, _) = merkle_commit_codeword::<
+        F, F, <F as Field>::Packing, <F as Field>::Packing, H, C, 8,
+    >(&fresh_cw, rs_config.folding_factor, merkle_hash.clone(), merkle_compress.clone());
+    let mut fold_chal = make_fold_challenger();
+    let (omega, tau, fresh_betas) = crate::accumulation::warp::fold::derive_fold_challenges(
+        &zero_acc.instance.commitment_root,
+        zero_acc.instance.eval_claim,
+        &zero_acc.instance.eval_point,
+        zero_acc.instance.pesat_target,
+        &[fresh_root], // 1 fresh root for l=2 standard fold
+        log_code,
+        init_log_m,
+        &mut fold_chal,
+    );
+
+    let mh = merkle_hash.clone();
+    let mc = merkle_compress.clone();
+    let result = warp_fold_prove_rs_committed(
+        &init_shape, &[fresh], &zero_acc, omega, &tau, &fresh_betas,
+        &rs_config, dft,
+        |round_evals| {
+            for &e in round_evals { fold_chal.observe(e); }
+            fold_chal.sample()
+        },
+        |codeword, folding_factor| {
+            let (root, _tree) = merkle_commit_codeword::<
+                F, F, <F as Field>::Packing, <F as Field>::Packing, H, C, 8,
+            >(codeword, folding_factor, mh.clone(), mc.clone());
+            root
+        },
+    );
+
+    let new_acc = rebuild_accumulator(&result);
+
+    WarpIVCState {
+        step: 1,
+        accumulator: new_acc,
+        shape: init_shape,
+        last_fold_result: Some(result),
+        prev_acc_instance: Some(zero_acc.instance),
+        public_state: new_public_state,
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════
 // CP-SNARK mode: commitment-based deferred FS verification (Symphony Section 6)
 // ═══════════════════════════════════════════════════════════════════════
 //
@@ -1243,7 +1717,9 @@ where
     let num_inputs = unified_instance.input().len();
     let z = witness_poly.as_slice();
     let public_input = z[..num_inputs].to_vec();
-    let num_witness = prev_state.accumulator.witness.witness.len();
+    // Witness must be power-of-2 for RS encoding (EvaluationsList requires it).
+    let raw_witness_len = prev_state.accumulator.witness.witness.len();
+    let num_witness = raw_witness_len.next_power_of_two();
     let mut witness_part = z[num_inputs..].to_vec();
     witness_part.resize(num_witness, F::ZERO);
 
@@ -2247,6 +2723,7 @@ mod tests {
             >(
                 &step, &[F::ZERO], &poseidon_config, &poseidon_perm,
                 3, // eval_point has 3 vars for our test shape
+                2, // log_m for fresh_betas
             );
 
         // Measure WITHOUT verifier (step circuit only)
@@ -2265,6 +2742,8 @@ mod tests {
             sumcheck_evals: vec![[F::ZERO; 3]],
             num_rounds: 1,
             omega: F::ZERO,
+            num_fresh: 1,
+            log_m: 2,
             union_commitment_root: None,
         };
         let mut verifier_only_builder = CircuitBuilder::<F>::new();
@@ -2354,7 +2833,7 @@ mod tests {
             compute_recursive_circuit_size::<
                 F, GenericPoseidon2LinearLayersBabyBear, _, _,
             >(
-                &step, &[F::ZERO], &poseidon_config, &poseidon_perm, 3,
+                &step, &[F::ZERO], &poseidon_config, &poseidon_perm, 3, 2,
             );
 
         // Init: build unified circuit WITHOUT verifier but padded to target size.
@@ -2604,19 +3083,20 @@ mod tests {
         let num_eval_point_vars = 3;
 
         // Non-union l=2 circuit size
+        let log_m = 2;
         let (nw_l2, nc_l2, _) = compute_recursive_circuit_size::<
             F, GenericPoseidon2LinearLayersBabyBear, _, _,
-        >(&step, &step_input, &poseidon_config, &poseidon_perm, num_eval_point_vars);
+        >(&step, &step_input, &poseidon_config, &poseidon_perm, num_eval_point_vars, log_m);
 
         // Union l=4 circuit size
         let (nw_u4, nc_u4, _) = compute_recursive_circuit_size_union::<
             F, GenericPoseidon2LinearLayersBabyBear, _, _,
-        >(&step, &step_input, &poseidon_config, &poseidon_perm, num_eval_point_vars, 4);
+        >(&step, &step_input, &poseidon_config, &poseidon_perm, num_eval_point_vars, 4, log_m);
 
         // Union l=8 circuit size
         let (nw_u8, nc_u8, _) = compute_recursive_circuit_size_union::<
             F, GenericPoseidon2LinearLayersBabyBear, _, _,
-        >(&step, &step_input, &poseidon_config, &poseidon_perm, num_eval_point_vars, 8);
+        >(&step, &step_input, &poseidon_config, &poseidon_perm, num_eval_point_vars, 8, log_m);
 
         // Union l=4 should be smaller than non-union l=2 despite more sumcheck rounds,
         // because the union absorbs only 1 root vs 2 for non-union
@@ -2641,6 +3121,108 @@ mod tests {
         assert!(nw_u8 > 0);
 
         let _ = (nw_l2, nc_l2); // suppress unused warnings
+    }
+
+    // ── Recursive Union (pure Poseidon2) tests ──
+
+    /// Full test: recursive union init + 2 steps with in-circuit Poseidon2 verification.
+    /// This is the "pure" pipeline — no Symphony CP-SNARK, all FS in-circuit.
+    #[test]
+    fn warp_ivc_recursive_union_poseidon2_pipeline() {
+        use p3_baby_bear::GenericPoseidon2LinearLayersBabyBear;
+        use crate::ivc::step::TrivialStepCircuit;
+        use crate::circuit::poseidon2::Poseidon2CircuitConfig;
+
+        let shape = make_shape();
+        let dft = Radix2DFTSmallBatch::<F>::default();
+        let ivc_config = WarpIVCConfig {
+            fold_arity: 4,
+            use_union: true,
+            ..Default::default()
+        };
+        let (mh, mc) = make_hash_compress();
+        // CRITICAL: The fold challenger and the in-circuit Poseidon2 must use
+        // the same permutation (same round constants). Use seed 99 for both.
+        let poseidon_perm_circuit = Perm::new_from_rng_128(&mut SmallRng::seed_from_u64(99));
+        let poseidon_config = Poseidon2CircuitConfig::<F, 16>::from_rng(
+            8, 13, 7, &mut SmallRng::seed_from_u64(99),
+        );
+        let perm_for_fold = poseidon_perm_circuit.clone();
+        let make_union_fold_challenger = move || -> MyChallenger {
+            MyChallenger::new(perm_for_fold.clone())
+        };
+        let step = TrivialStepCircuit::new(1);
+        let arity = 4;
+        let num_fresh = arity - 1; // 3
+
+        // ── Init ──
+        let inst0 = make_instance(&shape, 3);
+        let mut spartan_chal = make_challenger(1);
+        let mut mfc = make_union_fold_challenger.clone();
+        let state = warp_ivc_init_recursive_union::<
+            F, EF, _, _, _, _, GenericPoseidon2LinearLayersBabyBear, _, _, _,
+        >(
+            &shape, &inst0, &mut spartan_chal,
+            &ivc_config, &dft, mh.clone(), mc.clone(),
+            &poseidon_config, &poseidon_perm_circuit,
+            &step, &[F::from_u64(9)], arity,
+            vec![F::from_u64(9)],
+            &mut mfc,
+        );
+        assert_eq!(state.step, 1);
+
+        // Verify decider accepts init
+        let decide = crate::accumulation::warp::decider::warp_decide_algebraic_rs(
+            &state.shape, &state.accumulator,
+        );
+        assert!(decide.is_ok(), "decider should accept init: {decide:?}");
+
+        // ── Step 2: recursive union with 3 fresh instances ──
+        let step_inputs: Vec<Vec<F>> = (0..num_fresh)
+            .map(|i| vec![F::from_u64(10 + i as u64)])
+            .collect();
+        let mut spartan_chal2 = make_challenger(42);
+
+        // Must use the ORIGINAL shape's log_m and num_poly_vars_y to match what the init
+        // function passes to compute_recursive_circuit_size_union.
+        let log_m_orig = shape.num_cons().next_power_of_two().trailing_zeros() as usize;
+        let (target_w, _, _) = compute_recursive_circuit_size_union::<
+            F, GenericPoseidon2LinearLayersBabyBear, _, _,
+        >(
+            &step, &[F::ZERO], &poseidon_config, &poseidon_perm_circuit,
+            shape.num_poly_vars_y(), arity, log_m_orig,
+        );
+
+        let mut mfc2 = make_union_fold_challenger.clone();
+        let state2 = warp_ivc_step_recursive_union::<
+            F, EF, _, _, _, _, GenericPoseidon2LinearLayersBabyBear, _, _, _,
+        >(
+            &state, &step, &step_inputs, arity,
+            &mut spartan_chal2, &ivc_config, &dft, mh.clone(), mc.clone(),
+            &poseidon_config, &poseidon_perm_circuit,
+            Some(target_w), vec![],
+            &mut mfc2,
+        );
+        assert_eq!(state2.step, 2);
+
+        // Verify decider accepts step 2
+        let decide2 = crate::accumulation::warp::decider::warp_decide_algebraic_rs(
+            &state2.shape, &state2.accumulator,
+        );
+        assert!(decide2.is_ok(), "decider should accept step 2: {decide2:?}");
+
+        // Verify union root was set
+        assert!(
+            state2.last_fold_result.as_ref().unwrap().union_commitment_root.is_some(),
+            "union commitment root should be set"
+        );
+
+        // Verify fixed-size accumulator
+        assert_eq!(
+            state2.accumulator.witness.codeword.as_slice().len(),
+            state.accumulator.witness.codeword.as_slice().len(),
+            "codeword size should stay fixed across steps"
+        );
     }
 
     // ── CP-SNARK mode tests (Symphony-backed, requires `symphony` feature) ──
@@ -2758,7 +3340,7 @@ mod tests {
             GenericPoseidon2LinearLayersBabyBear,
             _,
             _,
-        >(&step, &[F::ZERO], &poseidon_config, &poseidon_perm, 3);
+        >(&step, &[F::ZERO], &poseidon_config, &poseidon_perm, 3, 2);
 
         // CP-SNARK circuit size
         let (cp_witness, cp_constraints, _) = compute_cp_circuit_size(&step, &[F::ZERO]);

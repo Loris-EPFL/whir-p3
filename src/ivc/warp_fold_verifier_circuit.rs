@@ -43,6 +43,14 @@ pub struct WarpFoldVerifierWitness<F: Field> {
     pub num_rounds: usize,
     /// The batching challenge ω used in twin-constraint: target_i = μ_i + ω·η_i.
     pub omega: F,
+    /// Number of fresh instances (ℓ−1). Used to sample fresh_betas from the
+    /// Poseidon2 sponge, keeping the in-circuit FS state in sync with the
+    /// native `derive_fold_challenges{,_union}` which samples
+    /// `num_fresh × log_m` challenges between tau and sumcheck rounds.
+    pub num_fresh: usize,
+    /// Log2 of constraint count. Together with `num_fresh`, determines how many
+    /// fresh_betas the sponge must sample to stay in sync with the native prover.
+    pub log_m: usize,
     /// Quasar union commitment root. When `Some`, replaces individual fresh roots
     /// in Phase 1 FS absorption: the circuit absorbs running acc (index 0) + this
     /// single union root instead of ℓ individual roots. This is O(1) in ℓ.
@@ -58,6 +66,8 @@ impl<F: Field + PrimeField64> WarpFoldVerifierWitness<F> {
         input_pesat_targets: Vec<F>,
         sumcheck_round_polys: &[Vec<F>],
         omega: F,
+        num_fresh: usize,
+        log_m: usize,
     ) -> Self {
         let sumcheck_evals: Vec<[F; 3]> = sumcheck_round_polys
             .iter()
@@ -74,6 +84,8 @@ impl<F: Field + PrimeField64> WarpFoldVerifierWitness<F> {
             sumcheck_evals,
             num_rounds: sumcheck_round_polys.len(),
             omega,
+            num_fresh,
+            log_m,
             union_commitment_root: None,
         }
     }
@@ -91,6 +103,8 @@ impl<F: Field + PrimeField64> WarpFoldVerifierWitness<F> {
         union_root: Vec<F>,
         sumcheck_round_polys: &[Vec<F>],
         omega: F,
+        num_fresh: usize,
+        log_m: usize,
     ) -> Self {
         let sumcheck_evals: Vec<[F; 3]> = sumcheck_round_polys
             .iter()
@@ -107,6 +121,8 @@ impl<F: Field + PrimeField64> WarpFoldVerifierWitness<F> {
             sumcheck_evals,
             num_rounds: sumcheck_round_polys.len(),
             omega,
+            num_fresh,
+            log_m,
             union_commitment_root: Some(union_root),
         }
     }
@@ -240,6 +256,17 @@ where
         // the sumcheck round observations that follow depend on tau being correct.
         // Explicitly constraining tau is not needed because a wrong tau changes
         // the initial target, which would make h(0)+h(1) != claimed fail.
+    }
+
+    // Sample fresh_betas to keep Poseidon2 sponge state synchronized with the
+    // native prover's derive_fold_challenges{,_union}. The native FS samples
+    // num_fresh × log_m challenges between tau and the sumcheck rounds. Without
+    // this, the sponge state diverges and subsequent sumcheck challenges r_i
+    // would differ between circuit and prover, breaking Fiat-Shamir binding.
+    for _ in 0..witness.num_fresh {
+        for _ in 0..witness.log_m {
+            let _ = challenger.sample::<L, P>(builder, poseidon_config, perm);
+        }
     }
 
     // ═══════════════════════════════════════════
@@ -431,7 +458,16 @@ mod tests {
         }
         let omega: F = native_chal.sample();
 
-        // l=2: 1 round of sumcheck
+        // l=2: 1 round of sumcheck, 1 fresh instance, log_m=2
+        let num_fresh = 1;
+        let log_m = 2;
+
+        // Sample tau and fresh_betas from native challenger to keep in sync
+        let _tau_0: F = native_chal.sample(); // tau (1 challenge for log_l=1)
+        for _ in 0..num_fresh * log_m {
+            let _: F = native_chal.sample(); // fresh_betas
+        }
+
         let witness = WarpFoldVerifierWitness {
             input_commitment_roots: roots,
             input_eval_claims: eval_claims,
@@ -440,6 +476,8 @@ mod tests {
             sumcheck_evals: vec![[F::from_u64(15), F::from_u64(15), F::from_u64(25)]],
             num_rounds: 1,
             omega,
+            num_fresh,
+            log_m,
             union_commitment_root: None,
         };
 
@@ -477,6 +515,8 @@ mod tests {
             sumcheck_evals: vec![[F::ZERO; 3]],
             num_rounds: 1,
             omega: F::ZERO,
+            num_fresh: 1,
+            log_m: 2,
             union_commitment_root: None,
         };
 
@@ -527,6 +567,8 @@ mod tests {
             sumcheck_evals: vec![[F::ZERO; 3]],
             num_rounds: 1,
             omega: F::ZERO,
+            num_fresh: 1,
+            log_m: 2,
             union_commitment_root: None,
         };
         let mut warp_builder = CircuitBuilder::<F>::new();
@@ -601,6 +643,13 @@ mod tests {
         let _tau_0: F = native_chal.sample();
         let _tau_1: F = native_chal.sample();
 
+        // Sample fresh_betas (3 fresh × 2 log_m = 6 samples)
+        let num_fresh = 3;
+        let log_m = 2;
+        for _ in 0..num_fresh * log_m {
+            let _: F = native_chal.sample();
+        }
+
         // l=4 → log_l=2 → 2 sumcheck rounds
         // Construct round polys that satisfy the sumcheck relation:
         // Round 0: h(0)+h(1) = initial_claim
@@ -638,6 +687,8 @@ mod tests {
                 vec![e0_r1, e1_r1, e2_r1],
             ],
             omega,
+            num_fresh,
+            log_m,
         );
 
         let mut builder = CircuitBuilder::<F>::new();
@@ -675,6 +726,8 @@ mod tests {
             sumcheck_evals: vec![[F::ZERO; 3]; 2], // log_l=2 rounds
             num_rounds: 2,
             omega: F::ZERO,
+            num_fresh: 3,
+            log_m: 0, // zero to compare Phase 1 savings only
             union_commitment_root: None,
         };
 
@@ -694,6 +747,8 @@ mod tests {
             vec![F::ZERO; 8],
             &vec![vec![F::ZERO; 3]; 2],
             F::ZERO,
+            3, // num_fresh
+            0, // log_m: zero to compare Phase 1 savings only
         );
 
         let mut union_builder = CircuitBuilder::<F>::new();
@@ -740,6 +795,8 @@ mod tests {
                 sumcheck_evals: vec![[F::ZERO; 3]; log_l],
                 num_rounds: log_l,
                 omega: F::ZERO,
+                num_fresh: arity - 1,
+                log_m: 0, // zero to compare Phase 1 savings only
                 union_commitment_root: None,
             };
 
@@ -756,6 +813,8 @@ mod tests {
                 vec![F::ZERO; 8],
                 &vec![vec![F::ZERO; 3]; log_l],
                 F::ZERO,
+                arity - 1, // num_fresh
+                0,         // log_m: zero to compare Phase 1 savings only
             );
 
             let mut b2 = CircuitBuilder::<F>::new();

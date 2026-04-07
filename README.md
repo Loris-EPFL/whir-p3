@@ -103,6 +103,78 @@ cargo test --lib --features bench-timing \
 
 Shows the recursive IVC circuit breakdown: step circuit vs WARP fold verifier (Poseidon2 Fiat-Shamir + sumcheck verification). Current circuit: 5,293 constraints, dominated by Poseidon2 hashing.
 
+### CP-SNARK + Quasar comparison (4-way apples-to-apples)
+
+Compares recursive IVC variants with Symphony deferred hashing and Quasar union commitment:
+
+```bash
+cargo run --release --features symphony --bin cp_snark_bench -- <log_sizes> <num_steps> <repeats> <step_muls> <arity>
+```
+
+Arguments:
+- `log_sizes`: comma-separated log2 of synthetic R1CS constraint count
+- `num_steps`: comma-separated total instance counts (benchmark amortizes over these)
+- `repeats`: repetitions for median timing
+- `step_muls`: multiplication gates in the recursive step circuit (application workload)
+- `arity`: union fold arity (ℓ, power of 2)
+
+Produces three tables:
+- **Table 1**: Per-step breakdown for l=2 paths (Regular IVC vs CP-SNARK)
+- **Table 2**: Apples-to-apples 4-way IVC prover comparison
+  - `reg_tot`: Regular IVC, l=2, Poseidon2 in-circuit (baseline)
+  - `cp_tot`: CP-SNARK IVC, l=2, Symphony deferred hashing
+  - `pu_tot`: Poseidon2 Union IVC, l=arity, no Symphony (pure WARP + Quasar)
+  - `ru_tot`: Symphony Recursive Union IVC, l=arity, deferred hashing
+- **Table 3**: Standalone verifier benchmark — Quasar's sublinear O(1) vs O(ℓ) claim
+
+Examples:
+
+```bash
+# Aggregation sweet spot (small step circuit → CP-SNARK/Union shine)
+cargo run --release --features symphony --bin cp_snark_bench -- "10,12" "32,64,128" 3 100 4
+
+# Realistic rollup-scale workload
+cargo run --release --features symphony --bin cp_snark_bench -- "16,18" "8,16,32,64" 3 5000 4
+
+# High-load zkVM-like (large step circuit)
+cargo run --release --features symphony --bin cp_snark_bench -- "18,20" "8,16,32" 3 50000 4
+
+# Higher arity to stress Quasar's sublinear verifier benefit
+cargo run --release --features symphony --bin cp_snark_bench -- "12" "64,128,256" 3 500 8
+```
+
+### Verifier scaling (Quasar sublinear claim)
+
+Table 3 at the end of `cp_snark_bench` directly demonstrates Quasar's O(log ℓ) verifier cost vs O(ℓ) for the standard WARP verifier:
+
+```bash
+# Any cp_snark_bench invocation ends with Table 3 showing arity scaling from ℓ=2 to 64
+cargo run --release --features symphony --bin cp_snark_bench -- "10" "8" 1 100 4
+```
+
+Sample output (log_code=16, 1000 iterations per measurement):
+
+```
+ arity |   nonunion_us      union_us |     nu/un | saved_absorb
+----------------------------------------------------------------------
+     2 |       6.09 us       4.68 us |    1.30x |           18
+     4 |      10.44 us       4.88 us |    2.14x |           70
+     8 |      18.62 us       5.37 us |    3.47x |          174
+    16 |      35.33 us       6.00 us |    5.89x |          382
+    32 |      69.11 us       6.86 us |   10.07x |          798
+    64 |     136.12 us       7.38 us |   18.44x |         1630
+```
+
+Non-union verifier time doubles as ℓ doubles (O(ℓ)). Union verifier time grows only with log₂ℓ (O(log ℓ)). At ℓ=64, the union verifier is **18x faster**.
+
+### Arity micro-benchmark (prover-side fold costs at varying arity)
+
+```bash
+cargo run --release --bin arity_bench -- <log_sizes> <num_steps> <repeats> <batch>
+```
+
+Compares WARP fold prover costs across arities 2, 4, 8 at varying synthetic R1CS sizes.
+
 ### Legacy benchmarks
 
 ```bash

@@ -23,6 +23,7 @@ use whir_p3::{
         random_lc::random_linear_combination,
         warp::{
             accumulator::{FreshInstance, WarpAccumulator, WarpAccumulatorInstance, WarpAccumulatorWitness},
+            decider::warp_decide_algebraic_rs,
             encoding::merkle_commit_codeword,
             fold::{warp_fold_prove_rs_committed, RSEncodingConfig, WarpFoldResult},
         },
@@ -30,9 +31,13 @@ use whir_p3::{
     circuit::{builder::CircuitBuilder, poseidon2::Poseidon2CircuitConfig, sponge::CircuitChallenger},
     fiat_shamir::domain_separator::DomainSeparator,
     ivc::{
-        step::TrivialStepCircuit,
+        step::{TrivialStepCircuit, WorkloadStepCircuit},
         warp_fold_verifier_circuit::{WarpFoldVerifierWitness, synthesize_warp_ivc_circuit},
-        warp_ivc::compute_recursive_circuit_size,
+        warp_ivc::{
+            compute_recursive_circuit_size, compute_recursive_circuit_size_union,
+            warp_ivc_init, warp_ivc_step_recursive, warp_ivc_init_recursive_union,
+            warp_ivc_step_recursive_union, WarpIVCConfig,
+        },
     },
     parameters::{errors::SecurityAssumption, FoldingFactor, ProtocolParameters},
     poly::{evals::EvaluationsList, multilinear::MultilinearPoint},
@@ -41,11 +46,12 @@ use whir_p3::{
         r1cs_prover::R1CSProver,
     },
     whir::{
-        committer::writer::CommitmentWriter,
-        constraints::statement::LinearStatement,
+        committer::{writer::CommitmentWriter, reader::CommitmentReader},
+        constraints::statement::{EqStatement, InitialClaim, LinearStatement},
         parameters::WhirConfig,
         proof::WhirProof,
         prover::Prover as WhirProver,
+        verifier::Verifier as WhirVerifier,
     },
 };
 
@@ -79,6 +85,10 @@ fn make_ds(c: &WhirConfig<EF, F, MyHash, MyCompress, MyChallenger>) -> DomainSep
 fn seed_ch(s: u64, d: &DomainSeparator<EF, F>) -> MyChallenger {
     let p = Perm::new_from_rng_128(&mut SmallRng::seed_from_u64(s));
     let mut c = MyChallenger::new(p); d.observe_domain_separator(&mut c); c
+}
+fn make_challenger(seed: u64) -> MyChallenger {
+    let p = Perm::new_from_rng_128(&mut SmallRng::seed_from_u64(seed));
+    MyChallenger::new(p)
 }
 fn make_hc() -> (MyHash, MyCompress) {
     let p = Perm::new_from_rng_128(&mut SmallRng::seed_from_u64(42));
@@ -123,12 +133,12 @@ fn spartan_linearize_all(
     (witnesses, linears, us)
 }
 
-/// Terminal WHIR proof on accumulated witness.
-fn terminal_whir(
+/// Terminal WHIR proof on accumulated witness. Returns (prove_us, proof).
+fn terminal_whir_with_proof(
     config: &WhirConfig<EF, F, MyHash, MyCompress, MyChallenger>,
     witness: &[F],
     witness_num_vars: usize,
-) -> f64 {
+) -> (f64, WhirProof<F, EF, F, DIGEST>) {
     let dft = Radix2DFTSmallBatch::<F>::default();
     let ds = make_ds(config);
     let mut wvec = witness.to_vec();
@@ -143,7 +153,59 @@ fn terminal_whir(
         &dft, &mut proof, &mut ch, &mut stmt).unwrap();
     WhirProver(config).prove::<_,<F as Field>::Packing,F,<F as Field>::Packing,DIGEST>(
         &dft, &mut proof, &mut ch, &stmt, comm).unwrap();
+    (start.elapsed().as_micros() as f64, proof)
+}
+
+/// Terminal WHIR verify (succinct — no witness). Returns verify_us.
+fn terminal_whir_verify(
+    config: &WhirConfig<EF, F, MyHash, MyCompress, MyChallenger>,
+    proof: &WhirProof<F, EF, F, DIGEST>,
+    witness_num_vars: usize,
+) -> f64 {
+    let ds = make_ds(config);
+    let start = Instant::now();
+    let initial_claim = InitialClaim {
+        eq_statement: EqStatement::initialize(witness_num_vars),
+        linear_statement: LinearStatement::<F, EF>::initialize(witness_num_vars),
+    };
+    let mut ch = seed_ch(999, &ds);
+    let parsed = CommitmentReader::new(config).parse_commitment::<F, DIGEST>(proof, &mut ch);
+    WhirVerifier::new(config).verify_with_initial_claim::<<F as Field>::Packing,F,<F as Field>::Packing,DIGEST>(
+        proof, &mut ch, &parsed, initial_claim).unwrap();
     start.elapsed().as_micros() as f64
+}
+
+/// Measure fold verifier FS cost at a given arity.
+/// Standard: absorbs l individual roots. Union: absorbs 1 union root.
+fn measure_fold_verifier_fs(log_m: usize, log_n: usize, l: usize) -> (f64, f64) {
+    use whir_p3::accumulation::warp::fold::{derive_fold_challenges, derive_fold_challenges_union};
+
+    let perm = Perm::new_from_rng_128(&mut SmallRng::seed_from_u64(99));
+    let num_fresh = l - 1;
+
+    // Standard: absorb l individual roots
+    let start_std = Instant::now();
+    for _ in 0..100 {
+        let mut ch = MyChallenger::new(perm.clone());
+        let _challenges = derive_fold_challenges(
+            &[F::ZERO; DIGEST], F::ZERO, &vec![F::ZERO; log_n], F::ZERO,
+            &vec![[F::ZERO; DIGEST]; num_fresh], log_n, log_m, &mut ch,
+        );
+    }
+    let std_us = start_std.elapsed().as_micros() as f64 / 100.0;
+
+    // Union: absorb 1 union root
+    let start_union = Instant::now();
+    for _ in 0..100 {
+        let mut ch = MyChallenger::new(perm.clone());
+        let _challenges = derive_fold_challenges_union(
+            &[F::ZERO; DIGEST], F::ZERO, &vec![F::ZERO; log_n], F::ZERO,
+            &[F::ZERO; DIGEST], num_fresh, log_m, &mut ch,
+        );
+    }
+    let union_us = start_union.elapsed().as_micros() as f64 / 100.0;
+
+    (std_us, union_us)
 }
 
 fn main() {
@@ -253,8 +315,9 @@ fn main() {
                     acc2 = rebuild_acc(&r);
                 }
                 let fold2_us = start2.elapsed().as_micros() as f64;
-                let whir2_us = terminal_whir(&config, &acc2.witness.witness, witness_num_vars);
+                let (whir2_us, whir2_proof) = terminal_whir_with_proof(&config, &acc2.witness.witness, witness_num_vars);
                 direct_times.push(fold2_us + whir2_us);
+                let _ = &whir2_proof; // keep for verify timing below
 
                 // ═══ Path 3: Batch reduce + fold(l=2) + 1 WHIR ═══
                 let start3 = Instant::now();
@@ -298,8 +361,9 @@ fn main() {
                     acc3 = rebuild_acc(&r);
                 }
                 let fold3_us = start3.elapsed().as_micros() as f64;
-                let whir3_us = terminal_whir(&config, &acc3.witness.witness, witness_num_vars);
+                let (whir3_us, whir3_proof) = terminal_whir_with_proof(&config, &acc3.witness.witness, witness_num_vars);
                 batch_times.push(fold3_us + whir3_us);
+                let _ = &whir3_proof;
             }
 
             let spartan_ms = median(&mut spartan_times) / 1000.0;
@@ -325,4 +389,305 @@ fn main() {
     println!("  fold/ind    = independent / direct_fold (>1 means fold is faster)");
     println!("  batch/ind   = independent / batch+fold (>1 means batch+fold is faster)");
     println!("  batch/fold  = direct_fold / batch+fold (>1 means batch reduction helps over raw fold)");
+
+    // ═══════════════════════════════════════════════════════════════
+    // Table 2: Recursive IVC Throughput (fair comparison)
+    // ═══════════════════════════════════════════════════════════════
+    //
+    // All paths prove the SAME total number of step circuits (total_circuits).
+    // l=2 paths: total_circuits steps × 1 circuit each
+    // l=4 paths: total_circuits/3 steps × 3 circuits each
+    // Metric: time per circuit proved (lower = better).
+    println!();
+    println!("Recursive IVC Throughput (Fair Comparison)");
+    println!("==========================================");
+    println!("All paths prove the SAME total work (same number of step circuits).");
+    println!("  l=2 paths: N steps × 1 circuit/step = N circuits");
+    println!("  l=4 paths: N/3 steps × 3 circuits/step = N circuits");
+    println!("Metric: ms per circuit proved (lower = better).");
+    println!();
+    {
+        use p3_koala_bear::GenericPoseidon2LinearLayersKoalaBear;
+
+        let dft_ivc = Radix2DFTSmallBatch::<F>::default();
+        let (mh_ivc, mc_ivc) = make_hc();
+        let ivc_config_l2 = WarpIVCConfig::default();
+        let ivc_config_union = WarpIVCConfig { fold_arity: 4, use_union: true, ..Default::default() };
+
+        // Poseidon2 perm and config — shared by fold challenger AND circuit.
+        let (poseidon_perm, poseidon_config) = {
+            use p3_poseidon2::poseidon2_round_numbers_128;
+            const SBOX_DEGREE: u64 = 3; // KoalaBear
+            let seed = 99u64;
+            let perm = Perm::new_from_rng_128(&mut SmallRng::seed_from_u64(seed));
+            let (rf, rp) = poseidon2_round_numbers_128::<F>(16, SBOX_DEGREE)
+                .expect("unsupported Poseidon2 parameters");
+            let config = Poseidon2CircuitConfig::<F, 16>::from_rng(
+                rf, rp, SBOX_DEGREE, &mut SmallRng::seed_from_u64(seed),
+            );
+            (perm, config)
+        };
+
+        // Total circuits to prove (must be divisible by 3 for l=4 paths)
+        let total_circuits = 12;
+        let steps_l2 = total_circuits;      // 12 steps × 1 circuit
+        let steps_l4 = total_circuits / 3;  //  4 steps × 3 circuits
+
+        for &log_size in &sizes {
+            let step_muls = (1usize << log_size).saturating_sub(5000).max(100);
+            let step = WorkloadStepCircuit::new(step_muls);
+            let step_input = [F::ZERO];
+
+            let num_cons = 1 << log_size;
+            let num_vars = 1 << log_size;
+            let num_inputs_synth = 8;
+            let mut rng = SmallRng::seed_from_u64(5);
+            let (shape, instance) = R1CSInstance::<F>::produce_synthetic_r1cs(
+                num_cons, num_vars, num_inputs_synth, &mut rng,
+            );
+
+            println!("=== log2(constraints)={log_size}, step_muls={step_muls}, total_circuits={total_circuits} ===");
+            println!();
+
+            // ── Path A: WARP fold (l=2), {steps_l2} steps × 1 circuit ──
+            let perm_for_fold = poseidon_perm.clone();
+            let make_p2_chal = move || -> MyChallenger { MyChallenger::new(perm_for_fold.clone()) };
+
+            let t_a = Instant::now();
+            let mut spartan_chal_a = make_challenger(1);
+            let state_a = warp_ivc_init::<F, EF, _, _, _, _, _>(
+                &shape, &instance, &mut spartan_chal_a,
+                &ivc_config_l2, &dft_ivc, mh_ivc.clone(), mc_ivc.clone(),
+                vec![], make_p2_chal.clone(),
+            );
+            let mut state_iter_a = state_a;
+            for s in 0..steps_l2 {
+                let mut ch = make_challenger(s as u64 + 10);
+                state_iter_a = whir_p3::ivc::warp_ivc::warp_ivc_step::<
+                    F, EF, _, _, _, _, _,
+                >(
+                    &state_iter_a, &instance, &mut ch,
+                    &ivc_config_l2, &dft_ivc, mh_ivc.clone(), mc_ivc.clone(),
+                    vec![], make_p2_chal.clone(),
+                );
+            }
+            let decide_a = warp_decide_algebraic_rs(&state_iter_a.shape, &state_iter_a.accumulator);
+            assert!(decide_a.is_ok(), "Path A decider failed: {decide_a:?}");
+            let us_a = t_a.elapsed().as_micros() as f64;
+            let per_circuit_a = us_a / total_circuits as f64;
+
+            // ── Path B: Poseidon2 Union (l=4, Quasar), {steps_l4} steps × 3 circuits ──
+            let perm_for_union = poseidon_perm.clone();
+            let make_union_chal = move || -> MyChallenger { MyChallenger::new(perm_for_union.clone()) };
+
+            let t_b = Instant::now();
+            let mut spartan_chal_b = make_challenger(100);
+            let log_m_orig = shape.num_cons().next_power_of_two().trailing_zeros() as usize;
+            let (target_w_b, _, _) = compute_recursive_circuit_size_union::<
+                F, GenericPoseidon2LinearLayersKoalaBear, _, _,
+            >(&step, &step_input, &poseidon_config, &poseidon_perm,
+              shape.num_poly_vars_y(), 4, log_m_orig);
+
+            let state_b = warp_ivc_init_recursive_union::<
+                F, EF, _, _, _, _, GenericPoseidon2LinearLayersKoalaBear, _, _, _,
+            >(
+                &shape, &instance, &mut spartan_chal_b,
+                &ivc_config_union, &dft_ivc, mh_ivc.clone(), mc_ivc.clone(),
+                &poseidon_config, &poseidon_perm,
+                &step, &step_input, 4,
+                vec![], make_union_chal.clone(),
+            );
+            let mut state_iter_b = state_b;
+            for s in 0..steps_l4 {
+                let step_inputs_b: Vec<Vec<F>> = (0..3)
+                    .map(|i| vec![F::from_u64(s as u64 * 10 + i)])
+                    .collect();
+                let mut ch = make_challenger(s as u64 + 200);
+                state_iter_b = warp_ivc_step_recursive_union::<
+                    F, EF, _, _, _, _, GenericPoseidon2LinearLayersKoalaBear, _, _, _,
+                >(
+                    &state_iter_b, &step, &step_inputs_b, 4,
+                    &mut ch, &ivc_config_union, &dft_ivc, mh_ivc.clone(), mc_ivc.clone(),
+                    &poseidon_config, &poseidon_perm,
+                    Some(target_w_b), vec![],
+                    make_union_chal.clone(),
+                );
+            }
+            let decide_b = warp_decide_algebraic_rs(&state_iter_b.shape, &state_iter_b.accumulator);
+            assert!(decide_b.is_ok(), "Path B decider failed: {decide_b:?}");
+            let us_b = t_b.elapsed().as_micros() as f64;
+            let per_circuit_b = us_b / total_circuits as f64;
+
+            // ── Print results ──
+            println!("{:>25} {:>10} {:>8} {:>12} {:>12} {:>10}",
+                "path", "total(ms)", "steps", "folds", "ms/circuit", "vs A");
+            println!("{}", "-".repeat(80));
+            println!("{:>25} {:>8.1}ms {:>8} {:>12} {:>10.1}ms {:>10}",
+                "A: WARP (l=2)",
+                us_a / 1000.0, steps_l2, steps_l2,
+                per_circuit_a / 1000.0, "baseline");
+            println!("{:>25} {:>8.1}ms {:>8} {:>12} {:>10.1}ms {:>9.2}x",
+                "B: WARP+Quasar (l=4)",
+                us_b / 1000.0, steps_l4, steps_l4,
+                per_circuit_b / 1000.0,
+                per_circuit_a / per_circuit_b);
+
+            // Symphony paths (only with feature)
+            #[cfg(feature = "symphony")]
+            {
+                use whir_p3::ivc::warp_ivc::{
+                    warp_ivc_init_cp, warp_ivc_step_recursive_cp,
+                    warp_ivc_init_recursive_union_cp, warp_ivc_step_recursive_union_cp,
+                    compute_recursive_union_circuit_size,
+                };
+                use whir_p3::ivc::warp_fold_verifier_algebraic::compute_cp_circuit_size;
+
+                // Path C: Symphony (l=2), steps_l2 steps × 1 circuit
+                let symphony_ok = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let t_c = Instant::now();
+                    let mut spartan_chal_c = make_challenger(300);
+                    let state_c = warp_ivc_init_cp::<F, EF, _, _, _, _, _>(
+                        &shape, &instance, &mut spartan_chal_c,
+                        &ivc_config_l2, &dft_ivc, mh_ivc.clone(), mc_ivc.clone(),
+                        vec![], make_p2_chal.clone(),
+                    );
+                    let (target_w_c, _, _) = compute_cp_circuit_size(&step, &step_input);
+                    let mut state_iter_c = state_c;
+                    for s in 0..steps_l2 {
+                        let mut ch = make_challenger(s as u64 + 310);
+                        state_iter_c = warp_ivc_step_recursive_cp::<
+                            F, EF, _, _, _, _, _, _,
+                        >(
+                            &state_iter_c, &step, &step_input, &mut ch,
+                            &ivc_config_l2, &dft_ivc, mh_ivc.clone(), mc_ivc.clone(),
+                            Some(target_w_c), vec![],
+                            make_p2_chal.clone(),
+                        );
+                    }
+                    let decide_c = warp_decide_algebraic_rs(&state_iter_c.shape, &state_iter_c.accumulator);
+                    assert!(decide_c.is_ok(), "Path C decider failed: {decide_c:?}");
+                    let us_c = t_c.elapsed().as_micros() as f64;
+                    us_c
+                }));
+                match symphony_ok {
+                    Ok(us_c) => {
+                        let per_circuit_c = us_c / total_circuits as f64;
+                        println!("{:>25} {:>8.1}ms {:>8} {:>12} {:>10.1}ms {:>9.2}x",
+                            "C: Symphony (l=2)",
+                            us_c / 1000.0, steps_l2, steps_l2,
+                            per_circuit_c / 1000.0,
+                            per_circuit_a / per_circuit_c);
+                    }
+                    Err(_) => {
+                        println!("{:>25} {:>8} {:>8} {:>12} {:>12} {:>10}",
+                            "C: Symphony (l=2)", "SKIP", "—", "—", "(too small)", "—");
+                    }
+                }
+
+                // Path D: Symphony Union (l=4), steps_l4 steps × 3 circuits
+                let symphony_d_ok = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let (target_w_d, _, _) = compute_recursive_union_circuit_size(
+                        &step, &step_input, 4,
+                    );
+                    let t_d = Instant::now();
+                    let state_d = warp_ivc_init_recursive_union_cp::<F, _>(
+                        &step, &step_input, 4,
+                        &ivc_config_union, target_w_d,
+                        vec![],
+                    );
+                    let mut state_iter_d = state_d;
+                    for s in 0..steps_l4 {
+                        let step_inputs_d: Vec<Vec<F>> = (0..3)
+                            .map(|i| vec![F::from_u64(s as u64 * 10 + i)])
+                            .collect();
+                        let mut ch = make_challenger(s as u64 + 410);
+                        state_iter_d = warp_ivc_step_recursive_union_cp::<
+                            F, EF, _, _, _, _, _, _,
+                        >(
+                            &state_iter_d, &step, &step_inputs_d, 4,
+                            &mut ch, &ivc_config_union, &dft_ivc, mh_ivc.clone(), mc_ivc.clone(),
+                            Some(target_w_d), vec![],
+                            make_p2_chal.clone(),
+                        );
+                    }
+                    let decide_d = warp_decide_algebraic_rs(&state_iter_d.shape, &state_iter_d.accumulator);
+                    assert!(decide_d.is_ok(), "Path D decider failed: {decide_d:?}");
+                    let us_d = t_d.elapsed().as_micros() as f64;
+                    us_d
+                }));
+                match symphony_d_ok {
+                    Ok(us_d) => {
+                        let per_circuit_d = us_d / total_circuits as f64;
+                        println!("{:>25} {:>8.1}ms {:>8} {:>12} {:>10.1}ms {:>9.2}x",
+                            "D: Symphony+Quasar (l=4)",
+                            us_d / 1000.0, steps_l4, steps_l4,
+                            per_circuit_d / 1000.0,
+                            per_circuit_a / per_circuit_d);
+                    }
+                    Err(_) => {
+                        println!("{:>25} {:>8} {:>8} {:>12} {:>12} {:>10}",
+                            "D: Symphony+Quasar (l=4)", "SKIP", "—", "—", "(too small)", "—");
+                    }
+                }
+            }
+
+            println!();
+            println!("  All paths prove {total_circuits} circuits total. vs A > 1 means faster than baseline.");
+            println!();
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // Table 3: Terminal WHIR Verify Time
+    // ═══════════════════════════════════════════════════════════════
+    println!();
+    println!("Terminal WHIR Verify Time");
+    println!("========================");
+    println!("This is the succinct verifier cost (constant per IVC chain, independent of num_steps).");
+    println!();
+    println!("{:>10} {:>12} {:>12}", "log_size", "prove(us)", "verify(us)");
+    println!("{}", "-".repeat(38));
+
+    let dft_v = Radix2DFTSmallBatch::<F>::default();
+    for &log_size in &sizes {
+        let num_vars = 1 << log_size;
+        let num_inputs = 8;
+        let mut rng = SmallRng::seed_from_u64(5);
+        let (_shape, instance) = R1CSInstance::<F>::produce_synthetic_r1cs(1 << log_size, num_vars, num_inputs, &mut rng);
+        let spartan = R1CSProver::new();
+        let sample_w = spartan.prepare_witness(&instance);
+        let num_witness = (sample_w.num_evals() - num_inputs).next_power_of_two();
+        let wnv = num_witness.trailing_zeros() as usize;
+        let cfg = make_whir_config(wnv);
+
+        let (prove_us, proof) = terminal_whir_with_proof(&cfg, sample_w.as_slice(), wnv);
+        let verify_us = terminal_whir_verify(&cfg, &proof, wnv);
+        println!("{:>10} {:>10.0}us {:>10.0}us", log_size, prove_us, verify_us);
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // Table 3: Quasar Verifier Scaling (O(1) vs O(ℓ))
+    // ═══════════════════════════════════════════════════════════════
+    println!();
+    println!("Quasar Verifier Scaling: Fold FS Challenge Derivation");
+    println!("=====================================================");
+    println!("Measures Fiat-Shamir challenge derivation cost for standard (O(ℓ) roots)");
+    println!("vs Quasar union (O(1) root). This is the per-fold verifier cost.");
+    println!();
+
+    let log_m_bench = sizes.last().copied().unwrap_or(14);
+    let log_n_bench = log_m_bench + RS_LOG_INV_RATE;
+    println!("Using log_m={log_m_bench}, log_n={log_n_bench}");
+    println!();
+    println!("{:>6} {:>12} {:>12} {:>10}", "arity", "standard(us)", "union(us)", "speedup");
+    println!("{}", "-".repeat(46));
+
+    for &arity in &[2, 4, 8, 16, 32, 64] {
+        let (std_us, union_us) = measure_fold_verifier_fs(log_m_bench, log_n_bench, arity);
+        let speedup = std_us / union_us;
+        println!("{:>6} {:>10.1}us {:>10.1}us {:>9.1}x", arity, std_us, union_us, speedup);
+    }
+    println!();
+    println!("Quasar union absorbs 1 root regardless of arity → O(1) FS cost.");
+    println!("Standard absorbs ℓ roots → O(ℓ) FS cost. Speedup grows with arity.");
 }
