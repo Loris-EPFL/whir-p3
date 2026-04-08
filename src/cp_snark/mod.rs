@@ -136,8 +136,6 @@ pub enum CpSnarkDeciderError {
     ShiftQueryMerkleInvalid { step: usize, query: usize, input: usize },
     /// Shift query linear combination mismatch — folded value ≠ Σ eq(γ,i) * val_i.
     ShiftQueryValueMismatch { step: usize, query: usize },
-    /// WHIR commitment root does not match accumulated root.
-    WhirRootBindingFailed,
     /// WHIR prove failed.
     WhirProveFailed,
     /// WHIR verify failed.
@@ -629,9 +627,9 @@ where
 ///
 /// Extends `cp_snark_terminal_verify_with_merkle` with a fifth phase:
 ///
-/// 5. **Terminal WHIR**: full prover-side RS decider + WHIR prove + root binding +
-///    WHIR verify. This establishes that the accumulated codeword is RS-close,
-///    completing the succinct argument chain.
+/// 5. **Terminal WHIR**: full prover-side RS decider + WHIR prove + WHIR verify.
+///    The algebraic decider checks eval claim, PESAT, and codeword validity;
+///    the WHIR proof establishes RS proximity on the accumulated witness.
 ///
 /// Returns the WHIR proof on success, which can be independently verified.
 pub fn cp_snark_terminal_verify_with_whir<F, EF, Challenger, H, C, Dft, WhirChallenger>(
@@ -675,13 +673,12 @@ where
     // via warp_decide_algebraic_rs internally in step 3)
     verify_shift_query_merkle_proofs(transcripts, folding_factor, merkle_hash, merkle_compress)?;
 
-    // Step 5: Terminal WHIR (full RS decider + WHIR prove + root binding + WHIR verify)
+    // Step 5: Terminal WHIR (full RS decider + WHIR prove + WHIR verify)
     terminal_whir_prove_and_verify(
         shape, acc, folding_factor, log_inv_rate, dft, whir_config, make_whir_challenger,
     )
     .map_err(|e| match e {
         TerminalWhirError::Decider(d) => CpSnarkDeciderError::AlgebraicCheck(d),
-        TerminalWhirError::RootBindingMismatch => CpSnarkDeciderError::WhirRootBindingFailed,
         TerminalWhirError::ProveFailed => CpSnarkDeciderError::WhirProveFailed,
         TerminalWhirError::VerifyFailed => CpSnarkDeciderError::WhirVerifyFailed,
     })

@@ -513,18 +513,18 @@ impl<A: Copy + Send + Sync + PrimeCharacteristicRing> EvaluationsList<A> {
     ///
     /// which is a quadratic polynomial in `X`.
     ///
-    /// # Coefficient Formulas
+    /// # Evaluation Formulas
     ///
-    /// The polynomial `h(X) = c_0 + c_1 * X + c_2 * X^2` has coefficients:
+    /// The polynomial `h(X) = c_0 + c_1 * X + c_2 * X^2` is evaluated at 0 and 2:
     ///
     /// ```text
-    /// c_0 = h(0) = \sum_b self(0, b) * weights(0, b)
+    /// h(0) = \sum_b self(0, b) * weights(0, b)
     ///
-    /// c_2 = \sum_b (self(1,b) - self(0,b)) * (weights(1,b) - weights(0,b))
+    /// h(2) = \sum_b (2*self(1,b) - self(0,b)) * (2*weights(1,b) - weights(0,b))
     /// ```
     ///
-    /// The linear coefficient `c_1` is not computed here; it's derived by the verifier
-    /// from the sum constraint `h(0) + h(1) = claimed_sum`.
+    /// The verifier derives `h(1)` from the sum constraint `h(0) + h(1) = claimed_sum`,
+    /// then interpolates the quadratic through `h(0)`, `h(1)`, `h(2)` as needed.
     ///
     /// # Memory Layout
     ///
@@ -538,7 +538,10 @@ impl<A: Copy + Send + Sync + PrimeCharacteristicRing> EvaluationsList<A> {
     ///
     /// # Returns
     ///
-    /// A tuple `(c_0, c_2)` of the constant and quadratic coefficients.
+    /// A tuple `(h(0), h(2))` — the evaluation of `h` at `X = 0` and `X = 2`.
+    /// Note: `h(2)` is **not** the quadratic coefficient `c_2`; callers recover
+    /// the individual coefficients from `h(0)`, `h(1)` (via the sum constraint),
+    /// and `h(2)` as needed.
     ///
     /// # Panics
     ///
@@ -560,15 +563,15 @@ impl<A: Copy + Send + Sync + PrimeCharacteristicRing> EvaluationsList<A> {
         let (evals_lo, evals_hi) = evals.split_at(mid);
         let (weights_lo, weights_hi) = weights.split_at(mid);
 
-        // Parallel computation of c_0 and c_2.
+        // Parallel computation of h(0) and h(2).
         evals_lo
             .par_iter()
             .zip(evals_hi.par_iter())
             .zip(weights_lo.par_iter().zip(weights_hi.par_iter()))
             .map(|((&e_lo, &e_hi), (&w_lo, &w_hi))| {
-                // c_0 term: product at X=0.
+                // h(0) term: product at X=0.
                 let c0_term = w_lo * e_lo;
-                // c_2 term: cross-product of differences.
+                // h(2) term: product of linear extensions evaluated at X=2.
                 let c2_term = (w_hi.double() - w_lo) * (e_hi.double() - e_lo);
                 (c0_term, c2_term)
             })

@@ -602,6 +602,7 @@ fn run_regular_recursive_union(
     >(&step, &[F::ZERO], &poseidon_config, &poseidon_perm, probe_log_code, arity, probe_log_m);
 
     // Build a sample shape to extract dimensions
+    let l_dummy = arity.next_power_of_two();
     let dummy_witness_init = WarpFoldVerifierWitness::from_fold_result_union(
         vec![F::ZERO; DIGEST],
         F::ZERO,
@@ -612,6 +613,9 @@ fn run_regular_recursive_union(
         F::ZERO,
         num_fresh,
         probe_log_m,
+        vec![F::ZERO; l_dummy],
+        vec![F::ZERO; l_dummy],
+        vec![vec![F::ZERO; probe_log_code]; l_dummy],
     );
     let mut sample_builder = CircuitBuilder::<F>::new();
     let mut sample_chal = CircuitChallenger::<F, 16, 8>::new(&mut sample_builder);
@@ -677,10 +681,19 @@ fn run_regular_recursive_union(
         for &val in &used_union_root { dry_chal.observe(val); }
         let prev_fold_omega: F = dry_chal.sample();
 
+        let l_bench = arity.next_power_of_two();
+        let ep_len = running_eval_point.len();
+        let mut all_ec = vec![F::ZERO; l_bench];
+        all_ec[0] = running_eval_claim;
+        let mut all_pt = vec![F::ZERO; l_bench];
+        all_pt[0] = running_pesat_target;
+        let mut all_ep = vec![vec![F::ZERO; ep_len]; l_bench];
+        all_ep[0] = running_eval_point.clone();
         let verifier_witness = WarpFoldVerifierWitness::from_fold_result_union(
             running_root, running_eval_claim, running_eval_point, running_pesat_target,
             used_union_root, &used_round_polys, prev_fold_omega,
             num_fresh, log_m,
+            all_ec, all_pt, all_ep,
         );
 
         // 4. Build arity-1 recursive circuits (each with Poseidon2 UNION verifier)

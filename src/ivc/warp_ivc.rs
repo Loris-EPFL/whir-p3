@@ -91,6 +91,11 @@ impl Default for WarpIVCConfig {
 }
 
 /// Initialize a zero WARP accumulator for the first IVC step.
+///
+/// NOTE: commitment_root is literal zeros, not the Merkle hash of a zero codeword.
+/// This is acceptable for the non-recursive IVC path where the init fold will
+/// re-commit anyway. For recursive IVC, use `warp_ivc_init_recursive_union` which
+/// computes the actual Merkle root.
 fn make_initial_accumulator<F: Field>(
     num_witness: usize,
     log_code: usize,
@@ -204,6 +209,7 @@ where
     for &val in &acc.instance.eval_point { fold_chal.observe(val); }
     fold_chal.observe(acc.instance.pesat_target);
     for &val in &fresh_root { fold_chal.observe(val); }
+    // Match derive_fold_challenges: fresh instances absorb zeros
     fold_chal.observe(F::ZERO); // fresh eval_claim
     for _ in 0..log_code { fold_chal.observe(F::ZERO); } // fresh eval_point
     fold_chal.observe(F::ZERO); // fresh pesat_target
@@ -417,25 +423,19 @@ where
         dry_chal.observe(prev_inst.eval_claim);
         for &val in &prev_inst.eval_point { dry_chal.observe(val); }
         dry_chal.observe(prev_inst.pesat_target);
-        // Observe the fresh instance data from the previous fold result
+        // Observe the fresh instance data from the previous fold result.
+        // Must match derive_fold_challenges exactly: fresh instances absorb
+        // root + ZERO (eval_claim) + ZERO×log_code (eval_point) + ZERO (pesat_target).
         if let Some(fr) = &prev_state.last_fold_result {
             if let Some(root) = fr.fresh_commitment_roots.first() {
                 for &val in root { dry_chal.observe(val); }
             } else {
                 for _ in 0..8 { dry_chal.observe(F::ZERO); }
             }
-            if let Some(&mu) = fr.fresh_eval_claims.first() {
-                dry_chal.observe(mu);
-            } else {
-                dry_chal.observe(F::ZERO);
-            }
+            dry_chal.observe(F::ZERO); // fresh eval_claim = 0 (matches derive_fold_challenges)
             let log_code = prev_inst.eval_point.len();
-            for _ in 0..log_code { dry_chal.observe(F::ZERO); }
-            if let Some(&eta) = fr.fresh_pesat_targets.first() {
-                dry_chal.observe(eta);
-            } else {
-                dry_chal.observe(F::ZERO);
-            }
+            for _ in 0..log_code { dry_chal.observe(F::ZERO); } // fresh eval_point = [0,...,0]
+            dry_chal.observe(F::ZERO); // fresh pesat_target = 0
         }
         let omega: F = dry_chal.sample();
         omega
@@ -448,36 +448,50 @@ where
         &prev_state.last_fold_result,
         &prev_state.prev_acc_instance,
     ) {
+        // FS-absorbed values: must match derive_fold_challenges which absorbs
+        // F::ZERO for fresh instances' eval_claim, eval_point, pesat_target.
         let commitment_roots = vec![
             prev_inst.commitment_root.to_vec(),
             fold_result.fresh_commitment_roots.first()
                 .map(|r| r.to_vec())
                 .unwrap_or_else(|| vec![F::ZERO; 8]),
         ];
-        let eval_claims = vec![
+        let log_n = prev_inst.eval_point.len();
+        let fs_eval_claims = vec![prev_inst.eval_claim, F::ZERO];
+        let fs_eval_points = vec![prev_inst.eval_point.clone(), vec![F::ZERO; log_n]];
+        let fs_pesat_targets = vec![prev_inst.pesat_target, F::ZERO];
+
+        // Actual values for sigma_0 computation (from the fold result).
+        // The fold's twin-constraint sumcheck uses the ACTUAL mu_i and eta_i.
+        let actual_eval_claims = vec![
             prev_inst.eval_claim,
             fold_result.fresh_eval_claims.first().copied().unwrap_or(F::ZERO),
         ];
-        let eval_points = vec![
-            prev_inst.eval_point.clone(),
-            vec![F::ZERO; prev_inst.eval_point.len()],
-        ];
-        let pesat_targets = vec![
+        let actual_pesat_targets = vec![
             prev_inst.pesat_target,
             fold_result.fresh_pesat_targets.first().copied().unwrap_or(F::ZERO),
         ];
+        let actual_eval_points = vec![
+            prev_inst.eval_point.clone(),
+            vec![F::ZERO; log_n],
+        ];
 
         let log_m = prev_state.shape.num_cons().next_power_of_two().trailing_zeros() as usize;
-        Some(WarpFoldVerifierWitness::from_fold_result(
+
+        let mut w = WarpFoldVerifierWitness::from_fold_result(
             commitment_roots,
-            eval_claims,
-            eval_points,
-            pesat_targets,
+            fs_eval_claims,
+            fs_eval_points,
+            fs_pesat_targets,
             &fold_result.sumcheck_round_polys,
             prev_fold_omega,
             1, // num_fresh: always 1 for l=2
             log_m,
-        ))
+        );
+        w.all_eval_claims = Some(actual_eval_claims);
+        w.all_pesat_targets = Some(actual_pesat_targets);
+        w.all_eval_points = Some(actual_eval_points);
+        Some(w)
     } else {
         None
     };
@@ -503,6 +517,13 @@ where
         "unified recursive IVC circuit is not satisfiable at step {}",
         prev_state.step,
     );
+
+    // M2 NOTE: The WARP fold evaluates PESAT using prev_state.shape. Ideally
+    // this matches unified_shape. This holds when init uses a dummy verifier
+    // (warp_ivc_init_recursive_union), but may not hold with warp_ivc_init.
+    // The mismatch is benign for the first step (zero acc has pesat_target=0).
+    // For production use, prefer warp_ivc_init_recursive_union which ensures
+    // shape consistency from the start.
 
     // ── Spartan prove the unified circuit ──
     let spartan_prover = R1CSProver::new();
@@ -540,9 +561,11 @@ where
     for &val in &prev_inst.eval_point { fold_chal.observe(val); }
     fold_chal.observe(prev_inst.pesat_target);
     for &val in &fresh_root { fold_chal.observe(val); }
-    fold_chal.observe(F::ZERO);
-    for _ in 0..log_code { fold_chal.observe(F::ZERO); }
-    fold_chal.observe(F::ZERO);
+    // Match derive_fold_challenges: fresh instances absorb zeros for eval_claim,
+    // eval_point, and pesat_target.
+    fold_chal.observe(F::ZERO); // fresh eval_claim
+    for _ in 0..log_code { fold_chal.observe(F::ZERO); } // fresh eval_point
+    fold_chal.observe(F::ZERO); // fresh pesat_target
 
     let omega: F = fold_chal.sample();
     let log_l = 1;
@@ -615,6 +638,9 @@ where
         num_fresh: 1,
         log_m,
         union_commitment_root: None,
+        all_eval_claims: None,
+        all_pesat_targets: None,
+        all_eval_points: None,
     };
 
     let mut builder = CircuitBuilder::<F>::new();
@@ -662,6 +688,7 @@ where
     let num_fresh = fold_arity - 1;
 
     // Union-mode dummy witness: only 1 accumulator (running) + union root
+    let l = fold_arity.next_power_of_two();
     let dummy_witness = WarpFoldVerifierWitness::from_fold_result_union(
         vec![F::ZERO; 8],
         F::ZERO,
@@ -672,6 +699,9 @@ where
         F::ZERO,
         num_fresh,
         log_m,
+        vec![F::ZERO; l],
+        vec![F::ZERO; l],
+        vec![vec![F::ZERO; num_eval_point_vars]; l],
     );
 
     let mut builder = CircuitBuilder::<F>::new();
@@ -900,6 +930,7 @@ where
         })
         .collect();
 
+    // PERF: union codeword is also built inside warp_fold_prove_rs_union; this build is for FS seeding only.
     // Build union codeword: [acc_codeword, fresh_0, ..., padding_to_power_of_2]
     let num_fresh = fresh_instances.len();
     let l = (1 + num_fresh).next_power_of_two();
@@ -1096,6 +1127,23 @@ where
     let verifier_witness = if has_union_fold {
         let fold_result = prev_state.last_fold_result.as_ref().unwrap();
         let prev_inst = prev_state.prev_acc_instance.as_ref().unwrap();
+        // Build all_eval_claims, all_pesat_targets, all_eval_points for the
+        // full l instances (acc + fresh + padding).
+        let l = (1 + num_fresh).next_power_of_two();
+        let log_n = prev_inst.eval_point.len();
+        let mut all_eval_claims = Vec::with_capacity(l);
+        all_eval_claims.push(prev_inst.eval_claim);
+        all_eval_claims.extend_from_slice(&fold_result.fresh_eval_claims);
+        all_eval_claims.resize(l, F::ZERO);
+        let mut all_pesat_targets = Vec::with_capacity(l);
+        all_pesat_targets.push(prev_inst.pesat_target);
+        all_pesat_targets.extend_from_slice(&fold_result.fresh_pesat_targets);
+        all_pesat_targets.resize(l, F::ZERO);
+        let mut all_eval_points = Vec::with_capacity(l);
+        all_eval_points.push(prev_inst.eval_point.clone());
+        for _ in 0..(l - 1) {
+            all_eval_points.push(vec![F::ZERO; log_n]);
+        }
         Some(WarpFoldVerifierWitness::from_fold_result_union(
             prev_inst.commitment_root.to_vec(),
             prev_inst.eval_claim,
@@ -1106,6 +1154,9 @@ where
             prev_fold_omega,
             num_fresh,
             log_m_for_circuit,
+            all_eval_claims,
+            all_pesat_targets,
+            all_eval_points,
         ))
     } else {
         None
@@ -1154,9 +1205,10 @@ where
             unified_shape_opt = Some(unified_shape);
         }
     }
-    // prev_state.shape is the init_shape (padded recursive circuit shape).
-    // unified_shape should match (same circuit structure).
-    let fold_shape = unified_shape_opt.as_ref().unwrap_or(shape);
+    // Use prev_state.shape consistently for the fold. The accumulator's pesat_tau
+    // dimension must match the fold shape's log_m. Using unified_shape would break
+    // this if the circuit has different constraint count due to C2 fixes.
+    let fold_shape = shape;
 
     // ── RS-encode all fresh witnesses ──
     let fresh_codewords: Vec<EvaluationsList<F>> = fresh_instances
@@ -1319,6 +1371,7 @@ where
     for _ in 0..8 { dummy_chal.observe(F::ZERO); }
     let dummy_omega: F = dummy_chal.sample();
 
+    let l_dummy = arity.next_power_of_two();
     let dummy_verifier = WarpFoldVerifierWitness::from_fold_result_union(
         vec![F::ZERO; 8],
         F::ZERO,
@@ -1329,6 +1382,9 @@ where
         dummy_omega,
         num_fresh,
         log_m,
+        vec![F::ZERO; l_dummy],
+        vec![F::ZERO; l_dummy],
+        vec![vec![F::ZERO; log_code_dummy]; l_dummy],
     );
 
     let mut builder = CircuitBuilder::<F>::new();
@@ -1392,26 +1448,40 @@ where
         },
     );
 
-    // Fold init instance with zero accumulator
+    // Fold init instance with zero accumulator using arity-sized fold.
+    //
+    // H3 FIX: Use arity-1 fresh instances (1 real + arity-2 zero-padded) so the
+    // fold produces log_l sumcheck rounds, matching what subsequent recursive union
+    // steps expect. This allows the first recursive step to verify the init fold
+    // in-circuit. Use derive_fold_challenges_union for FS (absorb acc + dummy
+    // union root) so the in-circuit verifier's union FS path matches.
     let fresh = FreshInstance {
         public_input: z[..num_inputs].to_vec(),
         witness: init_witness.clone(),
     };
+    let mut fresh_instances = vec![fresh];
+    for _ in 1..num_fresh {
+        fresh_instances.push(FreshInstance {
+            public_input: vec![F::ZERO; num_inputs],
+            witness: vec![F::ZERO; num_witness],
+        });
+    }
 
-    // RS-encode fresh witness to get its commitment root for FS
+    // RS-encode fresh witness for commit_fn (the fold will re-encode internally)
     let fresh_wp = EvaluationsList::new(init_witness);
-    let fresh_cw = rs_encode(&fresh_wp, rs_config.folding_factor, rs_config.log_inv_rate, dft);
-    let (fresh_root, _) = merkle_commit_codeword::<
-        F, F, <F as Field>::Packing, <F as Field>::Packing, H, C, 8,
-    >(&fresh_cw, rs_config.folding_factor, merkle_hash.clone(), merkle_compress.clone());
+    let _fresh_cw = rs_encode(&fresh_wp, rs_config.folding_factor, rs_config.log_inv_rate, dft);
+
+    // Use union FS path with a dummy union root (all zeros).
+    // At step 1, the dry run and in-circuit verifier will replay this same path.
+    let dummy_union_root = [F::ZERO; 8];
     let mut fold_chal = make_fold_challenger();
-    let (omega, tau, fresh_betas) = crate::accumulation::warp::fold::derive_fold_challenges(
+    let (omega, tau, fresh_betas) = crate::accumulation::warp::fold::derive_fold_challenges_union(
         &zero_acc.instance.commitment_root,
         zero_acc.instance.eval_claim,
         &zero_acc.instance.eval_point,
         zero_acc.instance.pesat_target,
-        &[fresh_root], // 1 fresh root for l=2 standard fold
-        log_code,
+        &dummy_union_root,
+        num_fresh,
         init_log_m,
         &mut fold_chal,
     );
@@ -1419,7 +1489,7 @@ where
     let mh = merkle_hash.clone();
     let mc = merkle_compress.clone();
     let result = warp_fold_prove_rs_committed(
-        &init_shape, &[fresh], &zero_acc, omega, &tau, &fresh_betas,
+        &init_shape, &fresh_instances, &zero_acc, omega, &tau, &fresh_betas,
         &rs_config, dft,
         |round_evals| {
             for &e in round_evals { fold_chal.observe(e); }
@@ -2599,7 +2669,7 @@ mod tests {
         assert_eq!(state.step, 4);
 
         // ══════════════════════════════════════════════════════════════
-        // Terminal: Full WARP decider + WHIR proof + root binding
+        // Terminal: Full WARP decider + WHIR proof
         // ══════════════════════════════════════════════════════════════
         //
         // Soundness argument:
@@ -2743,6 +2813,9 @@ mod tests {
             num_fresh: 1,
             log_m: 2,
             union_commitment_root: None,
+            all_eval_claims: None,
+            all_pesat_targets: None,
+            all_eval_points: None,
         };
         let mut verifier_only_builder = CircuitBuilder::<F>::new();
         let mut verifier_chal = CircuitChallenger::<F, 16, 8>::new(&mut verifier_only_builder);
@@ -2834,8 +2907,36 @@ mod tests {
                 &step, &[F::ZERO], &poseidon_config, &poseidon_perm, 3, 2,
             );
 
-        // Init: build unified circuit WITHOUT verifier but padded to target size.
-        // This ensures the accumulator shape matches all subsequent recursive steps.
+        // M2 FIX: Build init WITH a dummy verifier so init_shape matches the
+        // recursive step's unified_shape. This ensures the fold uses the correct
+        // constraint matrices for PESAT evaluation at every step.
+        let dummy_omega = {
+            let mut dc = make_recursive_fold_chal();
+            // Union-less: absorb 2 instances of zeros
+            for _ in 0..2 {
+                for _ in 0..8 { dc.observe(F::ZERO); } // root
+                dc.observe(F::ZERO); // eval_claim
+                for _ in 0..3 { dc.observe(F::ZERO); } // eval_point (3 vars)
+                dc.observe(F::ZERO); // pesat_target
+            }
+            let o: F = dc.sample();
+            o
+        };
+        let dummy_verifier = WarpFoldVerifierWitness {
+            input_commitment_roots: vec![vec![F::ZERO; 8]; 2],
+            input_eval_claims: vec![F::ZERO; 2],
+            input_eval_points: vec![vec![F::ZERO; 3]; 2],
+            input_pesat_targets: vec![F::ZERO; 2],
+            sumcheck_evals: vec![[F::ZERO; 3]], // 1 round for l=2
+            num_rounds: 1,
+            omega: dummy_omega,
+            num_fresh: 1,
+            log_m: 2,
+            union_commitment_root: None,
+            all_eval_claims: None,
+            all_pesat_targets: None,
+            all_eval_points: None,
+        };
         let mut init_builder = CircuitBuilder::<F>::new();
         let mut init_chal = CircuitChallenger::<F, 16, 8>::new(&mut init_builder);
         let _ = synthesize_warp_ivc_circuit::<
@@ -2844,7 +2945,7 @@ mod tests {
             &mut init_builder, &mut init_chal,
             &poseidon_config, &poseidon_perm,
             &step, &[F::from_u64(9)],
-            None, // No verifier at step 0
+            Some(&dummy_verifier),
             Some(target_witness),
         );
         let (init_shape, init_instance) = init_builder.build();
@@ -2889,6 +2990,7 @@ mod tests {
         for &val in &zero_acc.instance.eval_point { fold_chal0.observe(val); }
         fold_chal0.observe(zero_acc.instance.pesat_target);
         for &val in &fresh_root0 { fold_chal0.observe(val); }
+        // Match derive_fold_challenges: fresh instances absorb zeros
         fold_chal0.observe(F::ZERO); // fresh eval_claim
         for _ in 0..log_code { fold_chal0.observe(F::ZERO); } // fresh eval_point
         fold_chal0.observe(F::ZERO); // fresh pesat_target

@@ -1297,6 +1297,11 @@ where
         // Each shift query at position `pos` with row values `v` asserts:
         // f̃(binary(pos * width + j)) = v[j] for each column j.
         // For batching, we use a single point per query: the first column.
+        //
+        // NOTE: Shift query positions are included as boolean eval claims in the eval
+        // batching sumcheck. Per the WARP paper, shift queries could be verified solely
+        // via Merkle authentication paths. Including them here is redundant but harmless
+        // (adds O(t * log_n) to the eval batching, which is small compared to the fold).
         let width = 1usize << rs_config.folding_factor;
         for sq in &shift_queries {
             // Convert row position to a multilinear point for the first column element
@@ -1550,11 +1555,41 @@ pub fn warp_fold_verify<F: Field>(
     // ========================================
     // 3. Verify the twin-constraint sumcheck
     // ========================================
-    let _final_eval = warp_fold_verify_sumcheck(
+    let final_eval = warp_fold_verify_sumcheck(
         initial_target,
         sumcheck_round_polys,
         sumcheck_challenges,
     )?;
+
+    // ========================================
+    // 3b. Check final evaluation against expected folded target
+    // ========================================
+    // After the sumcheck with challenges γ, the final evaluation must equal:
+    //   eq(τ, γ) · (μ_folded + ω · η_folded)
+    // where μ_folded = Σ_i eq(γ, i) · eval_claims[i]
+    //   and η_folded = Σ_i eq(γ, i) · pesat_targets[i]
+
+    // Compute eq(τ, γ) = Π_j (τ_j · γ_j + (1 - τ_j) · (1 - γ_j))
+    let mut eq_tau_gamma = F::ONE;
+    for j in 0..log_l {
+        eq_tau_gamma *=
+            tau_challenges[j] * sumcheck_challenges[j]
+            + (F::ONE - tau_challenges[j]) * (F::ONE - sumcheck_challenges[j]);
+    }
+
+    // Compute μ_folded and η_folded using eq-weights from sumcheck challenges
+    let mut mu_folded = F::ZERO;
+    let mut eta_folded = F::ZERO;
+    for i in 0..l {
+        let eq_gamma_i = eq_poly_at_index::<F, F>(i, sumcheck_challenges);
+        mu_folded += eq_gamma_i * eval_claims[i];
+        eta_folded += eq_gamma_i * pesat_targets[i];
+    }
+
+    let expected_final = eq_tau_gamma * (mu_folded + omega * eta_folded);
+    if final_eval != expected_final {
+        return Err("sumcheck final evaluation mismatch");
+    }
 
     // ========================================
     // 4. Recompute folded α and β from sumcheck challenges

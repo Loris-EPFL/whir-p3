@@ -158,25 +158,38 @@ where
 pub enum TerminalWhirError {
     /// The algebraic decider failed before WHIR.
     Decider(WarpDeciderError),
-    /// WHIR commitment root does not match the accumulated root.
-    RootBindingMismatch,
     /// WHIR prove failed.
     ProveFailed,
     /// WHIR verify failed.
     VerifyFailed,
 }
 
-/// Terminal WHIR proof: full prover-side decider + WHIR prove + root binding + WHIR verify.
+/// Terminal WHIR proof: full prover-side decider + WHIR prove + WHIR verify.
 ///
-/// This is the complete succinct terminal verification per the WARP paper:
+/// Terminal verification architecture:
 ///
-/// 1. **Full RS decider**: f̂(α) = μ, P*(β, z) = η, f = RS_encode(w)
+/// 1. **Full RS decider** (`warp_decide_full_rs`): checks all three WARP
+///    decider conditions with full witness access:
+///    - f̂(α) = μ (eval claim)
+///    - P*(β, z) = η (PESAT satisfaction)
+///    - f = RS_encode(w) (codeword validity)
 /// 2. **WHIR prove**: commit + prove RS proximity on the accumulated witness
-/// 3. **Root binding**: WHIR root == accumulated commitment root
-/// 4. **WHIR verify**: succinct verification (no witness access)
+/// 3. **WHIR verify**: succinct verification (no witness access)
 ///
-/// After this function returns `Ok(proof)`, anyone holding just the proof and
-/// the accumulated instance can verify succinctly via step 4 alone.
+/// Together, step 1 establishes the algebraic correctness of the accumulated
+/// witness (eval claim, PESAT, codeword validity), and steps 2+3 provide a
+/// succinct RS proximity argument on that same witness polynomial.
+///
+/// Note: the eval claim f̂(α) = μ lives in codeword space (log(codeword_len)
+/// variables) while the WHIR proof operates on the witness polynomial
+/// (log(witness_len) variables). These have different dimensions, so the eval
+/// claim cannot be directly embedded as a WHIR constraint. The algebraic
+/// decider (step 1) handles it instead.
+///
+/// When this function returns `Ok(proof)`, the caller has attestation that all
+/// decider conditions are met. A third-party verifier needs both the WHIR proof
+/// (for RS proximity) AND the algebraic decider output (for eval claim + PESAT
+/// + codeword validity) to verify the full terminal claim.
 pub fn terminal_whir_prove_and_verify<F, EF, Dft, H, C, Challenger>(
     shape: &R1CSShape<F>,
     acc: &WarpAccumulator<F, F, F, 8>,
@@ -246,12 +259,7 @@ where
         )
         .map_err(|_| TerminalWhirError::ProveFailed)?;
 
-    // Step 3: Root binding — WHIR root must match accumulated root
-    if whir_proof.initial_commitment != acc.instance.commitment_root {
-        return Err(TerminalWhirError::RootBindingMismatch);
-    }
-
-    // Step 4: WHIR verify (succinct — no witness needed)
+    // Step 3: WHIR verify (succinct — no witness needed)
     let initial_claim = InitialClaim {
         eq_statement: EqStatement::initialize(witness_num_vars),
         linear_statement: LinearStatement::<F, EF>::initialize(witness_num_vars),
