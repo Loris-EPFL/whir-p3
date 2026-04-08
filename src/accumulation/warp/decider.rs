@@ -488,6 +488,46 @@ mod tests {
     }
 
     #[test]
+    fn warp_decide_rejects_tampered_eval_claim() {
+        let shape = make_square_shape();
+        let num_vars_y = 1 << shape.num_poly_vars_y();
+        let acc = make_initial_accumulator(num_vars_y, 2);
+        let fresh = make_square_witness(3);
+
+        let mut folded = run_fold_and_build_acc(&shape, &acc, &fresh, 0);
+
+        // Tamper with the evaluation claim
+        folded.instance.eval_claim += F::ONE;
+
+        let result = warp_decide_algebraic_rs(&shape, &folded);
+        assert_eq!(
+            result,
+            Err(WarpDeciderError::EvaluationClaimFailed),
+            "RS decider should reject tampered eval_claim"
+        );
+    }
+
+    #[test]
+    fn warp_decide_rejects_tampered_pesat_target() {
+        let shape = make_square_shape();
+        let num_vars_y = 1 << shape.num_poly_vars_y();
+        let acc = make_initial_accumulator(num_vars_y, 2);
+        let fresh = make_square_witness(3);
+
+        let mut folded = run_fold_and_build_acc(&shape, &acc, &fresh, 0);
+
+        // Tamper with the PESAT target
+        folded.instance.pesat_target += F::ONE;
+
+        let result = warp_decide_algebraic_rs(&shape, &folded);
+        assert_eq!(
+            result,
+            Err(WarpDeciderError::PesatSatisfactionFailed),
+            "RS decider should reject tampered pesat_target"
+        );
+    }
+
+    #[test]
     fn decider_fixed_size_across_ivc_steps() {
         // The most important property: the decider works on fixed-size
         // accumulators regardless of how many IVC steps preceded it.

@@ -2556,4 +2556,187 @@ mod tests {
         assert!(result_union.fresh_commitment_roots.is_empty());
         assert!(result_union.union_commitment_root.is_some());
     }
+
+    #[test]
+    fn warp_fold_verifier_rejects_tampered_omega() {
+        // To make omega meaningful, we need non-zero PESAT targets.
+        // We first fold to produce a non-zero pesat_target in the accumulator,
+        // then fold again and tamper with omega on verification.
+        let shape = make_square_shape();
+        let num_vars_y = 1 << shape.num_poly_vars_y();
+        let initial_acc = make_initial_accumulator(num_vars_y, 2);
+
+        // First fold: produces a real accumulator with (potentially zero) pesat_target
+        let fresh0 = make_square_witness(3);
+        let tau0 = vec![F::from_u64(42)];
+        let omega0 = F::from_u64(7);
+        let mut rc0 = 0u64;
+        let result0 = warp_fold_prove(
+            &shape,
+            &[fresh0],
+            &initial_acc,
+            omega0,
+            &tau0,
+            &[],
+            |_| { rc0 += 1; F::from_u64(rc0 + 200) },
+        );
+
+        // Build accumulator from first fold, deliberately set a non-zero pesat_target
+        // so that omega is meaningful in the target formula.
+        let eval_claim = evaluate_mle_lsb(
+            &result0.witness.codeword,
+            &result0.instance.eval_point,
+        );
+        let acc = WarpAccumulator::new(
+            WarpAccumulatorInstance {
+                commitment_root: [F::ZERO; 8],
+                eval_point: result0.instance.eval_point,
+                eval_claim,
+                pesat_tau: result0.instance.pesat_tau,
+                pesat_x: result0.instance.pesat_x,
+                pesat_target: F::from_u64(999), // non-zero so omega matters
+            },
+            result0.witness,
+        );
+
+        // Second fold on this accumulator with non-zero pesat_target
+        let fresh = make_square_witness(5);
+        let tau_challenges = vec![F::from_u64(55)];
+        let omega = F::from_u64(13);
+
+        let mut round_counter = 100u64;
+        let result = warp_fold_prove(
+            &shape,
+            &[fresh.clone()],
+            &acc,
+            omega,
+            &tau_challenges,
+            &[],
+            |_coeffs| {
+                round_counter += 1;
+                F::from_u64(round_counter + 500)
+            },
+        );
+
+        let fresh_public = vec![FreshInstancePublic {
+            public_input: fresh.public_input.clone(),
+        }];
+
+        // Use a WRONG omega (omega + 1)
+        let wrong_omega = omega + F::ONE;
+
+        let verified = warp_fold_verify(
+            &shape,
+            &fresh_public,
+            &acc.instance,
+            wrong_omega,
+            &tau_challenges,
+            &[],
+            &result.sumcheck_round_polys,
+            &result.sumcheck_challenges,
+            &result.instance,
+            &result.fresh_eval_claims,
+            &result.fresh_pesat_targets,
+        );
+
+        assert!(verified.is_err(), "verifier should reject tampered omega");
+    }
+
+    #[test]
+    fn warp_fold_verifier_rejects_tampered_fresh_eval_claim() {
+        let shape = make_square_shape();
+        let num_vars_y = 1 << shape.num_poly_vars_y();
+        let acc = make_initial_accumulator(num_vars_y, 2);
+
+        let fresh = make_square_witness(3);
+        let tau_challenges = vec![F::from_u64(42)];
+        let omega = F::from_u64(7);
+
+        let mut round_counter = 0u64;
+        let result = warp_fold_prove(
+            &shape,
+            &[fresh.clone()],
+            &acc,
+            omega,
+            &tau_challenges,
+            &[],
+            |_coeffs| {
+                round_counter += 1;
+                F::from_u64(round_counter + 200)
+            },
+        );
+
+        let fresh_public = vec![FreshInstancePublic {
+            public_input: fresh.public_input.clone(),
+        }];
+
+        // Tamper with fresh_eval_claims[0]
+        let mut tampered_eval_claims = result.fresh_eval_claims.clone();
+        tampered_eval_claims[0] += F::ONE;
+
+        let verified = warp_fold_verify(
+            &shape,
+            &fresh_public,
+            &acc.instance,
+            omega,
+            &tau_challenges,
+            &[],
+            &result.sumcheck_round_polys,
+            &result.sumcheck_challenges,
+            &result.instance,
+            &tampered_eval_claims,
+            &result.fresh_pesat_targets,
+        );
+
+        assert!(verified.is_err(), "verifier should reject tampered fresh_eval_claim");
+    }
+
+    #[test]
+    fn warp_fold_verifier_rejects_tampered_fresh_pesat_target() {
+        let shape = make_square_shape();
+        let num_vars_y = 1 << shape.num_poly_vars_y();
+        let acc = make_initial_accumulator(num_vars_y, 2);
+
+        let fresh = make_square_witness(3);
+        let tau_challenges = vec![F::from_u64(42)];
+        let omega = F::from_u64(7);
+
+        let mut round_counter = 0u64;
+        let result = warp_fold_prove(
+            &shape,
+            &[fresh.clone()],
+            &acc,
+            omega,
+            &tau_challenges,
+            &[],
+            |_coeffs| {
+                round_counter += 1;
+                F::from_u64(round_counter + 200)
+            },
+        );
+
+        let fresh_public = vec![FreshInstancePublic {
+            public_input: fresh.public_input.clone(),
+        }];
+
+        // Tamper with fresh_pesat_targets[0]
+        let mut tampered_pesat_targets = result.fresh_pesat_targets.clone();
+        tampered_pesat_targets[0] += F::ONE;
+
+        let verified = warp_fold_verify(
+            &shape,
+            &fresh_public,
+            &acc.instance,
+            omega,
+            &tau_challenges,
+            &[],
+            &result.sumcheck_round_polys,
+            &result.sumcheck_challenges,
+            &result.instance,
+            &result.fresh_eval_claims,
+            &tampered_pesat_targets,
+        );
+
+        assert!(verified.is_err(), "verifier should reject tampered fresh_pesat_target");
+    }
 }

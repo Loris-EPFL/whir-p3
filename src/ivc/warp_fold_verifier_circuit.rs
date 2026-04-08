@@ -1287,4 +1287,167 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn warp_fold_verifier_circuit_rejects_wrong_sigma0() {
+        use p3_challenger::{CanObserve, CanSample};
+
+        let poseidon_perm = Perm::new_from_rng_128(&mut SmallRng::seed_from_u64(99));
+        let poseidon_config =
+            Poseidon2CircuitConfig::<F, 16>::from_rng(8, 13, 7, &mut SmallRng::seed_from_u64(99));
+
+        // Derive omega natively from the same Poseidon2 that the circuit will use
+        let roots = vec![vec![F::ZERO; 8]; 2];
+        let eval_claims = vec![F::from_u64(10), F::from_u64(20)];
+        let eval_points = vec![vec![F::ZERO; 3]; 2];
+        let pesat_targets = vec![F::ZERO; 2];
+
+        let mut native_chal = MyChal::new(poseidon_perm.clone());
+        for i in 0..2 {
+            for &val in &roots[i] {
+                native_chal.observe(val);
+            }
+            native_chal.observe(eval_claims[i]);
+            for &val in &eval_points[i] {
+                native_chal.observe(val);
+            }
+            native_chal.observe(pesat_targets[i]);
+        }
+        let omega: F = native_chal.sample();
+
+        // l=2: 1 round of sumcheck, 1 fresh instance, log_m=2
+        let num_fresh = 1;
+        let log_m = 2;
+
+        // Sample tau from native challenger
+        let _tau_0: F = native_chal.sample();
+
+        // Sample fresh_betas
+        for _ in 0..num_fresh * log_m {
+            let _: F = native_chal.sample();
+        }
+
+        // Use WRONG round polys that do NOT satisfy h(0)+h(1) == sigma_0.
+        // This means the C2 constraint (e0 + e1 = claimed) will fail.
+        let bad_round_polys = vec![[F::from_u64(99), F::from_u64(99), F::from_u64(99)]];
+
+        let witness = WarpFoldVerifierWitness {
+            input_commitment_roots: roots,
+            input_eval_claims: eval_claims.clone(),
+            input_eval_points: eval_points.clone(),
+            input_pesat_targets: pesat_targets.clone(),
+            sumcheck_evals: bad_round_polys,
+            num_rounds: 1,
+            omega,
+            num_fresh,
+            log_m,
+            union_commitment_root: None,
+            all_eval_claims: Some(eval_claims),
+            all_pesat_targets: Some(pesat_targets),
+            all_eval_points: Some(eval_points),
+        };
+
+        let mut builder = CircuitBuilder::<F>::new();
+        let mut challenger = CircuitChallenger::<F, 16, 8>::new(&mut builder);
+
+        let _output = synthesize_warp_fold_verifier::<
+            F,
+            GenericPoseidon2LinearLayersBabyBear,
+            _,
+            16,
+            8,
+        >(&mut builder, &mut challenger, &poseidon_config, &poseidon_perm, &witness);
+
+        let (shape, instance) = builder.build();
+        assert!(
+            !shape.is_sat(instance.witness(), instance.input()),
+            "circuit should be unsatisfiable with wrong sigma_0 (h(0)+h(1) != sigma_0)"
+        );
+    }
+
+    #[test]
+    fn warp_fold_verifier_circuit_rejects_wrong_omega() {
+        use p3_challenger::{CanObserve, CanSample};
+
+        let poseidon_perm = Perm::new_from_rng_128(&mut SmallRng::seed_from_u64(99));
+        let poseidon_config =
+            Poseidon2CircuitConfig::<F, 16>::from_rng(8, 13, 7, &mut SmallRng::seed_from_u64(99));
+
+        // Derive omega natively from the same Poseidon2 that the circuit will use
+        let roots = vec![vec![F::ZERO; 8]; 2];
+        let eval_claims = vec![F::from_u64(10), F::from_u64(20)];
+        let eval_points = vec![vec![F::ZERO; 3]; 2];
+        let pesat_targets = vec![F::ZERO; 2];
+
+        let mut native_chal = MyChal::new(poseidon_perm.clone());
+        for i in 0..2 {
+            for &val in &roots[i] {
+                native_chal.observe(val);
+            }
+            native_chal.observe(eval_claims[i]);
+            for &val in &eval_points[i] {
+                native_chal.observe(val);
+            }
+            native_chal.observe(pesat_targets[i]);
+        }
+        let correct_omega: F = native_chal.sample();
+
+        // Use a WRONG omega that does not match Poseidon2 derivation
+        let wrong_omega = F::from_u64(12345);
+        assert_ne!(correct_omega, wrong_omega, "test sanity: omegas should differ");
+
+        // l=2: 1 round of sumcheck, 1 fresh instance, log_m=2
+        let num_fresh = 1;
+        let log_m = 2;
+
+        // Sample tau from native challenger (to keep state, but we'll use wrong omega)
+        let tau_0: F = native_chal.sample();
+
+        // Sample fresh_betas
+        for _ in 0..num_fresh * log_m {
+            let _: F = native_chal.sample();
+        }
+
+        // Compute sigma_0 using the WRONG omega (so it would be internally consistent
+        // with the witness.omega, but the circuit will derive the correct omega and
+        // the constraint derived_omega == witness.omega will fail).
+        let sigma0 = compute_sigma0_native(&eval_claims, &pesat_targets, wrong_omega, &[tau_0]);
+
+        // Use consistent round polys for wrong sigma (so only the omega constraint fails)
+        let round_polys =
+            construct_consistent_round_polys(sigma0, 1, &mut native_chal);
+
+        let witness = WarpFoldVerifierWitness {
+            input_commitment_roots: roots,
+            input_eval_claims: eval_claims.clone(),
+            input_eval_points: eval_points.clone(),
+            input_pesat_targets: pesat_targets.clone(),
+            sumcheck_evals: round_polys,
+            num_rounds: 1,
+            omega: wrong_omega, // WRONG omega
+            num_fresh,
+            log_m,
+            union_commitment_root: None,
+            all_eval_claims: Some(eval_claims),
+            all_pesat_targets: Some(pesat_targets),
+            all_eval_points: Some(eval_points),
+        };
+
+        let mut builder = CircuitBuilder::<F>::new();
+        let mut challenger = CircuitChallenger::<F, 16, 8>::new(&mut builder);
+
+        let _output = synthesize_warp_fold_verifier::<
+            F,
+            GenericPoseidon2LinearLayersBabyBear,
+            _,
+            16,
+            8,
+        >(&mut builder, &mut challenger, &poseidon_config, &poseidon_perm, &witness);
+
+        let (shape, instance) = builder.build();
+        assert!(
+            !shape.is_sat(instance.witness(), instance.input()),
+            "circuit should be unsatisfiable with wrong omega (Fiat-Shamir binding violated)"
+        );
+    }
 }
