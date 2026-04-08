@@ -579,7 +579,7 @@ where
     // Compute folded values: sum_i eq(gamma, i) * value_i
 
     // Folded mu: mu' = sum_i eq(gamma, i) * mu_i
-    let (folded_mu_var, _folded_mu_val) = binary_tree_fold(
+    let (folded_mu_var, folded_mu_val) = binary_tree_fold(
         builder,
         &all_mu_vars,
         &all_mu,
@@ -588,7 +588,7 @@ where
     );
 
     // Folded eta: eta' = sum_i eq(gamma, i) * eta_i
-    let (folded_eta_var, _folded_eta_val) = binary_tree_fold(
+    let (folded_eta_var, folded_eta_val) = binary_tree_fold(
         builder,
         &all_eta_vars,
         &all_eta,
@@ -610,6 +610,62 @@ where
         );
         folded_alpha_vars.push(folded_j_var);
     }
+
+    // =============================================
+    // Phase 4: Final evaluation check (H1 fix)
+    // =============================================
+    // Constrain: final_claimed == eq(τ, γ) · (folded_mu + ω · folded_eta)
+    //
+    // This is the sumcheck "final evaluation check" per WARP Construction 6.3:
+    // after the sumcheck reduces P(b) = eq(τ,b)·(μ̃(b) + ω·η̃(b)) over {0,1}^{log l},
+    // the final claimed value must equal the polynomial evaluated at the challenge point γ.
+
+    // Step 1: Compute eq(τ, γ) = Π_j (τ_j · γ_j + (1 - τ_j) · (1 - γ_j))
+    //        = Π_j (2·τ_j·γ_j - τ_j - γ_j + 1)
+    // Cost: log_l multiplications (one τ·γ product + one running product per round)
+    let mut eq_tau_gamma_var = builder.alloc_witness(F::ONE);
+    builder.enforce_constant(eq_tau_gamma_var, F::ONE);
+    let mut eq_tau_gamma_val = F::ONE;
+
+    for j in 0..witness.num_rounds {
+        // term_j = 2·τ_j·γ_j - τ_j - γ_j + 1
+        let tau_gamma_val = tau_vals[j] * sumcheck_challenge_vals[j];
+        let tau_gamma_var = builder.mul(tau_vars[j], sumcheck_challenge_vars[j], tau_gamma_val);
+
+        let term_val = tau_gamma_val.double() - tau_vals[j] - sumcheck_challenge_vals[j] + F::ONE;
+        let term_var = builder.alloc_witness(term_val);
+        builder.enforce(
+            LinearCombination::from_scaled(tau_gamma_var, F::TWO)
+                - LinearCombination::from_var(tau_vars[j])
+                - LinearCombination::from_var(sumcheck_challenge_vars[j])
+                + LinearCombination::from_constant(F::ONE),
+            LinearCombination::from_constant(F::ONE),
+            LinearCombination::from_var(term_var),
+        );
+
+        // Running product: eq_tau_gamma *= term_j
+        eq_tau_gamma_val *= term_val;
+        let new_eq_var = builder.mul(eq_tau_gamma_var, term_var, eq_tau_gamma_val);
+        eq_tau_gamma_var = new_eq_var;
+    }
+
+    // Step 2: Compute folded_mu + ω · folded_eta
+    let omega_eta_folded_val = witness.omega * folded_eta_val;
+    let omega_eta_folded_var = builder.mul(witness_omega_var, folded_eta_var, omega_eta_folded_val);
+    let mu_plus_omega_eta_val = folded_mu_val + omega_eta_folded_val;
+    let mu_plus_omega_eta_var = builder.alloc_witness(mu_plus_omega_eta_val);
+    builder.enforce(
+        LinearCombination::from_var(folded_mu_var) + LinearCombination::from_var(omega_eta_folded_var),
+        LinearCombination::from_constant(F::ONE),
+        LinearCombination::from_var(mu_plus_omega_eta_var),
+    );
+
+    // Step 3: expected = eq(τ, γ) · (folded_mu + ω · folded_eta)
+    let expected_final_val = eq_tau_gamma_val * mu_plus_omega_eta_val;
+    let expected_final_var = builder.mul(eq_tau_gamma_var, mu_plus_omega_eta_var, expected_final_val);
+
+    // Step 4: Constrain final_claimed == expected_final
+    builder.enforce_equal(claimed_var, expected_final_var);
 
     WarpFoldVerifierOutput {
         challenge_vars: sumcheck_challenge_vars,
@@ -691,64 +747,69 @@ mod tests {
     type Perm = Poseidon2BabyBear<16>;
     type MyChal = DuplexChallenger<F, Perm, 16, 8>;
 
-    /// Compute sigma_0 natively: sum_i eq(tau, i) * (mu_i + omega * eta_i).
-    fn compute_sigma0_native(
+    /// Construct CORRECT sumcheck round polynomials from the actual twin-constraint
+    /// polynomial P(b) = eq(τ,b) · target(b), and advance the FS challenger.
+    ///
+    /// This mirrors what `twin_constraint_sumcheck` does: at each round, evaluate the
+    /// degree-2 univariate at points 0, 1, 2 from the tau and target tables, then fold.
+    fn construct_correct_round_polys(
         mu: &[F],
         eta: &[F],
         omega: F,
-        tau: &[F],
-    ) -> F {
-        let l = mu.len();
-        assert_eq!(eta.len(), l);
-        assert_eq!(1 << tau.len(), l);
-
-        // Build target table
-        let mut table: Vec<F> = (0..l).map(|i| mu[i] + omega * eta[i]).collect();
-
-        // Binary tree fold
-        for round in 0..tau.len() {
-            let half = table.len() / 2;
-            let mut new_table = Vec::with_capacity(half);
-            for k in 0..half {
-                new_table.push(table[2 * k] + tau[round] * (table[2 * k + 1] - table[2 * k]));
-            }
-            table = new_table;
-        }
-        table[0]
-    }
-
-    /// Construct sumcheck round polynomials consistent with sigma_0 and the FS transcript.
-    /// Returns (round_polys, native_challenger_after_sumcheck).
-    fn construct_consistent_round_polys(
-        sigma0: F,
-        num_rounds: usize,
+        tau_challenges: &[F],
         native_chal: &mut MyChal,
     ) -> Vec<[F; 3]> {
         use p3_challenger::{CanObserve, CanSample};
+        use crate::spartan::encoding::eq_poly_at_index;
 
-        let mut round_polys = Vec::with_capacity(num_rounds);
-        let mut claimed = sigma0;
+        let l = mu.len();
+        let log_l = tau_challenges.len();
+        assert_eq!(l, 1 << log_l);
 
-        for _ in 0..num_rounds {
-            // Split the claim: e0 + e1 = claimed
-            // Use e0 = claimed, e1 = 0 for simplicity
-            let e0 = claimed;
-            let e1 = F::ZERO;
-            // e2 can be anything -- use e0 so c2 = 0 (simplifies computation)
-            let e2 = e0;
+        // Build tau eq-evals and target table (same as twin_constraint_sumcheck)
+        let mut tau_evals: Vec<F> = (0..l)
+            .map(|idx| eq_poly_at_index::<F, F>(idx, tau_challenges))
+            .collect();
+        let mut target_table: Vec<F> = (0..l)
+            .map(|i| mu[i] + omega * eta[i])
+            .collect();
 
-            round_polys.push([e0, e1, e2]);
+        let mut round_polys = Vec::with_capacity(log_l);
 
-            // Observe into native challenger
-            native_chal.observe(e0);
-            native_chal.observe(e1);
-            native_chal.observe(e2);
+        for _ in 0..log_l {
+            let half = tau_evals.len() / 2;
+
+            // Evaluate degree-2 univariate at 0, 1, 2
+            let mut evals = [F::ZERO; 3];
+            for i in 0..half {
+                let t_lo = tau_evals[2 * i];
+                let t_hi = tau_evals[2 * i + 1];
+                let v_lo = target_table[2 * i];
+                let v_hi = target_table[2 * i + 1];
+                let t_d = t_hi - t_lo;
+                let v_d = v_hi - v_lo;
+                evals[0] += t_lo * v_lo;
+                evals[1] += t_hi * v_hi;
+                evals[2] += (t_lo + t_d.double()) * (v_lo + v_d.double());
+            }
+
+            round_polys.push([evals[0], evals[1], evals[2]]);
+
+            // Observe into native challenger and sample challenge
+            native_chal.observe(evals[0]);
+            native_chal.observe(evals[1]);
+            native_chal.observe(evals[2]);
             let r: F = native_chal.sample();
 
-            // Compute h(r) = e0 + d*r + c2*r*(r-1)
-            let d = e1 - e0;
-            let c2 = (e2 - e1.double() + e0) * F::TWO.inverse();
-            claimed = e0 + d * r + c2 * r * (r - F::ONE);
+            // Fold tables
+            for i in 0..half {
+                tau_evals[i] =
+                    tau_evals[2 * i] + r * (tau_evals[2 * i + 1] - tau_evals[2 * i]);
+                target_table[i] =
+                    target_table[2 * i] + r * (target_table[2 * i + 1] - target_table[2 * i]);
+            }
+            tau_evals.truncate(half);
+            target_table.truncate(half);
         }
 
         round_polys
@@ -793,12 +854,9 @@ mod tests {
             let _: F = native_chal.sample();
         }
 
-        // Compute sigma_0 from input data
-        let sigma0 = compute_sigma0_native(&eval_claims, &pesat_targets, omega, &[tau_0]);
-
-        // Construct consistent round polys
+        // Construct correct round polys from the actual twin-constraint polynomial
         let round_polys =
-            construct_consistent_round_polys(sigma0, 1, &mut native_chal);
+            construct_correct_round_polys(&eval_claims, &pesat_targets, omega, &[tau_0], &mut native_chal);
 
         let witness = WarpFoldVerifierWitness {
             input_commitment_roots: roots,
@@ -1071,13 +1129,9 @@ mod tests {
             let _: F = native_chal.sample();
         }
 
-        // Compute sigma_0 from input data
-        let sigma0 =
-            compute_sigma0_native(&all_eval_claims, &all_pesat_targets, omega, &[tau_0, tau_1]);
-
-        // l=4 -> log_l=2 -> 2 sumcheck rounds
+        // l=4 -> log_l=2 -> 2 sumcheck rounds from actual polynomial
         let round_polys =
-            construct_consistent_round_polys(sigma0, 2, &mut native_chal);
+            construct_correct_round_polys(&all_eval_claims, &all_pesat_targets, omega, &[tau_0, tau_1], &mut native_chal);
 
         let witness = WarpFoldVerifierWitness::from_fold_result_union(
             running_root,
@@ -1408,14 +1462,10 @@ mod tests {
             let _: F = native_chal.sample();
         }
 
-        // Compute sigma_0 using the WRONG omega (so it would be internally consistent
-        // with the witness.omega, but the circuit will derive the correct omega and
-        // the constraint derived_omega == witness.omega will fail).
-        let sigma0 = compute_sigma0_native(&eval_claims, &pesat_targets, wrong_omega, &[tau_0]);
-
-        // Use consistent round polys for wrong sigma (so only the omega constraint fails)
+        // Construct round polys using the WRONG omega. The circuit will derive the correct
+        // omega and the constraint derived_omega == witness.omega will fail.
         let round_polys =
-            construct_consistent_round_polys(sigma0, 1, &mut native_chal);
+            construct_correct_round_polys(&eval_claims, &pesat_targets, wrong_omega, &[tau_0], &mut native_chal);
 
         let witness = WarpFoldVerifierWitness {
             input_commitment_roots: roots,
