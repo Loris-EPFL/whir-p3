@@ -8,6 +8,8 @@ extern crate std;
 extern crate std;
 
 pub mod accumulation;
+#[cfg(feature = "veil")]
+pub mod veil;
 pub mod circuit;
 pub mod constant;
 #[cfg(feature = "symphony")]

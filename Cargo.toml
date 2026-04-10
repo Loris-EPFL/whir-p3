@@ -97,6 +97,10 @@ rayon = ["dep:rayon"]
 cli = ["dep:clap", "dep:tracing-subscriber", "dep:tracing-forest", "dep:bincode", "rand/default"]
 bench-timing = []
 symphony = ["dep:symphony", "dep:sha2"]
+# Partial VEIL: query/proximity shielding for the terminal WHIR decider.
+# Phase 1 only (no transcript masking). Does NOT claim full ZK.
+# The legacy AccumulationDecider path is completely unaffected.
+veil = []
 
 [[bin]]
 name = "main"
