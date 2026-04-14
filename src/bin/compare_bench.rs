@@ -207,6 +207,55 @@ fn measure_fold_verifier_fs(log_m: usize, log_n: usize, l: usize) -> (f64, f64) 
     (std_us, union_us)
 }
 
+/// Estimate WHIR proof size in field elements (approximate).
+fn whir_proof_field_elements(proof: &WhirProof<F, EF, F, DIGEST>) -> usize {
+    let mut count = 0usize;
+    count += DIGEST; // initial commitment
+    count += proof.initial_ood_answers.len() * 4; // EF = 4 base elements
+    count += proof.initial_sumcheck.polynomial_evaluations.len() * 2 * 4; // [EF;2] per round
+    count += proof.initial_sumcheck.pow_witnesses.len();
+    for round in &proof.rounds {
+        count += DIGEST; // commitment
+        count += round.ood_answers.len() * 4;
+        count += 1; // pow_witness
+        for q in &round.queries {
+            match q {
+                whir_p3::whir::proof::QueryOpening::Base { values, proof: p } => {
+                    count += values.len();
+                    count += p.len() * DIGEST;
+                }
+                whir_p3::whir::proof::QueryOpening::Extension { values, proof: p } => {
+                    count += values.len() * 4;
+                    count += p.len() * DIGEST;
+                }
+            }
+        }
+        count += round.sumcheck.polynomial_evaluations.len() * 2 * 4;
+        count += round.sumcheck.pow_witnesses.len();
+    }
+    if let Some(ref fp) = proof.final_poly {
+        count += fp.num_evals() * 4; // EF evals
+    }
+    count += 1; // final_pow_witness
+    for q in &proof.final_queries {
+        match q {
+            whir_p3::whir::proof::QueryOpening::Base { values, proof: p } => {
+                count += values.len();
+                count += p.len() * DIGEST;
+            }
+            whir_p3::whir::proof::QueryOpening::Extension { values, proof: p } => {
+                count += values.len() * 4;
+                count += p.len() * DIGEST;
+            }
+        }
+    }
+    if let Some(ref fs) = proof.final_sumcheck {
+        count += fs.polynomial_evaluations.len() * 2 * 4;
+        count += fs.pow_witnesses.len();
+    }
+    count
+}
+
 fn main() {
     let args: Vec<String> = env::args().collect();
     let sizes_str = args.get(1).map(|s| s.as_str()).unwrap_or("10,12");
@@ -295,7 +344,7 @@ fn main() {
                 }
                 indep_times.push(start1.elapsed().as_micros() as f64);
 
-                // ═══ Path 2: Direct fold (batch-arity per step) + 1 WHIR ═══
+                // ═══ Path 2: Direct fold (batch-arity per step) + 1 terminal WHIR ═══
                 let start2 = Instant::now();
                 let mut acc2 = make_zero_acc(num_witness, log_code, log_m, num_inputs);
                 for step in 0..num_steps {
@@ -318,7 +367,7 @@ fn main() {
                 direct_times.push(fold2_us + whir2_us);
                 let _ = &whir2_proof; // keep for verify timing below
 
-                // ═══ Path 3: Batch reduce + fold(l=2) + 1 WHIR ═══
+                // ═══ Path 3: Batch reduce + fold(l=2) + 1 terminal WHIR ═══
                 let start3 = Instant::now();
                 let mut acc3 = make_zero_acc(num_witness, log_code, log_m, num_inputs);
                 for step in 0..num_steps {
@@ -385,8 +434,8 @@ fn main() {
     }
 
     println!("All times are POST-SPARTAN only (Spartan column is for reference, not included in comparisons).");
-    println!("  fold/ind    = independent / direct_fold (>1 means fold is faster)");
-    println!("  batch/ind   = independent / batch+fold (>1 means batch+fold is faster)");
+    println!("  fold/ind    = independent / direct_fold (>1 means fold is faster than N×WHIR)");
+    println!("  batch/ind   = independent / batch+fold (>1 means batch+fold is faster than N×WHIR)");
     println!("  batch/fold  = direct_fold / batch+fold (>1 means batch reduction helps over raw fold)");
 
     // ═══════════════════════════════════════════════════════════════
@@ -637,15 +686,120 @@ fn main() {
     }
 
     // ═══════════════════════════════════════════════════════════════
-    // Table 3: Terminal WHIR Verify Time
+    // Circuit Sizes (one-line summary)
+    // ═══════════════════════════════════════════════════════════════
+    println!();
+    println!("Recursive Circuit Sizes");
+    println!("=======================");
+    {
+        use whir_p3::ivc::warp_ivc::compute_recursive_circuit_size;
+        let step_dummy = WorkloadStepCircuit::new(100);
+        let step_input_dummy = [F::ZERO];
+
+        let perm_sz = Perm::new_from_rng_128(&mut SmallRng::seed_from_u64(99));
+        let (rf, rp) = p3_poseidon2::poseidon2_round_numbers_128::<F>(16, 3)
+            .expect("unsupported Poseidon2 parameters");
+        let config_sz = Poseidon2CircuitConfig::<F, 16>::from_rng(rf, rp, 3, &mut SmallRng::seed_from_u64(99));
+
+        let (w_poseidon, c_poseidon, _) = compute_recursive_circuit_size::<
+            F, p3_koala_bear::GenericPoseidon2LinearLayersKoalaBear, _, _,
+        >(&step_dummy, &step_input_dummy, &config_sz, &perm_sz, 5, 4);
+
+        println!("  Poseidon2 verifier (l=2): {} witness vars, {} constraints", w_poseidon, c_poseidon);
+
+        #[cfg(feature = "symphony")]
+        {
+            use whir_p3::ivc::warp_fold_verifier_algebraic::compute_cp_circuit_size;
+            let (w_alg, c_alg, _) = compute_cp_circuit_size(&step_dummy, &step_input_dummy);
+            println!("  Algebraic verifier (l=2): {} witness vars, {} constraints", w_alg, c_alg);
+            println!("  Constraint reduction: {:.0}x", c_poseidon as f64 / c_alg as f64);
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // WHIR-in-circuit cost estimate (why WARP exists)
+    // ═══════════════════════════════════════════════════════════════
+    println!();
+    println!("WHIR Verifier In-Circuit Cost Estimate (Why WARP Exists)");
+    println!("========================================================");
+    println!("A recursive WHIR-per-step IVC would embed the WHIR verifier in the R1CS circuit.");
+    println!("This is prohibitively expensive. Estimated costs per operation:");
+    println!();
+    // Known costs from our circuit builder:
+    // - Poseidon2 permutation (WIDTH=16, BabyBear/KoalaBear x^3): ~340 constraints
+    //   (8 external rounds × 16 sboxes × 2 muls + 13 internal rounds × 1 sbox × 2 muls + linear layers)
+    // - Extension field multiplication (D=4): 20 constraints
+    // - Merkle path verification (1 level): 1 Poseidon2 compression = ~340 constraints
+    let poseidon2_cost = 340usize;
+    let ef_mul_cost = 20usize;
+
+    for &log_size in &sizes {
+        let num_vars = 1usize << log_size;
+        let num_inputs = 8;
+        let mut rng = SmallRng::seed_from_u64(5);
+        let (_shape, instance) = R1CSInstance::<F>::produce_synthetic_r1cs(1 << log_size, num_vars, num_inputs, &mut rng);
+        let spartan = R1CSProver::new();
+        let sample_w = spartan.prepare_witness(&instance);
+        let num_witness = (sample_w.num_evals() - num_inputs).next_power_of_two();
+        let wnv = num_witness.trailing_zeros() as usize;
+        let cfg = make_whir_config(wnv);
+
+        let n_rounds = cfg.n_rounds();
+        let ff = 2usize; // folding_factor
+
+        // FS hashing: absorb/squeeze per round
+        // Initial: 1 commitment (absorb 8 elements) + OOD absorb + sample = ~3 Poseidon2
+        let mut fs_hashes = 3usize;
+        // Per round: absorb commitment + OOD answers + sumcheck rounds + sample queries
+        for rp in &cfg.round_parameters {
+            fs_hashes += 2; // commitment absorb + OOD
+            fs_hashes += ff; // sumcheck rounds (absorb + sample each)
+            fs_hashes += 1; // query sampling
+            let _ = rp;
+        }
+        let fs_cost = fs_hashes * poseidon2_cost;
+
+        // Sumcheck verification: ff rounds per WHIR round, in extension field
+        let mut sumcheck_muls = 0usize;
+        sumcheck_muls += ff * 3; // initial sumcheck: 3 EF muls per round
+        for _ in 0..n_rounds {
+            sumcheck_muls += ff * 3; // per-round sumcheck
+        }
+        let sumcheck_cost = sumcheck_muls * ef_mul_cost;
+
+        // Merkle verification: num_queries per round × depth levels × 1 Poseidon2 each
+        let mut merkle_hashes = 0usize;
+        let merkle_depth = wnv; // log(witness_size) levels
+        for rp in &cfg.round_parameters {
+            merkle_hashes += rp.num_queries * merkle_depth;
+        }
+        merkle_hashes += cfg.final_queries * merkle_depth;
+        let merkle_cost = merkle_hashes * poseidon2_cost;
+
+        // Query evaluation: fold 2^ff values at each query
+        let query_eval_muls: usize = cfg.round_parameters.iter()
+            .map(|rp| rp.num_queries * (1 << ff))
+            .sum::<usize>() + cfg.final_queries * (1 << ff);
+        let query_cost = query_eval_muls * ef_mul_cost;
+
+        let total_whir_circuit = fs_cost + sumcheck_cost + merkle_cost + query_cost;
+
+        println!("  log_size={log_size}: WHIR verifier ≈ {total_whir_circuit} constraints");
+        println!("    Breakdown: FS hashing={fs_cost}, sumcheck={sumcheck_cost}, Merkle={merkle_cost}, queries={query_cost}");
+        println!("    vs WARP fold verifier: ~4685 constraints ({:.0}x cheaper)", total_whir_circuit as f64 / 4685.0);
+        println!();
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // Terminal WHIR Verify Time + Proof Size
     // ═══════════════════════════════════════════════════════════════
     println!();
     println!("Terminal WHIR Verify Time");
     println!("========================");
     println!("This is the succinct verifier cost (constant per IVC chain, independent of num_steps).");
     println!();
-    println!("{:>10} {:>12} {:>12}", "log_size", "prove(us)", "verify(us)");
-    println!("{}", "-".repeat(38));
+    println!("{:>10} {:>12} {:>12} {:>12} {:>10}", "log_size", "prove(us)", "verify(us)", "proof(FE)", "proof(KB)");
+    println!("{}", "-".repeat(62));
 
     let _dft_v = Radix2DFTSmallBatch::<F>::default();
     for &log_size in &sizes {
@@ -661,7 +815,9 @@ fn main() {
 
         let (prove_us, proof) = terminal_whir_with_proof(&cfg, sample_w.as_slice(), wnv);
         let verify_us = terminal_whir_verify(&cfg, &proof, wnv);
-        println!("{:>10} {:>10.0}us {:>10.0}us", log_size, prove_us, verify_us);
+        let proof_fe = whir_proof_field_elements(&proof);
+        let proof_kb = proof_fe * 4 / 1024; // 4 bytes per KoalaBear element
+        println!("{:>10} {:>10.0}us {:>10.0}us {:>12} {:>8}KB", log_size, prove_us, verify_us, proof_fe, proof_kb);
     }
 
     // ═══════════════════════════════════════════════════════════════
