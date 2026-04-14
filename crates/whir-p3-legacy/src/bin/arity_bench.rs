@@ -169,7 +169,7 @@ fn precompute_fresh_root(
         rs_config.log_inv_rate,
         dft,
     );
-    let (root, _) = merkle_commit_codeword::<F, F, _, _, MyHash, MyCompress, DIGEST>(
+    let (root, _) = merkle_commit_codeword::<F, F, <F as Field>::Packing, <F as Field>::Packing, MyHash, MyCompress, DIGEST>(
         &cw,
         rs_config.folding_factor,
         mh.clone(),
@@ -320,7 +320,7 @@ fn run_fold_at_arity(
                 fold_chal.sample()
             },
             |cw, ff| {
-                let (root, _) = merkle_commit_codeword::<F, F, _, _, MyHash, MyCompress, DIGEST>(
+                let (root, _) = merkle_commit_codeword::<F, F, <F as Field>::Packing, <F as Field>::Packing, MyHash, MyCompress, DIGEST>(
                     cw,
                     ff,
                     mhc.clone(),
@@ -423,7 +423,7 @@ fn run_fold_at_arity_union(
         let union_cw = build_union_codeword(&all_codewords);
         let union_ff = union_folding_factor(rs_config.folding_factor, l);
         let union_ev = EvaluationsList::new(union_cw);
-        let (union_root, _) = merkle_commit_codeword::<F, F, _, _, MyHash, MyCompress, DIGEST>(
+        let (union_root, _) = merkle_commit_codeword::<F, F, <F as Field>::Packing, <F as Field>::Packing, MyHash, MyCompress, DIGEST>(
             &union_ev,
             union_ff,
             mh.clone(),
@@ -464,7 +464,7 @@ fn run_fold_at_arity_union(
             },
             // commit_fn for the folded codeword
             |cw, ff| {
-                let (root, _) = merkle_commit_codeword::<F, F, _, _, MyHash, MyCompress, DIGEST>(
+                let (root, _) = merkle_commit_codeword::<F, F, <F as Field>::Packing, <F as Field>::Packing, MyHash, MyCompress, DIGEST>(
                     cw, ff, mhc.clone(), mcc.clone(),
                 );
                 root
@@ -474,7 +474,7 @@ fn run_fold_at_arity_union(
             // This closure commits the interleaved codeword.
             |ucw, uff| {
                 let uev = EvaluationsList::new(ucw.to_vec());
-                let (root, _) = merkle_commit_codeword::<F, F, _, _, MyHash, MyCompress, DIGEST>(
+                let (root, _) = merkle_commit_codeword::<F, F, <F as Field>::Packing, <F as Field>::Packing, MyHash, MyCompress, DIGEST>(
                     &uev, uff, mh2.clone(), mc2.clone(),
                 );
                 root

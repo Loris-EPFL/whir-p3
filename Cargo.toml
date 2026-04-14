@@ -1,47 +1,13 @@
-[package]
-name = "whir-p3"
-version = "0.1.0"
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[workspace.package]
 edition = "2024"
 rust-version = "1.93"
-default-run = "main"
 
-[lints]
-rust.missing_debug_implementations = "warn"
-rust.unreachable_pub = "warn"
-rust.unused_must_use = "deny"
-rust.rust_2018_idioms = { level = "deny", priority = -1 }
-rust.dead_code = "allow"
-rustdoc.all = "warn"
-
-[lints.clippy]
-# all lints that are on by default (correctness, suspicious, style, complexity, perf)
-all = { level = "warn", priority = -1 }
-
-# new lints that are still under development
-nursery = { level = "warn", priority = -1 }
-# avoid lints that are too pedantic
-doc_markdown = "allow"
-
-# lints which are rather strict or have occasional false positives
-pedantic = { level = "warn", priority = -1 }
-# avoid lints that are too pedantic
-cast_possible_truncation = "allow"
-cast_precision_loss = "allow"
-missing_errors_doc = "allow"
-missing_panics_doc = "allow"
-many_single_char_names = "allow"
-should_panic_without_expect = "allow"
-similar_names = "allow"
-suboptimal_flops = "allow"
-cast_sign_loss = "allow"
-tuple_array_conversions = "allow"
-
-[dependencies]
-serde = { version = "1.0", default-features = false, features = [
-    "derive",
-    "alloc",
-] }
-rayon = { version = "1.0", optional = true }
+[workspace.dependencies]
+# Plonky3 — single pin for the whole workspace
 p3-field = { git = "https://github.com/Plonky3/Plonky3.git", rev = "c38eb05" }
 p3-baby-bear = { git = "https://github.com/Plonky3/Plonky3.git", rev = "c38eb05" }
 p3-mersenne-31 = { git = "https://github.com/Plonky3/Plonky3.git", rev = "c38eb05" }
@@ -53,8 +19,7 @@ p3-commit = { git = "https://github.com/Plonky3/Plonky3.git", rev = "c38eb05" }
 p3-goldilocks = { git = "https://github.com/Plonky3/Plonky3.git", rev = "c38eb05" }
 p3-dft = { git = "https://github.com/Plonky3/Plonky3.git", rev = "c38eb05" }
 p3-util = { git = "https://github.com/Plonky3/Plonky3.git", rev = "c38eb05" }
-p3-maybe-rayon = { git = "https://github.com/Plonky3/Plonky3.git", rev = "c38eb05", features = [
-] }
+p3-maybe-rayon = { git = "https://github.com/Plonky3/Plonky3.git", rev = "c38eb05" }
 p3-interpolation = { git = "https://github.com/Plonky3/Plonky3.git", rev = "c38eb05" }
 p3-challenger = { git = "https://github.com/Plonky3/Plonky3.git", rev = "c38eb05" }
 p3-multilinear-util = { git = "https://github.com/Plonky3/Plonky3.git", rev = "c38eb05" }
@@ -62,101 +27,52 @@ p3-keccak = { git = "https://github.com/Plonky3/Plonky3.git", rev = "c38eb05" }
 p3-poseidon2 = { git = "https://github.com/Plonky3/Plonky3.git", rev = "c38eb05" }
 p3-mds = { git = "https://github.com/Plonky3/Plonky3.git", rev = "c38eb05" }
 
-symphony = { path = "../Symphony", default-features = false, optional = true }
-sha2 = { version = "0.11.0", optional = true }
-
+# Third-party
+serde = { version = "1.0", default-features = false, features = ["derive", "alloc"] }
+rayon = { version = "1.0" }
 hashbrown = "0.16"
-itertools = { version = "0.14.0", default-features = false, features = [
-    "use_alloc",
-] }
+itertools = { version = "0.14.0", default-features = false, features = ["use_alloc"] }
 libm = "0.2.15"
 thiserror = { version = "2.0", default-features = false }
-tracing = { version = "0.1.37", default-features = false, features = [
-    "attributes",
-] }
+tracing = { version = "0.1.37", default-features = false, features = ["attributes"] }
 rand = { version = "0.10", default-features = false }
 serde_json = "1.0"
+sha2 = "0.11.0"
 
-# Bin-only deps pulling std
-clap = { version = "4.5", features = ["derive"], optional = true }
-tracing-forest = { version = "0.3", optional = true }
-tracing-subscriber = { version = "0.3.17", default-features = false, features = [
-    "alloc",
-    "env-filter",
-], optional = true }
-bincode = { version = "1.3", optional = true }
-
-[dev-dependencies]
+# Bin-only
+clap = { version = "4.5", features = ["derive"] }
+tracing-forest = "0.3"
+tracing-subscriber = { version = "0.3.17", default-features = false, features = ["alloc", "env-filter"] }
+bincode = "1.3"
 criterion = "0.8"
 proptest = { version = "1.0", default-features = true }
 
-[features]
-default = ["parallel"]
-parallel = ["dep:rayon", "p3-maybe-rayon/parallel", "p3-util/parallel"]
-rayon = ["dep:rayon"]
-cli = ["dep:clap", "dep:tracing-subscriber", "dep:tracing-forest", "dep:bincode", "rand/default"]
-bench-timing = []
-symphony = ["dep:symphony", "dep:sha2"]
+[workspace.lints.rust]
+missing_debug_implementations = "warn"
+unreachable_pub = "warn"
+unused_must_use = "deny"
+rust_2018_idioms = { level = "deny", priority = -1 }
+dead_code = "allow"
 
-[[bin]]
-name = "main"
-path = "src/bin/main.rs"
-required-features = ["cli"]
+[workspace.lints.rustdoc]
+all = "warn"
 
-[[bin]]
-name = "accumulation_bench"
-path = "src/bin/accumulation_bench.rs"
-required-features = ["cli"]
-
-[[bin]]
-name = "warp_bench"
-path = "src/bin/warp_bench.rs"
-
-[[bin]]
-name = "accumulation_report"
-path = "src/bin/accumulation_report.rs"
-
-[[bin]]
-name = "cp_snark_bench"
-path = "src/bin/cp_snark_bench.rs"
-required-features = ["symphony"]
-
-[[bin]]
-name = "arity_bench"
-path = "src/bin/arity_bench.rs"
-
-[[bin]]
-name = "profile_spartan"
-path = "src/bin/profile_spartan.rs"
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+doc_markdown = "allow"
+cast_possible_truncation = "allow"
+cast_precision_loss = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+many_single_char_names = "allow"
+should_panic_without_expect = "allow"
+similar_names = "allow"
+suboptimal_flops = "allow"
+cast_sign_loss = "allow"
+tuple_array_conversions = "allow"
 
 [profile.profiling]
 inherits = "release"
 debug = true
-
-[[bench]]
-name = "whir"
-harness = false
-
-[[bench]]
-name = "evaluate"
-harness = false
-
-[[bench]]
-name = "eval_multilinear"
-harness = false
-
-[[bench]]
-name = "sumcheck"
-harness = false
-
-[[bench]]
-name = "stir_queries"
-harness = false
-
-[[bench]]
-name = "spartan"
-harness = false
-
-[[bench]]
-name = "accumulation"
-harness = false

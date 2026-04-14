@@ -16,7 +16,7 @@ use std::{env, time::Instant};
 use p3_koala_bear::{KoalaBear, Poseidon2KoalaBear};
 use p3_challenger::{CanObserve, CanSample, DuplexChallenger};
 use p3_dft::Radix2DFTSmallBatch;
-use p3_field::{extension::BinomialExtensionField, PrimeCharacteristicRing};
+use p3_field::{extension::BinomialExtensionField, Field, PrimeCharacteristicRing};
 use p3_symmetric::{PaddingFreeSponge, TruncatedPermutation};
 use rand::{rngs::SmallRng, SeedableRng};
 
@@ -123,7 +123,7 @@ fn precompute_fresh_root(
 ) -> [F; DIGEST] {
     let witness_poly = EvaluationsList::new(witness.to_vec());
     let cw = rs_encode(&witness_poly, rs_config.folding_factor, rs_config.log_inv_rate, dft);
-    let (root, _) = merkle_commit_codeword::<F, F, _, _, MyHash, MyCompress, DIGEST>(
+    let (root, _) = merkle_commit_codeword::<F, F, <F as Field>::Packing, <F as Field>::Packing, MyHash, MyCompress, DIGEST>(
         &cw, rs_config.folding_factor, mh.clone(), mc.clone(),
     );
     root
@@ -193,7 +193,7 @@ fn timed_ivc_step(
 
     // 5. Merkle commit
     let t = Instant::now();
-    let (fresh_root, _) = merkle_commit_codeword::<F, F, _, _, MyHash, MyCompress, DIGEST>(
+    let (fresh_root, _) = merkle_commit_codeword::<F, F, <F as Field>::Packing, <F as Field>::Packing, MyHash, MyCompress, DIGEST>(
         &fresh_cw, rs_config.folding_factor, mh.clone(), mc.clone(),
     );
     timings.merkle_commit_us = t.elapsed().as_micros() as f64;
@@ -214,7 +214,7 @@ fn timed_ivc_step(
             fold_chal.sample()
         },
         |cw, ff| {
-            let (root, _) = merkle_commit_codeword::<F, F, _, _, MyHash, MyCompress, DIGEST>(
+            let (root, _) = merkle_commit_codeword::<F, F, <F as Field>::Packing, <F as Field>::Packing, MyHash, MyCompress, DIGEST>(
                 cw, ff, mhc.clone(), mcc.clone(),
             );
             root
@@ -305,7 +305,7 @@ fn main() {
             &rs_config, &dft,
             |re| { for &e in re { fc0.observe(e); } fc0.sample() },
             |cw, ff| {
-                let (root, _) = merkle_commit_codeword::<F, F, _, _, MyHash, MyCompress, DIGEST>(
+                let (root, _) = merkle_commit_codeword::<F, F, <F as Field>::Packing, <F as Field>::Packing, MyHash, MyCompress, DIGEST>(
                     cw, ff, mhc.clone(), mcc.clone(),
                 );
                 root
