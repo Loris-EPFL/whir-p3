@@ -534,6 +534,137 @@ mod tests {
     }
 
     #[test]
+    fn full_rs_decider_accepts_valid_accumulator() {
+        let dft = p3_dft::Radix2DFTSmallBatch::<F>::default();
+        let shape = make_square_shape();
+
+        let folding_factor = 2;
+        let log_inv_rate = 1;
+
+        // Build a valid witness for 3*3 = 9
+        let num_vars_y = 1 << shape.num_poly_vars_y();
+        let mut witness_raw = vec![F::from_u64(3), F::from_u64(9), F::ZERO, F::ZERO];
+        witness_raw.resize(num_vars_y, F::ZERO);
+
+        // RS-encode it
+        let witness_poly = EvaluationsList::new(witness_raw.clone());
+        let codeword = crate::encoding::rs_encode(&witness_poly, folding_factor, log_inv_rate, &dft);
+
+        // Compute eval claim at an arbitrary eval_point
+        let eval_point = vec![F::from_u64(2); codeword.num_variables()];
+        let eval_claim = crate::fold::evaluate_mle_lsb(&codeword, &eval_point);
+
+        // Compute PESAT
+        let pesat_x = vec![F::ZERO; shape.num_inputs()];
+        let pesat_tau = vec![F::ZERO; shape.num_poly_vars_x()];
+        let z = build_z_vector(&pesat_x, &witness_raw);
+        let pesat_target = evaluate_bundled_r1cs(&shape, &pesat_tau, &z);
+
+        let acc = WarpAccumulator::new(
+            WarpAccumulatorInstance {
+                commitment_root: [F::ZERO; 8],
+                eval_point,
+                eval_claim,
+                pesat_tau,
+                pesat_x,
+                pesat_target,
+            },
+            WarpAccumulatorWitness {
+                codeword,
+                witness: witness_raw,
+            },
+        );
+
+        let result = warp_decide_full_rs(&shape, &acc, folding_factor, log_inv_rate, &dft);
+        assert!(result.is_ok(), "full RS decider should accept: {result:?}");
+    }
+
+    #[test]
+    fn full_rs_decider_rejects_tampered_codeword() {
+        let dft = p3_dft::Radix2DFTSmallBatch::<F>::default();
+        let shape = make_square_shape();
+        let folding_factor = 2;
+        let log_inv_rate = 1;
+
+        let num_vars_y = 1 << shape.num_poly_vars_y();
+        let mut witness_raw = vec![F::from_u64(3), F::from_u64(9), F::ZERO, F::ZERO];
+        witness_raw.resize(num_vars_y, F::ZERO);
+
+        let witness_poly = EvaluationsList::new(witness_raw.clone());
+        let mut codeword = crate::encoding::rs_encode(&witness_poly, folding_factor, log_inv_rate, &dft);
+
+        let eval_point = vec![F::from_u64(2); codeword.num_variables()];
+
+        let pesat_x = vec![F::ZERO; shape.num_inputs()];
+        let pesat_tau = vec![F::ZERO; shape.num_poly_vars_x()];
+        let z = build_z_vector(&pesat_x, &witness_raw);
+        let pesat_target = evaluate_bundled_r1cs(&shape, &pesat_tau, &z);
+
+        // Tamper with the codeword then recompute eval_claim so check 1 passes; check 3 should fail
+        codeword.as_mut_slice()[0] += F::ONE;
+        let eval_claim = crate::fold::evaluate_mle_lsb(&codeword, &eval_point);
+
+        let acc = WarpAccumulator::new(
+            WarpAccumulatorInstance {
+                commitment_root: [F::ZERO; 8],
+                eval_point,
+                eval_claim,
+                pesat_tau,
+                pesat_x,
+                pesat_target,
+            },
+            WarpAccumulatorWitness {
+                codeword,
+                witness: witness_raw,
+            },
+        );
+
+        let result = warp_decide_full_rs(&shape, &acc, folding_factor, log_inv_rate, &dft);
+        assert_eq!(result, Err(WarpDeciderError::CodewordValidityFailed));
+    }
+
+    #[test]
+    fn full_rs_decider_rejects_tampered_eval_claim() {
+        let dft = p3_dft::Radix2DFTSmallBatch::<F>::default();
+        let shape = make_square_shape();
+        let folding_factor = 2;
+        let log_inv_rate = 1;
+
+        let num_vars_y = 1 << shape.num_poly_vars_y();
+        let mut witness_raw = vec![F::from_u64(3), F::from_u64(9), F::ZERO, F::ZERO];
+        witness_raw.resize(num_vars_y, F::ZERO);
+
+        let witness_poly = EvaluationsList::new(witness_raw.clone());
+        let codeword = crate::encoding::rs_encode(&witness_poly, folding_factor, log_inv_rate, &dft);
+
+        let eval_point = vec![F::from_u64(2); codeword.num_variables()];
+        let eval_claim = crate::fold::evaluate_mle_lsb(&codeword, &eval_point) + F::ONE; // tampered
+
+        let pesat_x = vec![F::ZERO; shape.num_inputs()];
+        let pesat_tau = vec![F::ZERO; shape.num_poly_vars_x()];
+        let z = build_z_vector(&pesat_x, &witness_raw);
+        let pesat_target = evaluate_bundled_r1cs(&shape, &pesat_tau, &z);
+
+        let acc = WarpAccumulator::new(
+            WarpAccumulatorInstance {
+                commitment_root: [F::ZERO; 8],
+                eval_point,
+                eval_claim,
+                pesat_tau,
+                pesat_x,
+                pesat_target,
+            },
+            WarpAccumulatorWitness {
+                codeword,
+                witness: witness_raw,
+            },
+        );
+
+        let result = warp_decide_full_rs(&shape, &acc, folding_factor, log_inv_rate, &dft);
+        assert_eq!(result, Err(WarpDeciderError::EvaluationClaimFailed));
+    }
+
+    #[test]
     fn decider_fixed_size_across_ivc_steps() {
         // The most important property: the decider works on fixed-size
         // accumulators regardless of how many IVC steps preceded it.

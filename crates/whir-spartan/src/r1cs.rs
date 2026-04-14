@@ -324,15 +324,30 @@ mod tests {
     use super::*;
     use alloc::vec;
     use p3_baby_bear::BabyBear;
-    use p3_field::PrimeCharacteristicRing;
+    use p3_field::{extension::BinomialExtensionField, PrimeCharacteristicRing};
+
+    type F = BabyBear;
+    type EF = BinomialExtensionField<F, 4>;
+
+    fn make_square_shape() -> (R1CSShape<F>, Vec<F>, Vec<F>) {
+        let num_cons = 4;
+        let num_vars = 4;
+        let num_inputs = 1;
+        let a_entries = vec![SparseMatEntry::new(0, 0, F::ONE)];
+        let b_entries = vec![SparseMatEntry::new(0, 0, F::ONE)];
+        let c_entries = vec![SparseMatEntry::new(0, 1, F::ONE)];
+        let shape = R1CSShape::new(num_cons, num_vars, num_inputs, a_entries, b_entries, c_entries);
+        let mut witness = vec![F::ZERO; num_vars];
+        witness[0] = F::from_u64(2);
+        witness[1] = F::from_u64(4);
+        let input = vec![F::ZERO];
+        (shape, witness, input)
+    }
 
     #[test]
     fn test_sparse_mat_multiply() {
-        type F = BabyBear;
-
-        // Simple test: matrix with single entry at (0, 0) = 1
         let entries = vec![SparseMatEntry::new(0, 0, F::ONE)];
-        let mat = SparseMatPolynomial::new(2, 2, entries); // 4x4 matrix
+        let mat = SparseMatPolynomial::new(2, 2, entries);
 
         let z = vec![F::ONE, F::ZERO, F::ZERO, F::ZERO];
         let result = mat.multiply_vec(4, 4, &z);
@@ -344,35 +359,183 @@ mod tests {
     }
 
     #[test]
+    fn test_sparse_mat_multiply_multiple_entries() {
+        let entries = vec![
+            SparseMatEntry::new(0, 0, F::from_u64(2)),
+            SparseMatEntry::new(0, 1, F::from_u64(3)),
+            SparseMatEntry::new(1, 0, F::ONE),
+        ];
+        let mat = SparseMatPolynomial::new(1, 1, entries);
+
+        let z = vec![F::from_u64(5), F::from_u64(7)];
+        let result = mat.multiply_vec(2, 2, &z);
+
+        // row 0: 2*5 + 3*7 = 31
+        assert_eq!(result[0], F::from_u64(31));
+        // row 1: 1*5 = 5
+        assert_eq!(result[1], F::from_u64(5));
+    }
+
+    #[test]
+    fn test_sparse_mat_evaluate() {
+        let entries = vec![SparseMatEntry::new(0, 0, F::from_u64(3))];
+        let mat = SparseMatPolynomial::new(1, 1, entries);
+
+        let rx = vec![EF::ONE];
+        let ry = vec![EF::ONE];
+        let result = mat.evaluate(&rx, &ry);
+        // eq(0, [1]) = 1-1 = 0 → but entry at row=0 so eq(0, rx=[1]) = 1 - 1 = 0
+        // Actually, bit 0 of row=0 is 0, so eq = (1 - rx[0]) = (1 - 1) = 0.
+        // Let's try rx = [0.5]
+        let half = EF::from(F::from_u64(2)).inverse();
+        let rx2 = vec![half];
+        let ry2 = vec![half];
+        let result2 = mat.evaluate(&rx2, &ry2);
+        // eq(0, [0.5]) = (1 - 0.5) = 0.5, eq(0, [0.5]) = 0.5
+        // result = 3 * 0.5 * 0.5 = 0.75
+        let expected = EF::from(F::from_u64(3)) * half * half;
+        assert_eq!(result2, expected);
+        // At rx=[1], ry=[1]: eq(0, [1]) = 0, so result should be 0
+        assert_eq!(result, EF::ZERO);
+    }
+
+    #[test]
+    fn test_sparse_mat_num_entries() {
+        let entries = vec![
+            SparseMatEntry::new(0, 0, F::ONE),
+            SparseMatEntry::new(1, 1, F::ONE),
+        ];
+        let mat = SparseMatPolynomial::new(1, 1, entries);
+        assert_eq!(mat.num_entries(), 2);
+        assert_eq!(mat.num_vars_x(), 1);
+        assert_eq!(mat.num_vars_y(), 1);
+    }
+
+    #[test]
     fn test_r1cs_shape_sat() {
-        type F = BabyBear;
-
-        // Create a simple R1CS: x * x = x^2
-        // One constraint, one variable
-        let num_cons = 2usize.pow(2); // Must be power of 2
-        let num_vars = 2usize.pow(2); // Must be power of 2
-        let num_inputs = 1;
-
-        // Constraint: w[0] * w[0] = w[1]
-        // A = [1 at (0,0)]
-        // B = [1 at (0,0)]
-        // C = [1 at (0,1)]
-        let a_entries = vec![SparseMatEntry::new(0, 0, F::ONE)];
-        let b_entries = vec![SparseMatEntry::new(0, 0, F::ONE)];
-        let c_entries = vec![SparseMatEntry::new(0, 1, F::ONE)];
-
-        let shape = R1CSShape::new(
-            num_cons, num_vars, num_inputs, a_entries, b_entries, c_entries,
-        );
-
-        // Witness: w[0] = 2, w[1] = 4 (since 2*2 = 4)
-        let mut witness = vec![F::ZERO; num_vars];
-        witness[0] = F::from_u64(2);
-        witness[1] = F::from_u64(4);
-
-        let input = vec![F::ZERO];
-
+        let (shape, witness, input) = make_square_shape();
         assert!(shape.is_sat(&witness, &input));
+    }
+
+    #[test]
+    fn test_r1cs_shape_unsat() {
+        let (shape, mut witness, input) = make_square_shape();
+        witness[1] = F::from_u64(5); // 2*2 != 5
+        assert!(!shape.is_sat(&witness, &input));
+    }
+
+    #[test]
+    fn test_r1cs_shape_accessors() {
+        let (shape, _, _) = make_square_shape();
+        assert_eq!(shape.num_cons(), 4);
+        assert_eq!(shape.num_vars(), 4);
+        assert_eq!(shape.num_inputs(), 1);
+        assert_eq!(shape.num_poly_vars_x(), 2);
+        assert_eq!(shape.num_poly_vars_y(), 3); // log2(2 * 4) = 3
+        assert_eq!(shape.a().num_entries(), 1);
+        assert_eq!(shape.b().num_entries(), 1);
+        assert_eq!(shape.c().num_entries(), 1);
+    }
+
+    #[test]
+    fn test_r1cs_shape_evaluate() {
+        let (shape, _, _) = make_square_shape();
+        let rx = vec![EF::ZERO; shape.num_poly_vars_x()];
+        let ry = vec![EF::ZERO; shape.num_poly_vars_y()];
+        let (a_eval, b_eval, c_eval) = shape.evaluate(&rx, &ry);
+        // At rx=0, ry=0: eq(0,[0,0]) = 1*1 = 1 for all entries at row=0, col=0
+        assert_eq!(a_eval, EF::ONE);
+        assert_eq!(b_eval, EF::ONE);
+        // C has entry at (0,1), eq(1, [0,0,0]) for col=1: bit0=1 → ry[0]=0, so eq=0
+        assert_eq!(c_eval, EF::ZERO);
+    }
+
+    #[test]
+    fn test_r1cs_shape_multiply_vec() {
+        let (shape, witness, input) = make_square_shape();
+        let mut z = vec![F::ZERO; 2 * shape.num_vars()];
+        z[..shape.num_vars()].copy_from_slice(&witness);
+        z[shape.num_vars()] = F::ONE;
+        z[shape.num_vars() + 1..shape.num_vars() + 1 + shape.num_inputs()]
+            .copy_from_slice(&input);
+
+        let (az, bz, cz) = shape.multiply_vec(&z[..shape.num_vars() + 1 + shape.num_inputs()]);
+        // For constraint 0: A*z = w[0] = 2, B*z = w[0] = 2, C*z = w[1] = 4
+        assert_eq!(az[0], F::from_u64(2));
+        assert_eq!(bz[0], F::from_u64(2));
+        assert_eq!(cz[0], F::from_u64(4));
+        // A*z * B*z = C*z → 2*2 = 4 ✓
+        assert_eq!(az[0] * bz[0], cz[0]);
+    }
+
+    #[test]
+    fn test_r1cs_instance_new_and_verify() {
+        let (shape, witness, input) = make_square_shape();
+        let instance = R1CSInstance::new(shape, input.clone(), witness.clone());
+
+        assert_eq!(instance.input(), &input[..]);
+        assert_eq!(instance.witness(), &witness[..]);
+        assert!(instance.verify());
+    }
+
+    #[test]
+    fn test_r1cs_instance_build_z_vector() {
+        let (shape, witness, input) = make_square_shape();
+        let instance = R1CSInstance::new(shape, input.clone(), witness.clone());
+        let z = instance.build_z_vector();
+
+        assert_eq!(z.len(), 8); // 2 * num_vars = 2 * 4
+        assert_eq!(&z[..4], &witness[..]);
+        assert_eq!(z[4], F::ONE); // constant term
+        assert_eq!(z[5], input[0]); // public input
+    }
+
+    #[test]
+    fn test_r1cs_instance_unsat_verify() {
+        let (shape, mut witness, input) = make_square_shape();
+        witness[1] = F::from_u64(99);
+        let instance = R1CSInstance::new(shape, input, witness);
+        assert!(!instance.verify());
+    }
+
+    #[test]
+    fn test_produce_synthetic_r1cs() {
+        use rand::SeedableRng;
+        let mut rng = rand::rngs::SmallRng::seed_from_u64(42);
+
+        let (shape, instance) = R1CSInstance::<F>::produce_synthetic_r1cs(4, 4, 1, &mut rng);
+        assert_eq!(shape.num_cons(), 4);
+        assert_eq!(shape.num_vars(), 4);
+        assert_eq!(shape.num_inputs(), 1);
+        assert!(instance.verify());
+    }
+
+    #[test]
+    fn test_produce_synthetic_r1cs_larger() {
+        use rand::SeedableRng;
+        let mut rng = rand::rngs::SmallRng::seed_from_u64(123);
+
+        let (shape, instance) = R1CSInstance::<F>::produce_synthetic_r1cs(16, 8, 3, &mut rng);
+        assert_eq!(shape.num_cons(), 16);
+        assert_eq!(shape.num_vars(), 8);
+        assert_eq!(shape.num_inputs(), 3);
+        assert!(instance.verify());
+    }
+
+    #[test]
+    fn test_compute_eq_poly() {
+        // eq(0, [r]) = 1 - r for each bit
+        let r = vec![EF::from(F::from_u64(3))];
+        let eq_0 = compute_eq_poly::<EF, F>(0, &r);
+        assert_eq!(eq_0, EF::ONE - EF::from(F::from_u64(3)));
+
+        let eq_1 = compute_eq_poly::<EF, F>(1, &r);
+        assert_eq!(eq_1, EF::from(F::from_u64(3)));
+
+        // eq(x, x) on boolean hypercube = 1
+        let bits = vec![EF::ONE, EF::ZERO, EF::ONE];
+        let eq_self = compute_eq_poly::<EF, F>(0b101, &bits);
+        assert_eq!(eq_self, EF::ONE);
     }
 }
 
