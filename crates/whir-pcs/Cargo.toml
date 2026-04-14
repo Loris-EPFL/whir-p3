@@ -1,0 +1,44 @@
+[package]
+name = "whir-pcs"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+whir-core = { path = "../whir-core", default-features = false }
+
+p3-field.workspace = true
+p3-challenger.workspace = true
+p3-commit.workspace = true
+p3-dft.workspace = true
+p3-matrix.workspace = true
+p3-maybe-rayon.workspace = true
+p3-merkle-tree.workspace = true
+p3-multilinear-util.workspace = true
+p3-symmetric.workspace = true
+p3-util.workspace = true
+
+serde.workspace = true
+rayon = { workspace = true, optional = true }
+itertools.workspace = true
+libm.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+rand.workspace = true
+
+[dev-dependencies]
+p3-baby-bear.workspace = true
+p3-koala-bear.workspace = true
+p3-goldilocks.workspace = true
+p3-keccak.workspace = true
+p3-poseidon2.workspace = true
+proptest.workspace = true
+rand = { workspace = true, features = ["std", "std_rng", "thread_rng"] }
+
+[features]
+default = ["parallel"]
+parallel = ["dep:rayon", "p3-maybe-rayon/parallel", "p3-util/parallel", "whir-core/parallel"]
+bench-timing = []
+
+[lints]
+workspace = true
