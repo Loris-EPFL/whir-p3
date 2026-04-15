@@ -97,8 +97,8 @@ Output columns:
 ### Circuit size measurement
 
 ```bash
-cargo test --lib --features bench-timing \
-  ivc::warp_ivc::tests::measure_recursive_circuit_size -- --nocapture
+cargo test -p whir-ivc --features bench-timing \
+  warp_ivc::tests::measure_recursive_circuit_size -- --nocapture
 ```
 
 Shows the recursive IVC circuit breakdown: step circuit vs WARP fold verifier (Poseidon2 Fiat-Shamir + sumcheck verification). Current circuit: 5,293 constraints, dominated by Poseidon2 hashing.
@@ -170,74 +170,92 @@ Non-union verifier time doubles as ℓ doubles (O(ℓ)). Union verifier time gro
 ### Arity micro-benchmark (prover-side fold costs at varying arity)
 
 ```bash
-cargo run --release --bin arity_bench -- <log_sizes> <num_steps> <repeats> <batch>
+cargo run --release --bin arity_bench -- <log_sizes> <num_instances> <repeats>
 ```
 
-Compares WARP fold prover costs across arities 2, 4, 8 at varying synthetic R1CS sizes.
+Compares WARP fold prover costs across arities ℓ ∈ {2, 4, 8, 16} at varying synthetic R1CS sizes.
 
-### Legacy benchmarks
+### Step-size sweep (per-phase IVC cost breakdown)
 
 ```bash
-cargo run --release --bin warp_bench -- "14" "4,8,16" 3 8     # Includes recursive IVC path
-cargo run --release --bin pipeline_bench -- "10,12" "4,8" 3 1  # Eval-fold pipeline
+cargo run --release --bin step_size_bench -- <num_ivc_steps> <repeats>
+```
+
+Sweeps step circuit sizes and reports where time is spent: circuit build, Spartan prove, RS encode, Merkle commit, WARP fold.
+
+### Spartan / SPARK micro-benchmarks
+
+```bash
+cargo run --release --bin profile_spartan
+cargo run --release --bin spartan_spark_bench
+cargo run --release --bin spartan_spark_report   # post-process spark bench output
+cargo run --release --bin accumulation_report    # post-process criterion accumulation runs
+```
+
+### Criterion benches
+
+```bash
+cargo bench -p whir-p3 --bench whir
+cargo bench -p whir-p3 --bench spartan
+cargo bench -p whir-p3 --bench sumcheck
+cargo bench -p whir-p3 --bench accumulation
+cargo bench -p whir-p3 --bench evaluate
+cargo bench -p whir-p3 --bench eval_multilinear
+cargo bench -p whir-p3 --bench stir_queries
 ```
 
 ## Testing
 
 ```bash
-cargo test                                # All tests (389 tests)
-cargo test accumulation::warp             # WARP fold tests
-cargo test accumulation::pipeline         # Full pipeline: Spartan -> batch reduce -> fold -> WHIR
-cargo test ivc::warp_ivc                  # IVC tests (init, step, batch, recursive, terminal WHIR)
-cargo test ivc::warp_fold_verifier_circuit  # Recursive verifier circuit
+cargo test                                       # All tests across the workspace
+cargo test -p warp                               # WARP fold tests (twin-constraint, encoding, eval fold)
+cargo test -p accumulation                       # Pipeline, constraint batch, random LC, linearized
+cargo test -p whir-ivc                           # IVC tests (init, step, batch, recursive, terminal WHIR)
+cargo test -p whir-ivc warp_fold_verifier        # Recursive in-circuit fold verifier
+cargo test -p whir-pcs                           # WHIR PCS end-to-end
+cargo test -p whir-spartan                       # Spartan R1CS prover
 ```
 
 ## Architecture
 
-### Module Layout
+The codebase is a Cargo workspace (`crates/*`). All library crates are `#![no_std]` + alloc, edition 2024, MSRV 1.93. The Plonky3 `rev` pin is single-sourced in the root `Cargo.toml`.
 
-```
-src/
-  whir/                 # WHIR PCS (polynomial commitment scheme)
-  spartan/              # Spartan R1CS prover (table-based, O(n) per sumcheck round)
-  sumcheck/             # Sumcheck protocol (Svo + Classic strategies)
-  accumulation/
-    warp/
-      fold.rs           # WARP fold prover (RS encode + Merkle + twin-constraint + shift/OOD + eval batch)
-      twin_constraint.rs  # Twin-constraint sumcheck (degree-2, base field)
-      encoding.rs       # RS encoding via DFT + Merkle commitment
-      accumulator.rs    # WarpAccumulator types (fixed-size)
-      decider.rs        # Algebraic decider
-      eval_fold.rs      # Eval-only fold variant (no PESAT)
-      quasar_adapter.rs # Bridge from Spartan to WARP format
-    constraint_batch.rs # Constraint batching sumcheck (reduces l linear claims to point evals)
-    random_lc.rs        # Random linear combination (witness size preserved)
-    pipeline.rs         # End-to-end pipeline tests
-    linearized.rs       # Spartan -> linearized claims conversion
-    scheme.rs           # v2 accumulation (WHIR per step, for comparison)
-    quasar/             # Quasar frontend (squash via WHIR-backed accumulation)
-    decider.rs          # Terminal WHIR decider
-  ivc/
-    warp_ivc.rs         # WARP IVC: init, step, step_recursive, step_batch
-    warp_fold_verifier_circuit.rs  # In-circuit fold verifier (Poseidon2 + sumcheck)
-    eval_fold_verifier_circuit.rs  # Alternative eval-only verifier circuit
-    step.rs             # StepCircuit trait
-    ivc.rs              # v2 IVC (WHIR per step, for comparison)
-    verifier_circuit.rs # v2 verifier circuit (for comparison)
-  circuit/
-    builder.rs          # R1CS circuit builder
-    poseidon2.rs        # Poseidon2 as R1CS constraints
-    sponge.rs           # Duplex sponge challenger as R1CS
-    ext_field.rs        # BabyBear^4 extension field as R1CS
-    bits.rs             # Bit decomposition gadgets
-  poly/                 # Polynomial representations
-  fiat_shamir/          # Fiat-Shamir transcript
-  parameters/           # Protocol parameters
-  bin/
-    compare_bench.rs    # Fair 4-way comparison benchmark
-    warp_bench.rs       # WARP benchmark with recursive IVC
-    pipeline_bench.rs   # Eval-fold pipeline benchmark
-```
+### Workspace Layout
+
+| Crate | Role |
+|-------|------|
+| **`whir-core`** | Foundation: `parameters/`, `fiat_shamir/`, `poly/`, constants, utilities |
+| **`whir-circuit`** | R1CS circuit builder, Poseidon2, duplex sponge, BabyBear⁴ extension-field arithmetic, bit gadgets |
+| **`whir-pcs`** | WHIR polynomial commitment scheme + sumcheck (Svo + Classic strategies) |
+| **`whir-spartan`** | Spartan R1CS prover (SPARK compiler, table-based O(n) per sumcheck round) |
+| **`warp`** | WARP fold: RS encoding, Merkle commit, twin-constraint sumcheck, shift/OOD queries, eval batch, accumulator types, terminal WHIR decider |
+| **`accumulation`** | Constraint-batching sumcheck, random linear combination, pipeline, linearized claims, v2 accumulation scheme, compact instance, union poly |
+| **`quasar`** | Quasar frontend (squash via WHIR-backed accumulation) — `fresh.rs`, `frontend.rs`, `scheme.rs` |
+| **`whir-ivc`** | WARP IVC (init / step / step_batch / step_recursive_union), in-circuit fold verifier, eval-only verifier, linearized IVC, unified IVC |
+| **`whir-cp-snark`** | CP-SNARK compiler + terminal (Symphony deferred hashing; `symphony`-gated) |
+| **`whir-p3`** | Umbrella crate re-exporting all of the above; hosts binaries and criterion benches |
+
+### Crate Highlights
+
+- `warp/src/fold.rs` — WARP fold prover (RS encode + Merkle + twin-constraint + shift/OOD + eval batch)
+- `warp/src/twin_constraint.rs` — twin-constraint sumcheck (degree-2, base field)
+- `warp/src/accumulator.rs` — `WarpAccumulator{,Instance,Witness}` (fixed-size)
+- `warp/src/quasar_adapter.rs` — bridge from Spartan into WARP format
+- `warp/src/terminal_whir.rs` — terminal WHIR decider
+- `accumulation/src/constraint_batch.rs` — reduces ℓ linear claims to point evaluations
+- `accumulation/src/random_lc.rs` — random linear combination (witness size preserved)
+- `accumulation/src/pipeline.rs` — end-to-end Spartan → batch reduce → fold → WHIR tests
+- `whir-ivc/src/warp_ivc.rs` — WARP IVC driver
+- `whir-ivc/src/warp_fold_verifier_circuit.rs` — in-circuit fold verifier (Poseidon2 + sumcheck)
+- `whir-ivc/src/unified.rs` — unified IVC entry point
+- `whir-p3/src/bin/` — `compare_bench`, `cp_snark_bench`, `arity_bench`, `step_size_bench`, `profile_spartan`, `spartan_spark_bench`, `spartan_spark_report`, `accumulation_report`, `main`
+
+### Feature Flags
+
+- `parallel` (default) — Rayon parallelism across all library crates
+- `cli` — bin-only deps (`clap`, `tracing-subscriber`, `tracing-forest`, `bincode`) for `main`
+- `bench-timing` — per-phase timing prints; forwarded to `whir-pcs`
+- `symphony` — enables `whir-cp-snark` + Symphony deferred hashing (required by `cp_snark_bench`)
 
 ### WARP Accumulator (Fixed-Size)
 
