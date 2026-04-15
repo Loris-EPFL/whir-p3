@@ -1,3 +1,12 @@
+# Full benchmark matrix matching compare_bench paths A/B/C/D.
+#
+# Path A (pure_warp):      l=2 non-recursive, ivc_steps steps × 1 circuit
+# Path B (quasar_warp):    l=arity Poseidon2 recursive union, ivc_steps/(arity-1) steps
+# Path C (symphony):       l=2 algebraic recursive + CP-SNARK, ivc_steps steps
+# Path D (quasar_symphony): l=arity algebraic recursive union + CP-SNARK
+#
+# ivc_steps must be divisible by (arity-1) for union paths.
+
 schemes = ["pure_warp", "quasar_warp", "symphony", "quasar_symphony"]
 warmup = 1
 repeats = 5
@@ -5,8 +14,8 @@ output = "output/thesis.jsonl"
 
 [axes]
 log_n = [10, 12, 14]
-arity = [2]
-batch = [1, 4, 8]
-ivc_steps = [2, 4, 8, 16]
+arity = [2, 4]
+batch = [1]
+ivc_steps = [6, 12]
 step_muls = [100]
 seed = 42

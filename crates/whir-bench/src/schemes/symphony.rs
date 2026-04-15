@@ -1,17 +1,21 @@
+//! Path C from compare_bench: Symphony (l=2), recursive algebraic verifier + CP-SNARK.
+//!
+//! Each IVC step builds an algebraic recursive circuit (step computation +
+//! algebraic fold verifier), Spartan-proves it, then WARP-folds at l=2
+//! with CP-SNARK committed transcripts.
+
 use p3_field::PrimeCharacteristicRing;
-use warp::accumulator::FreshInstance;
-use whir_ivc::warp_ivc::{warp_ivc_init_cp, warp_ivc_step_union_cp, WarpIVCConfig, WarpIVCStateCp};
-use whir_spartan::{
-    r1cs::{R1CSInstance, R1CSShape},
-    r1cs_prover::R1CSProver,
+use warp::decider::warp_decide_algebraic_rs;
+use whir_ivc::{
+    step::WorkloadStepCircuit,
+    warp_fold_verifier_algebraic::compute_cp_circuit_size,
+    warp_ivc::{warp_ivc_init_cp, warp_ivc_step_recursive_cp, WarpIVCConfig, WarpIVCStateCp},
 };
+use whir_spartan::r1cs::{R1CSInstance, R1CSShape};
 
 use crate::{
     axes::Axes,
-    fixtures::{
-        make_challenger, make_hc, produce_synthetic_r1cs,
-        EF, F,
-    },
+    fixtures::{make_challenger, make_hc, produce_synthetic_r1cs, EF, F},
     metrics::{Metrics, StaticMetrics},
     scheme::FoldingScheme,
 };
@@ -22,6 +26,7 @@ pub struct Symphony {
     instance: R1CSInstance<F>,
     ivc_config: WarpIVCConfig,
     ivc_steps: usize,
+    step_muls: usize,
 }
 
 impl FoldingScheme for Symphony {
@@ -30,27 +35,27 @@ impl FoldingScheme for Symphony {
 
     fn setup(axes: &Axes) -> Self {
         let (shape, instance, _, _, _, _) = produce_synthetic_r1cs(axes.log_n);
-        let ivc_config = WarpIVCConfig {
-            fold_arity: 2,
-            use_union: true,
-            ..Default::default()
-        };
+        let ivc_config = WarpIVCConfig::default();
         Self {
             shape,
             instance,
             ivc_config,
             ivc_steps: axes.ivc_steps,
+            step_muls: axes.step_muls,
         }
     }
 
     fn prove(&self, m: &mut Metrics) -> Self::Proof {
         let dft = crate::fixtures::make_dft();
         let (mh, mc) = make_hc();
-        let spartan = R1CSProver::new();
         let make_fold_chal = || make_challenger(77);
 
+        let step = WorkloadStepCircuit::new(self.step_muls);
+        let step_input = [F::ZERO];
+        let (target_w, _, _) = compute_cp_circuit_size(&step, &step_input);
+
         m.time("prove_total", || {
-            let mut spartan_ch = make_challenger(1);
+            let mut spartan_ch = make_challenger(300);
             let mut state = warp_ivc_init_cp::<F, EF, _, _, _, _, _>(
                 &self.shape,
                 &self.instance,
@@ -63,30 +68,18 @@ impl FoldingScheme for Symphony {
                 make_fold_chal,
             );
 
-            for step in 0..self.ivc_steps {
-                let mut ch = make_challenger(step as u64 + 10);
-                let _proof = spartan.prove::<EF, _>(&self.instance, &mut ch);
-                let w = spartan.prepare_witness(&self.instance);
-
-                let num_inputs = self.instance.input().len();
-                let z = w.as_slice();
-                let num_witness = (z.len() - num_inputs).next_power_of_two();
-                let pi = z[..num_inputs].to_vec();
-                let mut wpart = z[num_inputs..].to_vec();
-                wpart.resize(num_witness, F::ZERO);
-
-                let fresh = vec![FreshInstance {
-                    public_input: pi,
-                    witness: wpart,
-                }];
-
-                state = warp_ivc_step_union_cp::<F, _, _, _, _>(
+            for s in 0..self.ivc_steps {
+                let mut ch = make_challenger(s as u64 + 310);
+                state = warp_ivc_step_recursive_cp::<F, EF, _, _, _, _, _, _>(
                     &state,
-                    &fresh,
+                    &step,
+                    &step_input,
+                    &mut ch,
                     &self.ivc_config,
                     &dft,
                     mh.clone(),
                     mc.clone(),
+                    Some(target_w),
                     vec![],
                     make_fold_chal,
                 );
@@ -97,16 +90,8 @@ impl FoldingScheme for Symphony {
 
     fn verify(&self, proof: &Self::Proof, m: &mut Metrics) -> anyhow::Result<()> {
         m.time("verify_total", || {
-            whir_cp_snark::cp_snark_terminal_verify_with_merkle(
-                &proof.shape,
-                &proof.accumulator,
-                &proof.committed_transcripts,
-                || make_challenger(77),
-                self.ivc_config.rs_folding_factor,
-                &make_hc().0,
-                &make_hc().1,
-            )
-            .map_err(|e| anyhow::anyhow!("CP-SNARK terminal verify failed: {e:?}"))
+            warp_decide_algebraic_rs(&proof.shape, &proof.accumulator)
+                .map_err(|e| anyhow::anyhow!("decider failed: {e:?}"))
         })
     }
 

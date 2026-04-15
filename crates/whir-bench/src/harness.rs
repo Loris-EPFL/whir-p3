@@ -28,8 +28,20 @@ fn dispatch(
     match name {
         "pure_warp" => run::<schemes::PureWarp>(axes, warmup, repeats, out),
         "quasar_warp" => {
-            if axes.batch <= 1 {
-                skip(out, name, axes, "batch<=1, no batching benefit");
+            if axes.arity < 4 {
+                skip(out, name, axes, "arity<4, union fold needs arity>=4");
+                Ok(())
+            } else if axes.ivc_steps % (axes.arity - 1) != 0 {
+                skip(
+                    out,
+                    name,
+                    axes,
+                    &format!(
+                        "ivc_steps={} not divisible by arity-1={}",
+                        axes.ivc_steps,
+                        axes.arity - 1
+                    ),
+                );
                 Ok(())
             } else {
                 run::<schemes::QuasarWarp>(axes, warmup, repeats, out)
@@ -44,8 +56,20 @@ fn dispatch(
         }
         #[cfg(feature = "symphony")]
         "quasar_symphony" => {
-            if axes.batch <= 1 {
-                skip(out, name, axes, "batch<=1, no batching benefit");
+            if axes.arity < 4 {
+                skip(out, name, axes, "arity<4, union fold needs arity>=4");
+                Ok(())
+            } else if axes.ivc_steps % (axes.arity - 1) != 0 {
+                skip(
+                    out,
+                    name,
+                    axes,
+                    &format!(
+                        "ivc_steps={} not divisible by arity-1={}",
+                        axes.ivc_steps,
+                        axes.arity - 1
+                    ),
+                );
                 Ok(())
             } else {
                 run::<schemes::QuasarSymphony>(axes, warmup, repeats, out)

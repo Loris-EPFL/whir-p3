@@ -1,17 +1,28 @@
+//! Path B from compare_bench: Poseidon2 recursive union fold (l=arity).
+//!
+//! Each IVC step builds a recursive circuit (step computation + Poseidon2
+//! fold verifier), Spartan-proves it, then union-folds at the configured arity.
+
 use p3_field::PrimeCharacteristicRing;
+use p3_koala_bear::GenericPoseidon2LinearLayersKoalaBear;
 use warp::decider::warp_decide_algebraic_rs;
-use whir_ivc::warp_ivc::{warp_ivc_init, warp_ivc_step_batch, WarpIVCConfig};
+use whir_ivc::{
+    step::WorkloadStepCircuit,
+    warp_ivc::{
+        compute_recursive_circuit_size_union, warp_ivc_init_recursive_union,
+        warp_ivc_step_recursive_union, WarpIVCConfig, WarpIVCState,
+    },
+};
+use whir_spartan::r1cs::{R1CSInstance, R1CSShape};
 
 use crate::{
     axes::Axes,
     fixtures::{
-        make_challenger, make_hc, produce_synthetic_r1cs,
-        EF, F,
+        make_challenger, make_hc, make_poseidon2_circuit_config, produce_synthetic_r1cs, EF, F,
     },
     metrics::{Metrics, StaticMetrics},
     scheme::FoldingScheme,
 };
-use whir_spartan::r1cs::{R1CSInstance, R1CSShape};
 
 #[derive(Debug)]
 pub struct QuasarWarp {
@@ -19,33 +30,77 @@ pub struct QuasarWarp {
     instance: R1CSInstance<F>,
     ivc_config: WarpIVCConfig,
     ivc_steps: usize,
-    batch: usize,
+    arity: usize,
+    step_muls: usize,
 }
 
 impl FoldingScheme for QuasarWarp {
     const NAME: &'static str = "quasar_warp";
-    type Proof = whir_ivc::warp_ivc::WarpIVCState<F>;
+    type Proof = WarpIVCState<F>;
 
     fn setup(axes: &Axes) -> Self {
         let (shape, instance, _, _, _, _) = produce_synthetic_r1cs(axes.log_n);
-        let ivc_config = WarpIVCConfig::default();
+        let ivc_config = WarpIVCConfig {
+            fold_arity: axes.arity,
+            use_union: true,
+            ..Default::default()
+        };
         Self {
             shape,
             instance,
             ivc_config,
             ivc_steps: axes.ivc_steps,
-            batch: axes.batch,
+            arity: axes.arity,
+            step_muls: axes.step_muls,
         }
     }
 
     fn prove(&self, m: &mut Metrics) -> Self::Proof {
         let dft = crate::fixtures::make_dft();
         let (mh, mc) = make_hc();
-        let make_fold_chal = || make_challenger(77);
+        let (poseidon_perm, poseidon_config) = make_poseidon2_circuit_config();
+        let make_fold_chal = {
+            let p = poseidon_perm.clone();
+            move || crate::fixtures::MyChallenger::new(p.clone())
+        };
+
+        let step = WorkloadStepCircuit::new(self.step_muls);
+        let step_input = [F::ZERO];
+
+        let log_m = self
+            .shape
+            .num_cons()
+            .next_power_of_two()
+            .trailing_zeros() as usize;
+        let (target_w, _, _) = compute_recursive_circuit_size_union::<
+            F,
+            GenericPoseidon2LinearLayersKoalaBear,
+            _,
+            _,
+        >(
+            &step,
+            &step_input,
+            &poseidon_config,
+            &poseidon_perm,
+            self.shape.num_poly_vars_y(),
+            self.arity,
+            log_m,
+        );
 
         m.time("prove_total", || {
-            let mut spartan_ch = make_challenger(1);
-            let mut state = warp_ivc_init::<F, EF, _, _, _, _, _>(
+            let mut spartan_ch = make_challenger(100);
+            let mut state = warp_ivc_init_recursive_union::<
+                F,
+                EF,
+                _,
+                _,
+                _,
+                _,
+                GenericPoseidon2LinearLayersKoalaBear,
+                _,
+                _,
+                _,
+            >(
                 &self.shape,
                 &self.instance,
                 &mut spartan_ch,
@@ -53,29 +108,49 @@ impl FoldingScheme for QuasarWarp {
                 &dft,
                 mh.clone(),
                 mc.clone(),
+                &poseidon_config,
+                &poseidon_perm,
+                &step,
+                &step_input,
+                self.arity,
                 vec![],
-                make_fold_chal,
+                make_fold_chal.clone(),
             );
 
-            let instances: Vec<_> = (0..self.batch).map(|_| self.instance.clone()).collect();
+            let circuits_per_step = self.arity - 1;
+            let num_ivc_steps = self.ivc_steps / circuits_per_step;
 
-            for step in 0..self.ivc_steps {
-                let mut challengers: Vec<_> = (0..self.batch)
-                    .map(|j| make_challenger(step as u64 * 100 + j as u64 + 200))
+            for s in 0..num_ivc_steps {
+                let step_inputs: Vec<Vec<F>> = (0..circuits_per_step)
+                    .map(|i| vec![F::from_u64(s as u64 * 10 + i as u64)])
                     .collect();
-                let mut cb_ch = make_challenger(step as u64 + 300);
-                state = warp_ivc_step_batch::<F, EF, _, _, _, _, _>(
+                let mut ch = make_challenger(s as u64 + 200);
+                state = warp_ivc_step_recursive_union::<
+                    F,
+                    EF,
+                    _,
+                    _,
+                    _,
+                    _,
+                    GenericPoseidon2LinearLayersKoalaBear,
+                    _,
+                    _,
+                    _,
+                >(
                     &state,
-                    &instances,
-                    &mut challengers,
-                    EF::from_u64(3),
+                    &step,
+                    &step_inputs,
+                    self.arity,
+                    &mut ch,
                     &self.ivc_config,
                     &dft,
                     mh.clone(),
                     mc.clone(),
-                    &mut cb_ch,
+                    &poseidon_config,
+                    &poseidon_perm,
+                    Some(target_w),
                     vec![],
-                    make_fold_chal,
+                    make_fold_chal.clone(),
                 );
             }
             state
@@ -105,9 +180,9 @@ mod tests {
     fn quasar_warp_prove_verify() {
         let axes = Axes {
             log_n: 10,
-            arity: 2,
-            batch: 4,
-            ivc_steps: 2,
+            arity: 4,
+            batch: 1,
+            ivc_steps: 6,
             step_muls: 100,
             seed: 42,
         };

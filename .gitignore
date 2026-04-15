@@ -23,7 +23,7 @@ Cargo.lock
 # Added by cargo
 
 /target
-/output/benchmarks/*
+/output/
 
 # Proptest data
 proptest-regressions/

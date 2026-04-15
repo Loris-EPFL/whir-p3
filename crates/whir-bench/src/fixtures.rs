@@ -4,8 +4,11 @@ use p3_challenger::DuplexChallenger;
 use p3_dft::Radix2DFTSmallBatch;
 use p3_field::{extension::BinomialExtensionField, PrimeCharacteristicRing};
 use p3_koala_bear::{KoalaBear, Poseidon2KoalaBear};
+use p3_poseidon2::poseidon2_round_numbers_128;
 use p3_symmetric::{PaddingFreeSponge, TruncatedPermutation};
 use rand::{rngs::SmallRng, SeedableRng};
+
+use whir_circuit::poseidon2::Poseidon2CircuitConfig;
 
 use accumulation::linearized::linearized_statement_from_spartan_proof;
 use warp::{
@@ -176,6 +179,22 @@ pub fn produce_synthetic_r1cs(
         .next_power_of_two()
         .trailing_zeros() as usize;
     (shape, instance, num_witness, num_inputs, log_code, log_m)
+}
+
+/// Build the Poseidon2 permutation and circuit config used by recursive IVC paths.
+pub fn make_poseidon2_circuit_config() -> (Perm, Poseidon2CircuitConfig<F, 16>) {
+    const SBOX_DEGREE: u64 = 3; // KoalaBear
+    let seed = 99u64;
+    let perm = Perm::new_from_rng_128(&mut SmallRng::seed_from_u64(seed));
+    let (rf, rp) = poseidon2_round_numbers_128::<F>(16, SBOX_DEGREE)
+        .expect("unsupported Poseidon2 parameters");
+    let config = Poseidon2CircuitConfig::<F, 16>::from_rng(
+        rf,
+        rp,
+        SBOX_DEGREE,
+        &mut SmallRng::seed_from_u64(seed),
+    );
+    (perm, config)
 }
 
 #[cfg(test)]
