@@ -59,11 +59,12 @@ Arguments:
 
 All paths start from Spartan-linearized witnesses. Spartan time is reported separately. Comparison columns show speedup ratios (>1 = faster than baseline).
 
-#### Legacy benchmarks
+#### Specialized benchmarks
 ```bash
-cargo run --release --bin warp_bench -- "14" "4,8,16" 3 8     # 4-way with recursive IVC
-cargo run --release --bin pipeline_bench -- "10,12" "4,8" 3 1  # eval-fold pipeline
-cargo run --release --features cli --bin accumulation_bench -- --sizes 12,14 --claims 2,4,8 --repeats 10
+cargo run --release --features symphony --bin cp_snark_bench -- "12,14" "4,8,16" 3  # Symphony vs regular IVC
+cargo run --release --bin arity_bench -- "12,14" "8,16,32,64" 3                     # fold cost by arity
+cargo run --release --bin step_size_bench                                            # per-phase cost breakdown
+cargo run --release --bin spartan_spark_bench                                        # Spartan R1CS shape analysis
 ```
 
 #### Circuit size measurement
