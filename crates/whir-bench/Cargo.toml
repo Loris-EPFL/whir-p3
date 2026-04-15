@@ -1,0 +1,49 @@
+[package]
+name = "whir-bench"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+whir-core = { path = "../whir-core", default-features = false }
+whir-pcs = { path = "../whir-pcs", default-features = false }
+whir-spartan = { path = "../whir-spartan", default-features = false }
+accumulation = { path = "../accumulation", default-features = false }
+warp = { path = "../warp", default-features = false }
+quasar = { path = "../quasar", default-features = false }
+whir-circuit = { path = "../whir-circuit", default-features = false }
+whir-ivc = { path = "../whir-ivc", default-features = false }
+whir-cp-snark = { path = "../whir-cp-snark", default-features = false, optional = true }
+
+p3-field.workspace = true
+p3-koala-bear.workspace = true
+p3-symmetric.workspace = true
+p3-dft.workspace = true
+p3-challenger.workspace = true
+p3-poseidon2.workspace = true
+p3-merkle-tree.workspace = true
+
+serde.workspace = true
+serde_json.workspace = true
+rand.workspace = true
+
+toml = "0.8"
+clap = { workspace = true }
+anyhow = "1"
+
+[features]
+default = ["parallel"]
+parallel = [
+    "whir-core/parallel",
+    "whir-pcs/parallel",
+    "whir-spartan/parallel",
+    "accumulation/parallel",
+    "warp/parallel",
+    "quasar/parallel",
+    "whir-circuit/parallel",
+    "whir-ivc/parallel",
+]
+symphony = ["dep:whir-cp-snark", "whir-ivc/symphony"]
