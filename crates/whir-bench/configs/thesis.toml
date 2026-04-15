@@ -1,0 +1,12 @@
+schemes = ["pure_warp", "quasar_warp", "symphony", "quasar_symphony"]
+warmup = 1
+repeats = 5
+output = "output/thesis.jsonl"
+
+[axes]
+log_n = [10, 12, 14]
+arity = [2]
+batch = [1, 4, 8]
+ivc_steps = [2, 4, 8, 16]
+step_muls = [100]
+seed = 42

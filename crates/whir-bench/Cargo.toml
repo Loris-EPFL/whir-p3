@@ -47,3 +47,7 @@ parallel = [
     "whir-ivc/parallel",
 ]
 symphony = ["dep:whir-cp-snark", "whir-ivc/symphony"]
+
+[[bin]]
+name = "bench"
+path = "src/bin/bench.rs"

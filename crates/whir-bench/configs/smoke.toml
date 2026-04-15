@@ -1,0 +1,12 @@
+schemes = ["pure_warp", "quasar_warp"]
+warmup = 0
+repeats = 1
+output = "output/smoke.jsonl"
+
+[axes]
+log_n = [10]
+arity = [2]
+batch = [4]
+ivc_steps = [2]
+step_muls = [100]
+seed = 42
