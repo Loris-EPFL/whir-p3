@@ -35,3 +35,9 @@ profile.json
 
 *.csv
 *.pdf
+
+# Python venvs
+.venv/
+
+# Bench output
+crates/whir-bench/output/
