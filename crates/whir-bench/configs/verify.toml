@@ -1,0 +1,19 @@
+# Verification config: matches compare_bench Table 2 parameters.
+# total_circuits=12, step_muls=100
+# Path A (pure_warp, arity=2): 12 IVC steps × 1 circuit = 12 circuits
+# Path B (quasar_warp, arity=4): 4 IVC steps × 3 circuits = 12 circuits
+# Path C (symphony, arity=2): 12 IVC steps × 1 circuit = 12 circuits
+# Path D (quasar_symphony, arity=4): 4 IVC steps × 3 circuits = 12 circuits
+
+schemes = ["pure_warp", "quasar_warp", "symphony", "quasar_symphony"]
+warmup = 1
+repeats = 3
+output = "output/verify.jsonl"
+
+[axes]
+log_n = [10, 12]
+arity = [2, 4]
+batch = [1]
+ivc_steps = [12]
+step_muls = [100]
+seed = 42

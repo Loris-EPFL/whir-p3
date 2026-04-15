@@ -78,19 +78,6 @@ path = "src/bin/main.rs"
 required-features = ["cli"]
 
 [[bin]]
-name = "accumulation_report"
-path = "src/bin/accumulation_report.rs"
-
-[[bin]]
-name = "cp_snark_bench"
-path = "src/bin/cp_snark_bench.rs"
-required-features = ["symphony"]
-
-[[bin]]
-name = "arity_bench"
-path = "src/bin/arity_bench.rs"
-
-[[bin]]
 name = "profile_spartan"
 path = "src/bin/profile_spartan.rs"
 

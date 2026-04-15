@@ -60,39 +60,67 @@ All paths start from Spartan-linearized witnesses (same cost, excluded from comp
 
 ## Running Benchmarks
 
-### Fair 4-way comparison (recommended)
+All IVC benchmarks are driven by the `whir-bench` crate via TOML config files.
+
+### Quick smoke test
 
 ```bash
-cargo run --release --bin compare_bench -- <log_sizes> <num_steps> <repeats> <batch>
+cd crates/whir-bench
+cargo run --release -p whir-bench --features whir-bench/symphony --bin bench -- configs/smoke.toml
 ```
 
-Arguments:
-- `log_sizes`: comma-separated log2 of constraint count (e.g., `"14"` = 2^14 constraints)
-- `num_steps`: comma-separated step counts (total instances = steps x batch)
-- `repeats`: repetitions for median timing
-- `batch`: instances per step (1 = no batch reduction, 8 = reduce 8 to 1 before fold)
-
-Examples:
+### Full benchmark (4-way recursive IVC comparison)
 
 ```bash
-# Quick test
-cargo run --release --bin compare_bench -- "10,12" "4,8" 3 1
-
-# Show batch reduction benefit (batch=8)
-cargo run --release --bin compare_bench -- "12,14" "4,8,16" 3 8
-
-# Large scale
-cargo run --release --bin compare_bench -- "14,15,16" "4,8,16,32" 5 8
+cd crates/whir-bench
+cargo run --release -p whir-bench --features whir-bench/symphony --bin bench -- configs/thesis.toml
 ```
 
-Output columns:
-- `spartan`: Spartan linearization time (common to all paths, for reference only)
-- `independent`: N separate WHIR proofs (baseline)
-- `direct_fold`: batch-arity WARP fold per step + 1 terminal WHIR
-- `batch+fold`: batch reduce to 1 + fold(l=2) per step + 1 terminal WHIR
-- `fold/ind`: speedup of direct fold over independent WHIR
-- `batch/ind`: speedup of batch+fold over independent WHIR
-- `batch/fold`: speedup of batch reduction over direct fold (>1 = batch reduction helps)
+This runs 4 schemes that correspond to the recursive IVC paths:
+
+| Scheme | Pipeline | Fold arity |
+|--------|----------|------------|
+| `pure_warp` | `warp_ivc_init` + `warp_ivc_step` — non-recursive WARP fold | l=2 |
+| `quasar_warp` | `warp_ivc_init_recursive_union` + `warp_ivc_step_recursive_union` — Poseidon2 recursive circuit + union fold | l=arity |
+| `symphony` | `warp_ivc_init_cp` + `warp_ivc_step_recursive_cp` — algebraic recursive circuit + CP-SNARK transcripts | l=2 |
+| `quasar_symphony` | `warp_ivc_init_recursive_union_cp` + `warp_ivc_step_recursive_union_cp` — algebraic recursive circuit + union fold + CP-SNARK | l=arity |
+
+Symphony schemes require `--features whir-bench/symphony`. Without it they are skipped.
+
+### TOML config reference
+
+```toml
+schemes = ["pure_warp", "quasar_warp", "symphony", "quasar_symphony"]
+warmup = 1
+repeats = 5
+output = "output/results.jsonl"
+
+[axes]
+log_n = [10, 12, 14]      # log2(constraints) for synthetic R1CS
+arity = [2, 4]             # fold arity (union paths need >=4)
+batch = [1]                # unused by current schemes (reserved)
+ivc_steps = [6, 12]        # total circuits to prove (must be divisible by arity-1 for union paths)
+step_muls = [100]          # multiplications in the WorkloadStepCircuit
+seed = 42
+```
+
+The harness iterates the cartesian product of all axes, runs each scheme for `warmup + repeats` iterations, and emits one JSONL row per (scheme, axes, run) triple.
+
+### Plotting results
+
+```bash
+# Setup (once)
+python3 -m venv .venv && .venv/bin/pip install matplotlib pandas numpy
+
+# Aggregate table
+.venv/bin/python crates/whir-bench/scripts/plot.py crates/whir-bench/output/thesis.jsonl --aggregate
+
+# PDF plots
+.venv/bin/python crates/whir-bench/scripts/plot.py crates/whir-bench/output/thesis.jsonl \
+  --figure time_vs_steps --out thesis_steps.pdf
+```
+
+Available `--figure` types: `time_vs_log_n`, `verifier_vs_arity`, `batch_speedup`, `time_vs_steps`.
 
 ### Circuit size measurement
 
@@ -101,95 +129,12 @@ cargo test -p whir-ivc --features bench-timing \
   warp_ivc::tests::measure_recursive_circuit_size -- --nocapture
 ```
 
-Shows the recursive IVC circuit breakdown: step circuit vs WARP fold verifier (Poseidon2 Fiat-Shamir + sumcheck verification). Current circuit: 5,293 constraints, dominated by Poseidon2 hashing.
-
-### CP-SNARK + Quasar comparison (4-way apples-to-apples)
-
-Compares recursive IVC variants with Symphony deferred hashing and Quasar union commitment:
-
-```bash
-cargo run --release --features symphony --bin cp_snark_bench -- <log_sizes> <num_steps> <repeats> <step_muls> <arity>
-```
-
-Arguments:
-- `log_sizes`: comma-separated log2 of synthetic R1CS constraint count
-- `num_steps`: comma-separated total instance counts (benchmark amortizes over these)
-- `repeats`: repetitions for median timing
-- `step_muls`: multiplication gates in the recursive step circuit (application workload)
-- `arity`: union fold arity (ℓ, power of 2)
-
-Produces three tables:
-- **Table 1**: Per-step breakdown for l=2 paths (Regular IVC vs CP-SNARK)
-- **Table 2**: Apples-to-apples 4-way IVC prover comparison
-  - `reg_tot`: Regular IVC, l=2, Poseidon2 in-circuit (baseline)
-  - `cp_tot`: CP-SNARK IVC, l=2, Symphony deferred hashing
-  - `pu_tot`: Poseidon2 Union IVC, l=arity, no Symphony (pure WARP + Quasar)
-  - `ru_tot`: Symphony Recursive Union IVC, l=arity, deferred hashing
-- **Table 3**: Standalone verifier benchmark — Quasar's sublinear O(1) vs O(ℓ) claim
-
-Examples:
-
-```bash
-# Aggregation sweet spot (small step circuit → CP-SNARK/Union shine)
-cargo run --release --features symphony --bin cp_snark_bench -- "10,12" "32,64,128" 3 100 4
-
-# Realistic rollup-scale workload
-cargo run --release --features symphony --bin cp_snark_bench -- "16,18" "8,16,32,64" 3 5000 4
-
-# High-load zkVM-like (large step circuit)
-cargo run --release --features symphony --bin cp_snark_bench -- "18,20" "8,16,32" 3 50000 4
-
-# Higher arity to stress Quasar's sublinear verifier benefit
-cargo run --release --features symphony --bin cp_snark_bench -- "12" "64,128,256" 3 500 8
-```
-
-### Verifier scaling (Quasar sublinear claim)
-
-Table 3 at the end of `cp_snark_bench` directly demonstrates Quasar's O(log ℓ) verifier cost vs O(ℓ) for the standard WARP verifier:
-
-```bash
-# Any cp_snark_bench invocation ends with Table 3 showing arity scaling from ℓ=2 to 64
-cargo run --release --features symphony --bin cp_snark_bench -- "10" "8" 1 100 4
-```
-
-Sample output (log_code=16, 1000 iterations per measurement):
-
-```
- arity |   nonunion_us      union_us |     nu/un | saved_absorb
-----------------------------------------------------------------------
-     2 |       6.09 us       4.68 us |    1.30x |           18
-     4 |      10.44 us       4.88 us |    2.14x |           70
-     8 |      18.62 us       5.37 us |    3.47x |          174
-    16 |      35.33 us       6.00 us |    5.89x |          382
-    32 |      69.11 us       6.86 us |   10.07x |          798
-    64 |     136.12 us       7.38 us |   18.44x |         1630
-```
-
-Non-union verifier time doubles as ℓ doubles (O(ℓ)). Union verifier time grows only with log₂ℓ (O(log ℓ)). At ℓ=64, the union verifier is **18x faster**.
-
-### Arity micro-benchmark (prover-side fold costs at varying arity)
-
-```bash
-cargo run --release --bin arity_bench -- <log_sizes> <num_instances> <repeats>
-```
-
-Compares WARP fold prover costs across arities ℓ ∈ {2, 4, 8, 16} at varying synthetic R1CS sizes.
-
-### Step-size sweep (per-phase IVC cost breakdown)
-
-```bash
-cargo run --release --bin step_size_bench -- <num_ivc_steps> <repeats>
-```
-
-Sweeps step circuit sizes and reports where time is spent: circuit build, Spartan prove, RS encode, Merkle commit, WARP fold.
-
 ### Spartan / SPARK micro-benchmarks
 
 ```bash
 cargo run --release --bin profile_spartan
 cargo run --release --bin spartan_spark_bench
-cargo run --release --bin spartan_spark_report   # post-process spark bench output
-cargo run --release --bin accumulation_report    # post-process criterion accumulation runs
+cargo run --release --bin spartan_spark_report
 ```
 
 ### Criterion benches
@@ -248,7 +193,8 @@ The codebase is a Cargo workspace (`crates/*`). All library crates are `#![no_st
 - `whir-ivc/src/warp_ivc.rs` — WARP IVC driver
 - `whir-ivc/src/warp_fold_verifier_circuit.rs` — in-circuit fold verifier (Poseidon2 + sumcheck)
 - `whir-ivc/src/unified.rs` — unified IVC entry point
-- `whir-p3/src/bin/` — `compare_bench`, `cp_snark_bench`, `arity_bench`, `step_size_bench`, `profile_spartan`, `spartan_spark_bench`, `spartan_spark_report`, `accumulation_report`, `main`
+- `whir-p3/src/bin/` — `profile_spartan`, `spartan_spark_bench`, `spartan_spark_report`, `main`
+- `whir-bench/` — unified benchmark crate: `bench` binary, TOML configs, plot script
 
 ### Feature Flags
 
