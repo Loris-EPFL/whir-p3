@@ -16,6 +16,6 @@ output = "output/thesis.jsonl"
 log_n = [10, 12, 14]
 arity = [2, 4]
 batch = [1]
-ivc_steps = [6, 12]
+ivc_steps = [12, 24, 48]
 step_muls = [100]
 seed = 42
