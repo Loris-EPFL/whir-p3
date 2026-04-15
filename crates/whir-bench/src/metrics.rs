@@ -57,7 +57,10 @@ mod tests {
     #[test]
     fn time_records_something() {
         let mut m = Metrics::new();
-        let v = m.time("test_phase", || 42);
+        let v = m.time("test_phase", || {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+            42
+        });
         assert_eq!(v, 42);
         assert!(m.phases.contains_key("test_phase"));
         assert!(m.phases["test_phase"] > 0);
