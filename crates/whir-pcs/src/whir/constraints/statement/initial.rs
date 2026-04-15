@@ -296,12 +296,12 @@ impl<F: Field, EF: ExtensionField<F>> InitialStatementInner<F, EF> {
 
 #[cfg(test)]
 mod tests {
-    use p3_baby_bear::BabyBear;
+    use p3_koala_bear::KoalaBear;
     use p3_field::{extension::BinomialExtensionField, PrimeCharacteristicRing};
 
     use super::*;
 
-    type F = BabyBear;
+    type F = KoalaBear;
     type EF = BinomialExtensionField<F, 4>;
 
     /// Creates a simple test polynomial with known evaluations.

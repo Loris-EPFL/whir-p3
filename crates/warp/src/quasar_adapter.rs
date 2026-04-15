@@ -116,10 +116,10 @@ mod tests {
         poly::{evals::EvaluationsList, multilinear::MultilinearPoint},
         spartan::r1cs::{R1CSShape, SparseMatEntry},
     };
-    use p3_baby_bear::BabyBear;
+    use p3_koala_bear::KoalaBear;
     use p3_field::PrimeCharacteristicRing;
 
-    type F = BabyBear;
+    type F = KoalaBear;
 
     fn make_square_shape() -> R1CSShape<F> {
         R1CSShape::new(

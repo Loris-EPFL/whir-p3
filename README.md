@@ -6,7 +6,7 @@ Built on top of [whir](https://github.com/WizardOfMenlo/whir/) and the [Plonky3]
 
 ## Overview
 
-This codebase implements a complete IVC (Incrementally Verifiable Computation) pipeline over BabyBear (31-bit prime field):
+This codebase implements a complete IVC (Incrementally Verifiable Computation) pipeline over KoalaBear (31-bit prime field):
 
 ```
 N R1CS instances
@@ -170,7 +170,7 @@ The codebase is a Cargo workspace (`crates/*`). All library crates are `#![no_st
 | Crate | Role |
 |-------|------|
 | **`whir-core`** | Foundation: `parameters/`, `fiat_shamir/`, `poly/`, constants, utilities |
-| **`whir-circuit`** | R1CS circuit builder, Poseidon2, duplex sponge, BabyBear⁴ extension-field arithmetic, bit gadgets |
+| **`whir-circuit`** | R1CS circuit builder, Poseidon2, duplex sponge, KoalaBear⁴ extension-field arithmetic, bit gadgets |
 | **`whir-pcs`** | WHIR polynomial commitment scheme + sumcheck (Svo + Classic strategies) |
 | **`whir-spartan`** | Spartan R1CS prover (SPARK compiler, table-based O(n) per sumcheck round) |
 | **`warp`** | WARP fold: RS encoding, Merkle commit, twin-constraint sumcheck, shift/OOD queries, eval batch, accumulator types, terminal WHIR decider |

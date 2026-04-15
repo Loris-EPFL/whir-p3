@@ -498,7 +498,7 @@ where
 mod tests {
     use alloc::vec;
 
-    use p3_baby_bear::{BabyBear, Poseidon2BabyBear};
+    use p3_koala_bear::{KoalaBear, Poseidon2KoalaBear};
     use p3_challenger::DuplexChallenger;
     use p3_dft::Radix2DFTSmallBatch;
     use p3_field::{extension::BinomialExtensionField, PrimeCharacteristicRing};
@@ -513,9 +513,9 @@ mod tests {
         spartan::r1cs::SparseMatEntry,
     };
 
-    type F = BabyBear;
+    type F = KoalaBear;
     type EF = BinomialExtensionField<F, 4>;
-    type Perm = Poseidon2BabyBear<16>;
+    type Perm = Poseidon2KoalaBear<16>;
     type MyHash = PaddingFreeSponge<Perm, 16, 8, 8>;
     type MyCompress = TruncatedPermutation<Perm, 2, 8, 16>;
     type MyChallenger = DuplexChallenger<F, Perm, 16, 8>;
@@ -710,7 +710,7 @@ mod tests {
     #[test]
     #[ignore] // Slow: involves multiple Spartan proofs of ~16K constraint circuits
     fn ivc_recursive_step() {
-        use p3_baby_bear::GenericPoseidon2LinearLayersBabyBear;
+        use p3_koala_bear::GenericPoseidon2LinearLayersKoalaBear;
 
         let config = make_whir_config();
         let dft = Radix2DFTSmallBatch::<F>::default();
@@ -741,7 +741,7 @@ mod tests {
         let acc_perm = Perm::new_from_rng_128(&mut SmallRng::seed_from_u64(99));
         let poseidon_perm = Perm::new_from_rng_128(&mut SmallRng::seed_from_u64(99));
         let poseidon_config = crate::circuit::poseidon2::Poseidon2CircuitConfig::<F, 16>::from_rng(
-            8, 13, 7, &mut SmallRng::seed_from_u64(99),
+            8, 20, 3, &mut SmallRng::seed_from_u64(99),
         );
         let step = crate::ivc::step::TrivialStepCircuit::new(1);
 
@@ -763,13 +763,13 @@ mod tests {
             let poseidon_perm_probe = Perm::new_from_rng_128(&mut SmallRng::seed_from_u64(99));
             let poseidon_config_probe =
                 crate::circuit::poseidon2::Poseidon2CircuitConfig::<F, 16>::from_rng(
-                    8, 13, 7, &mut SmallRng::seed_from_u64(99),
+                    8, 20, 3, &mut SmallRng::seed_from_u64(99),
                 );
             let mut probe_builder = CircuitBuilder::<F>::new();
             let mut probe_challenger = CircuitChallenger::<F, 16, 8>::new(&mut probe_builder);
             let _ = synthesize_unified_ivc_circuit::<
                 F,
-                GenericPoseidon2LinearLayersBabyBear,
+                GenericPoseidon2LinearLayersKoalaBear,
                 _,
                 _,
                 16,
@@ -782,7 +782,7 @@ mod tests {
                 &step,
                 &[F::ZERO],
                 Some(&dummy_witness),
-                F::from_u64(11),
+                F::from_u64(3),
                 None,
             );
             probe_builder.num_witness_vars()
@@ -797,7 +797,7 @@ mod tests {
                 F,
                 <F as Field>::Packing,
                 Radix2DFTSmallBatch<F>,
-                GenericPoseidon2LinearLayersBabyBear,
+                GenericPoseidon2LinearLayersKoalaBear,
                 _,
                 _,
                 8,
@@ -807,7 +807,7 @@ mod tests {
                 &mut chal0,
                 &poseidon_config,
                 &poseidon_perm,
-                F::from_u64(11),
+                F::from_u64(3),
                 Some(target_witness),
                 vec![F::from_u64(9)],
             );
@@ -822,7 +822,7 @@ mod tests {
         let mut chal1_circuit = CircuitChallenger::<F, 16, 8>::new(&mut builder1);
         let _ = synthesize_unified_ivc_circuit::<
             F,
-            GenericPoseidon2LinearLayersBabyBear,
+            GenericPoseidon2LinearLayersKoalaBear,
             _,
             _,
             16,
@@ -835,7 +835,7 @@ mod tests {
             &step,
             &[F::from_u64(25)],
             None,
-            F::from_u64(11),
+            F::from_u64(3),
             Some(target_witness),
         );
         let (shape1, instance1) = builder1.build();
@@ -871,7 +871,7 @@ mod tests {
                 F,
                 <F as Field>::Packing,
                 _,
-                GenericPoseidon2LinearLayersBabyBear,
+                GenericPoseidon2LinearLayersKoalaBear,
                 _,
                 _,
                 8,
@@ -885,7 +885,7 @@ mod tests {
                 vec![F::from_u64(49)],
                 &poseidon_config,
                 &poseidon_perm,
-                F::from_u64(11),
+                F::from_u64(3),
                 &recursive_config,
             )
             .unwrap();
@@ -918,11 +918,11 @@ mod tests {
     /// the same num_poly_vars, enabling a single WHIR config.
     #[test]
     fn unified_circuit_sizing_matches() {
-        use p3_baby_bear::GenericPoseidon2LinearLayersBabyBear;
+        use p3_koala_bear::GenericPoseidon2LinearLayersKoalaBear;
 
         let poseidon_perm = Perm::new_from_rng_128(&mut SmallRng::seed_from_u64(99));
         let poseidon_config = crate::circuit::poseidon2::Poseidon2CircuitConfig::<F, 16>::from_rng(
-            8, 13, 7, &mut SmallRng::seed_from_u64(99),
+            8, 20, 3, &mut SmallRng::seed_from_u64(99),
         );
         let step = crate::ivc::step::TrivialStepCircuit::new(1);
 
@@ -942,10 +942,10 @@ mod tests {
         let mut builder_with = CircuitBuilder::<F>::new();
         let mut chal_with = CircuitChallenger::<F, 16, 8>::new(&mut builder_with);
         let _ = synthesize_unified_ivc_circuit::<
-            F, GenericPoseidon2LinearLayersBabyBear, _, _, 16, 8,
+            F, GenericPoseidon2LinearLayersKoalaBear, _, _, 16, 8,
         >(
             &mut builder_with, &mut chal_with, &poseidon_config, &poseidon_perm,
-            &step, &[F::ZERO], Some(&dummy_witness), F::from_u64(11), None,
+            &step, &[F::ZERO], Some(&dummy_witness), F::from_u64(3), None,
         );
         let target = builder_with.num_witness_vars();
 
@@ -953,10 +953,10 @@ mod tests {
         let mut builder_without = CircuitBuilder::<F>::new();
         let mut chal_without = CircuitChallenger::<F, 16, 8>::new(&mut builder_without);
         let _ = synthesize_unified_ivc_circuit::<
-            F, GenericPoseidon2LinearLayersBabyBear, _, _, 16, 8,
+            F, GenericPoseidon2LinearLayersKoalaBear, _, _, 16, 8,
         >(
             &mut builder_without, &mut chal_without, &poseidon_config, &poseidon_perm,
-            &step, &[F::ZERO], None, F::from_u64(11), Some(target),
+            &step, &[F::ZERO], None, F::from_u64(3), Some(target),
         );
 
         let (shape_with, _) = builder_with.build();

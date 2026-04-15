@@ -1,7 +1,7 @@
 use core::hint::black_box;
 
 use criterion::{Criterion, criterion_group, criterion_main};
-use p3_baby_bear::{BabyBear, Poseidon2BabyBear};
+use p3_koala_bear::{KoalaBear, Poseidon2KoalaBear};
 use p3_challenger::DuplexChallenger;
 use p3_field::extension::BinomialExtensionField;
 use rand::{SeedableRng, rngs::SmallRng};
@@ -9,9 +9,9 @@ use whir_p3::{
     fiat_shamir::domain_separator::DomainSeparator, whir::utils::get_challenge_stir_queries,
 };
 
-type F = BabyBear;
+type F = KoalaBear;
 type EF = BinomialExtensionField<F, 4>;
-type Perm = Poseidon2BabyBear<16>;
+type Perm = Poseidon2KoalaBear<16>;
 type MyChallenger = DuplexChallenger<F, Perm, 16, 8>;
 
 fn setup_challenger() -> MyChallenger {

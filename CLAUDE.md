@@ -116,7 +116,7 @@ N R1CS instances
   - `builder.rs` -- CircuitBuilder with witness/public input allocation and R1CS constraint generation.
   - `poseidon2.rs` -- Poseidon2 permutation as R1CS constraints.
   - `sponge.rs` -- Duplex sponge challenger as R1CS constraints.
-  - `ext_field.rs` -- BabyBear^4 extension field arithmetic as R1CS constraints.
+  - `ext_field.rs` -- KoalaBear^4 extension field arithmetic as R1CS constraints.
   - `bits.rs` -- Bit decomposition gadgets.
 - **`poly/`** -- Polynomial representations: `evals.rs` (evaluation-domain representation), `multilinear.rs` (`MultilinearPoint`).
 - **`fiat_shamir/`** -- Fiat-Shamir transcript via `DomainSeparator` pattern.
@@ -125,7 +125,7 @@ N R1CS instances
 ### Key Type Parameters
 
 The codebase is heavily generic. A typical WHIR instantiation requires:
-- `F` -- base field (e.g., `BabyBear`, `KoalaBear`)
+- `F` -- base field (e.g., `KoalaBear`, `KoalaBear`)
 - `EF` -- extension field (e.g., `BinomialExtensionField<F, 4>`)
 - Hash/Compress types for Merkle trees (Poseidon2-based or Keccak-based)
 - Challenger type for Fiat-Shamir

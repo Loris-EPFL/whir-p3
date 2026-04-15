@@ -37,7 +37,7 @@ rust-version = "1.93"
 [workspace.dependencies]
 # Single pin for every p3-* crate (currently rev "c38eb05")
 p3-field = { git = "https://github.com/Plonky3/Plonky3.git", rev = "c38eb05" }
-# ... p3-dft, p3-baby-bear, p3-koala-bear, p3-mersenne-31, p3-goldilocks,
+# ... p3-dft, p3-koala-bear, p3-koala-bear, p3-mersenne-31, p3-goldilocks,
 #     p3-merkle-tree, p3-symmetric, p3-matrix, p3-commit, p3-util,
 #     p3-maybe-rayon, p3-interpolation, p3-challenger, p3-multilinear-util,
 #     p3-keccak, p3-poseidon2, p3-mds

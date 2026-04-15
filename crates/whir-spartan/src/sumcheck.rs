@@ -396,14 +396,14 @@ impl<F: Field> R1CSSumcheck<F> {
 mod tests {
     use super::*;
     use alloc::vec;
-    use p3_baby_bear::BabyBear;
+    use p3_koala_bear::KoalaBear;
     use p3_challenger::DuplexChallenger;
     use p3_field::PrimeCharacteristicRing;
     use rand::SeedableRng;
 
     #[test]
     fn test_sumcheck_basic() {
-        type F = BabyBear;
+        type F = KoalaBear;
 
         // Simple polynomial: p(x, y) = x * y
         // Evaluations: p(0,0)=0, p(0,1)=0, p(1,0)=0, p(1,1)=1
@@ -426,8 +426,8 @@ mod tests {
         assert_eq!(prover.evals.len(), 2);
     }
 
-    type F = BabyBear;
-    type Perm = p3_baby_bear::Poseidon2BabyBear<16>;
+    type F = KoalaBear;
+    type Perm = p3_koala_bear::Poseidon2KoalaBear<16>;
     type Challenger = DuplexChallenger<F, Perm, 16, 8>;
 
     fn run_sumcheck(evals: Vec<F>, degree: usize) -> SumcheckProof<F> {

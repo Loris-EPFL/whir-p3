@@ -736,10 +736,10 @@ where
 mod tests {
     use alloc::vec;
     use super::*;
-    use p3_baby_bear::BabyBear;
+    use p3_koala_bear::KoalaBear;
     use p3_field::PrimeCharacteristicRing;
 
-    type F = BabyBear;
+    type F = KoalaBear;
 
     fn make_eval_acc(values: &[u64], alpha: &[u64]) -> EvalAccumulator<F, 8> {
         let codeword: Vec<F> = values.iter().map(|&v| F::from_u64(v)).collect();

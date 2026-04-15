@@ -324,11 +324,11 @@ mod tests {
     use alloc::vec;
 
     use super::*;
-    use p3_baby_bear::BabyBear;
+    use p3_koala_bear::KoalaBear;
     use p3_dft::Radix2DFTSmallBatch;
     use p3_field::PrimeCharacteristicRing;
 
-    type F = BabyBear;
+    type F = KoalaBear;
 
     #[test]
     fn rs_encode_produces_correct_size() {
@@ -532,11 +532,11 @@ mod tests {
 
     #[test]
     fn merkle_commit_produces_nonzero_root() {
-        use p3_baby_bear::Poseidon2BabyBear;
+        use p3_koala_bear::Poseidon2KoalaBear;
         use p3_symmetric::{PaddingFreeSponge, TruncatedPermutation};
         use rand::SeedableRng;
 
-        type Perm = Poseidon2BabyBear<16>;
+        type Perm = Poseidon2KoalaBear<16>;
         type MyHash = PaddingFreeSponge<Perm, 16, 8, 8>;
         type MyCompress = TruncatedPermutation<Perm, 2, 8, 16>;
         const DIGEST: usize = 8;
@@ -628,11 +628,11 @@ mod tests {
 
     #[test]
     fn union_merkle_commit_deterministic() {
-        use p3_baby_bear::Poseidon2BabyBear;
+        use p3_koala_bear::Poseidon2KoalaBear;
         use p3_symmetric::{PaddingFreeSponge, TruncatedPermutation};
         use rand::{rngs::SmallRng, SeedableRng};
 
-        type Perm = Poseidon2BabyBear<16>;
+        type Perm = Poseidon2KoalaBear<16>;
         type MyHash = PaddingFreeSponge<Perm, 16, 8, 8>;
         type MyCompress = TruncatedPermutation<Perm, 2, 8, 16>;
         const DIGEST: usize = 8;

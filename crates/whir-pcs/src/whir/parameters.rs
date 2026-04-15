@@ -482,17 +482,17 @@ where
 mod tests {
     use alloc::vec;
 
-    use p3_baby_bear::{BabyBear, Poseidon2BabyBear};
+    use p3_koala_bear::{KoalaBear, Poseidon2KoalaBear};
     use p3_challenger::DuplexChallenger;
     use p3_field::PrimeCharacteristicRing;
     use p3_symmetric::{PaddingFreeSponge, TruncatedPermutation};
 
     use super::*;
 
-    type F = BabyBear;
+    type F = KoalaBear;
     type Poseidon2Compression<Perm16> = TruncatedPermutation<Perm16, 2, 8, 16>;
     type Poseidon2Sponge<Perm24> = PaddingFreeSponge<Perm24, 24, 16, 8>;
-    type Perm = Poseidon2BabyBear<16>;
+    type Perm = Poseidon2KoalaBear<16>;
     type MyChallenger = DuplexChallenger<F, Perm, 16, 8>;
 
     /// Generates default WHIR parameters

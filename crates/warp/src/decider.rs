@@ -293,10 +293,10 @@ mod tests {
         fold::warp_fold_prove,
     };
     use crate::spartan::r1cs::{R1CSShape, SparseMatEntry};
-    use p3_baby_bear::BabyBear;
+    use p3_koala_bear::KoalaBear;
     use p3_field::PrimeCharacteristicRing;
 
-    type F = BabyBear;
+    type F = KoalaBear;
 
     fn make_square_shape() -> R1CSShape<F> {
         let num_cons = 4;

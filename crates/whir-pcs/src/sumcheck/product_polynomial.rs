@@ -456,7 +456,7 @@ impl<F: Field, EF: ExtensionField<F>> ProductPolynomial<F, EF> {
 mod tests {
     use alloc::{vec, vec::Vec};
 
-    use p3_baby_bear::{BabyBear, Poseidon2BabyBear};
+    use p3_koala_bear::{KoalaBear, Poseidon2KoalaBear};
     use p3_challenger::DuplexChallenger;
     use p3_field::{extension::BinomialExtensionField, Field, PrimeCharacteristicRing};
     use proptest::prelude::*;
@@ -464,9 +464,9 @@ mod tests {
 
     use super::*;
 
-    type F = BabyBear;
-    type EF = BinomialExtensionField<BabyBear, 4>;
-    type Perm = Poseidon2BabyBear<16>;
+    type F = KoalaBear;
+    type EF = BinomialExtensionField<KoalaBear, 4>;
+    type Perm = Poseidon2KoalaBear<16>;
     type TestChallenger = DuplexChallenger<F, Perm, 16, 8>;
 
     /// Creates a test challenger with a deterministic seed.

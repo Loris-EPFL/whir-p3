@@ -70,7 +70,7 @@ mod tests {
 
     use alloc::vec;
 
-    use p3_baby_bear::BabyBear;
+    use p3_koala_bear::KoalaBear;
     use p3_field::PrimeCharacteristicRing;
 
     use crate::{
@@ -81,7 +81,7 @@ mod tests {
         fold::WarpFoldConfig,
     };
 
-    type F = BabyBear;
+    type F = KoalaBear;
 
     /// Build a trivial R1CS: a single constraint 0 * 0 = 0 with 2 vars, 1 input.
     fn trivial_shape() -> R1CSShape<F> {

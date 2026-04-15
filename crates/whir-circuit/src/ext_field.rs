@@ -211,12 +211,12 @@ pub fn ext_from_base<F: Field, const D: usize>(
 
 #[cfg(test)]
 mod tests {
-    use p3_baby_bear::BabyBear;
+    use p3_koala_bear::KoalaBear;
     use p3_field::{BasedVectorSpace, PrimeCharacteristicRing, extension::BinomialExtensionField};
 
     use super::*;
 
-    type F = BabyBear;
+    type F = KoalaBear;
     type EF = BinomialExtensionField<F, 4>;
 
     fn ef_from_fn(f: impl Fn(usize) -> F) -> EF {
@@ -240,8 +240,8 @@ mod tests {
         let a_var = alloc_ext(&mut builder, &a_val);
         let b_var = alloc_ext(&mut builder, &b_val);
 
-        // W = 11 for BabyBear degree-4 extension
-        let w = F::from_u64(11);
+        // W = 3 for KoalaBear degree-4 extension
+        let w = F::from_u64(3);
         let (_, result_val) = ext_mul(&mut builder, &a_var, &a_val, &b_var, &b_val, w);
 
         assert_eq!(result_val.vals, to_arr(&expected), "EF mul values mismatch");
@@ -296,7 +296,7 @@ mod tests {
         let a_var = alloc_ext(&mut builder, &a_val);
         let b_var = alloc_ext(&mut builder, &b_val);
 
-        let w = F::from_u64(11);
+        let w = F::from_u64(3);
         let _ = ext_mul(&mut builder, &a_var, &a_val, &b_var, &b_val, w);
 
         // 16 cross-product muls + 4 output constraints = 20

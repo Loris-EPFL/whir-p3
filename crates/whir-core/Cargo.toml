@@ -24,7 +24,6 @@ default = ["parallel"]
 parallel = ["dep:rayon", "p3-maybe-rayon/parallel", "p3-util/parallel"]
 
 [dev-dependencies]
-p3-baby-bear.workspace = true
 p3-koala-bear.workspace = true
 p3-goldilocks.workspace = true
 proptest.workspace = true

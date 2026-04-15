@@ -73,12 +73,12 @@ pub fn bits_to_index<F: PrimeField64>(val: F, num_bits: usize) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use p3_baby_bear::BabyBear;
+    use p3_koala_bear::KoalaBear;
     use p3_field::PrimeCharacteristicRing;
 
     use super::*;
 
-    type F = BabyBear;
+    type F = KoalaBear;
 
     #[test]
     fn bit_decomposition_round_trip() {

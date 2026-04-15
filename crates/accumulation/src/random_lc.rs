@@ -38,12 +38,12 @@ pub fn random_linear_combination<F: Field>(
 mod tests {
     use alloc::{vec, vec::Vec};
 
-    use p3_baby_bear::BabyBear;
+    use p3_koala_bear::KoalaBear;
     use p3_field::PrimeCharacteristicRing;
 
     use super::*;
 
-    type F = BabyBear;
+    type F = KoalaBear;
 
     #[test]
     fn single_poly_is_identity() {

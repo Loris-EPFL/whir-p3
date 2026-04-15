@@ -33,7 +33,7 @@ default = ["parallel"]
 parallel = ["dep:rayon", "p3-maybe-rayon/parallel", "whir-core/parallel", "whir-pcs/parallel", "whir-spartan/parallel", "accumulation/parallel", "warp/parallel"]
 
 [dev-dependencies]
-p3-baby-bear.workspace = true
+p3-koala-bear.workspace = true
 rand = { workspace = true, features = ["std", "std_rng", "thread_rng"] }
 
 [lints]

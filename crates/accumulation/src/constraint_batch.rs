@@ -235,16 +235,16 @@ where
 mod tests {
     use alloc::vec;
 
-    use p3_baby_bear::{BabyBear, Poseidon2BabyBear};
+    use p3_koala_bear::{KoalaBear, Poseidon2KoalaBear};
     use p3_challenger::DuplexChallenger;
     use p3_field::{extension::BinomialExtensionField, PrimeCharacteristicRing};
     use rand::{rngs::SmallRng, SeedableRng};
 
     use super::*;
 
-    type F = BabyBear;
+    type F = KoalaBear;
     type EF = BinomialExtensionField<F, 4>;
-    type Perm = Poseidon2BabyBear<16>;
+    type Perm = Poseidon2KoalaBear<16>;
     type MyChallenger = DuplexChallenger<F, Perm, 16, 8>;
 
     fn make_challenger() -> MyChallenger {

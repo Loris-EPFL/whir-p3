@@ -148,13 +148,13 @@ pub fn extrapolate_012<F: Field>(e0: F, e1: F, e2: F, r: F) -> F {
 
 #[cfg(test)]
 mod tests {
-    use p3_baby_bear::BabyBear;
+    use p3_koala_bear::KoalaBear;
     use p3_field::PrimeCharacteristicRing;
     use proptest::prelude::*;
 
     use super::*;
 
-    type F = BabyBear;
+    type F = KoalaBear;
 
     #[test]
     fn test_lagrange_weights_at_interpolation_points() {

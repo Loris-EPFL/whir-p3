@@ -318,12 +318,12 @@ impl<F: Field> Default for CircuitBuilder<F> {
 
 #[cfg(test)]
 mod tests {
-    use p3_baby_bear::BabyBear;
+    use p3_koala_bear::KoalaBear;
     use p3_field::PrimeCharacteristicRing;
 
     use super::*;
 
-    type F = BabyBear;
+    type F = KoalaBear;
 
     #[test]
     fn simple_multiplication_constraint() {
@@ -435,13 +435,13 @@ mod tests {
 
     #[test]
     fn spartan_integration() {
-        use p3_baby_bear::Poseidon2BabyBear;
+        use p3_koala_bear::Poseidon2KoalaBear;
         use p3_challenger::DuplexChallenger;
         use p3_field::extension::BinomialExtensionField;
         use rand::{rngs::SmallRng, SeedableRng};
 
         type EF = BinomialExtensionField<F, 4>;
-        type Perm = Poseidon2BabyBear<16>;
+        type Perm = Poseidon2KoalaBear<16>;
         type Challenger = DuplexChallenger<F, Perm, 16, 8>;
 
         // Build circuit: x * x = y

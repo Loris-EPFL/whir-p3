@@ -437,12 +437,12 @@ fn multiset_hash<F: Field>(multiset: &[F], gamma: F) -> F {
 mod tests {
     use super::*;
     use alloc::vec;
-    use p3_baby_bear::BabyBear;
+    use p3_koala_bear::KoalaBear;
     use p3_field::PrimeCharacteristicRing;
 
     #[test]
     fn test_memory_in_the_head() {
-        type F = BabyBear;
+        type F = KoalaBear;
 
         let addrs = vec![0usize, 1usize, 0usize];
         let (read_ts, write_ts, audit_ts) = memory_in_the_head::<F>(4, 3, &addrs);
@@ -459,7 +459,7 @@ mod tests {
 
     #[test]
     fn test_compute_eq_poly_index_full_bits() {
-        type F = BabyBear;
+        type F = KoalaBear;
         let r = vec![F::from_u64(7), F::from_u64(11)];
         let eq = compute_eq_poly_index(2, &r);
         assert_eq!(eq, (F::ONE - r[0]) * r[1]);
@@ -467,7 +467,7 @@ mod tests {
 
     #[test]
     fn test_spark_proof_verify_and_detect_tamper() {
-        type F = BabyBear;
+        type F = KoalaBear;
 
         let entries = vec![
             super::super::r1cs::SparseMatEntry::new(0, 0, F::ONE),

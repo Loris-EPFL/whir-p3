@@ -71,7 +71,7 @@ impl ConstraintPolyEvaluator {
 mod tests {
     use alloc::{vec, vec::Vec};
 
-    use p3_baby_bear::BabyBear;
+    use p3_koala_bear::KoalaBear;
     use p3_field::{extension::BinomialExtensionField, PrimeCharacteristicRing};
     use proptest::prelude::*;
     use rand::{rngs::SmallRng, RngExt, SeedableRng};
@@ -83,8 +83,8 @@ mod tests {
         whir::constraints::statement::{EqStatement, LinearStatement, SelectStatement},
     };
 
-    type F = BabyBear;
-    type EF = BinomialExtensionField<BabyBear, 4>;
+    type F = KoalaBear;
+    type EF = BinomialExtensionField<KoalaBear, 4>;
 
     #[test]
     fn test_eval_constraints_poly() {

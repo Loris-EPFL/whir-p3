@@ -1670,10 +1670,10 @@ mod tests {
         poly::evals::EvaluationsList,
         spartan::r1cs::{R1CSShape, SparseMatEntry},
     };
-    use p3_baby_bear::BabyBear;
+    use p3_koala_bear::KoalaBear;
     use p3_field::PrimeCharacteristicRing;
 
-    type F = BabyBear;
+    type F = KoalaBear;
 
     /// Build a simple R1CS shape: x₀ * x₀ = x₁ (4 padded constraints, 4 vars)
     fn make_square_shape() -> R1CSShape<F> {
@@ -2282,11 +2282,11 @@ mod tests {
     /// with a union commitment root and no individual fresh roots.
     #[test]
     fn warp_fold_union_produces_union_root() {
-        use p3_baby_bear::Poseidon2BabyBear;
+        use p3_koala_bear::Poseidon2KoalaBear;
         use p3_symmetric::{PaddingFreeSponge, TruncatedPermutation};
         use rand::{rngs::SmallRng, SeedableRng};
 
-        type Perm = Poseidon2BabyBear<16>;
+        type Perm = Poseidon2KoalaBear<16>;
         type MyHash = PaddingFreeSponge<Perm, 16, 8, 8>;
         type MyCompress = TruncatedPermutation<Perm, 2, 8, 16>;
         const DIGEST: usize = 8;
@@ -2418,11 +2418,11 @@ mod tests {
     /// Only the commitment roots differ.
     #[test]
     fn warp_fold_union_matches_non_union_algebra() {
-        use p3_baby_bear::Poseidon2BabyBear;
+        use p3_koala_bear::Poseidon2KoalaBear;
         use p3_symmetric::{PaddingFreeSponge, TruncatedPermutation};
         use rand::{rngs::SmallRng, SeedableRng};
 
-        type Perm = Poseidon2BabyBear<16>;
+        type Perm = Poseidon2KoalaBear<16>;
         type MyHash = PaddingFreeSponge<Perm, 16, 8, 8>;
         type MyCompress = TruncatedPermutation<Perm, 2, 8, 16>;
         const DIGEST: usize = 8;

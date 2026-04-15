@@ -11,7 +11,7 @@
 │                                                          │
 │  Arithmetization:  CCS (via Spartan / SuperSpartan)      │
 │  PCS:              WHIR (whir-p3, Plonky3 field crates)  │
-│  Fields:           KoalaBear / BabyBear / Mersenne31     │
+│  Fields:           KoalaBear / KoalaBear / Mersenne31     │
 │  Hashing:          Poseidon2 (circuit-friendly)          │
 │  Proof structure:  Sumcheck + WHIR proximity testing     │
 │  Inspiration:      Whirlaway (SuperSpartan + WHIR)       │
@@ -31,7 +31,7 @@
 ### What you have (whir-p3 + Spartan)
 - **whir-p3**: Plonky3-compatible WHIR implementation (fork of tcoratger/whir-p3). Provides Merkle-committed RS codewords, sumcheck-based folding, OOD sampling, shift queries — the full WHIR IOPP.
 - **Spartan on top**: SuperSpartan-style argument for CCS constraints. The trace is committed as a multilinear polynomial via WHIR. Sumcheck reduces constraint checks to evaluation claims, which WHIR opens.
-- **Plonky3 primitives**: Field arithmetic (KoalaBear, BabyBear, M31), Poseidon2, Merkle trees, DFT/FFT.
+- **Plonky3 primitives**: Field arithmetic (KoalaBear, KoalaBear, M31), Poseidon2, Merkle trees, DFT/FFT.
 
 ### What you need to build
 - **Accumulation layer**: Turn your single-shot Spartan+WHIR proof into an IVC scheme where each step accumulates instances rather than fully proving them.

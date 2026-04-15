@@ -304,7 +304,7 @@ impl<F: Clone, EF, W, const DIGEST_ELEMS: usize> WhirProof<F, EF, W, DIGEST_ELEM
 mod tests {
     use alloc::vec;
 
-    use p3_baby_bear::{BabyBear, Poseidon2BabyBear};
+    use p3_koala_bear::{KoalaBear, Poseidon2KoalaBear};
     use p3_challenger::DuplexChallenger;
     use p3_field::{extension::BinomialExtensionField, PrimeCharacteristicRing};
     use p3_symmetric::{PaddingFreeSponge, TruncatedPermutation};
@@ -314,13 +314,13 @@ mod tests {
     use crate::parameters::{errors::SecurityAssumption, FoldingFactor};
 
     /// Type alias for the base field used in tests
-    type F = BabyBear;
+    type F = KoalaBear;
 
     /// Type alias for the extension field used in tests
     type EF = BinomialExtensionField<F, 4>;
 
     /// Type alias for the permutation used in Merkle tree
-    type Perm = Poseidon2BabyBear<16>;
+    type Perm = Poseidon2KoalaBear<16>;
 
     /// Type alias for the hash function
     type MyHash = PaddingFreeSponge<Perm, 16, 8, 8>;

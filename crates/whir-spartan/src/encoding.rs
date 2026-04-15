@@ -220,10 +220,10 @@ impl<F: Field> GPoly<F> {
 mod tests {
     use super::*;
     use alloc::vec;
-    use p3_baby_bear::BabyBear;
+    use p3_koala_bear::KoalaBear;
     use p3_field::{extension::BinomialExtensionField, PrimeCharacteristicRing};
 
-    type F = BabyBear;
+    type F = KoalaBear;
     type EF = BinomialExtensionField<F, 4>;
 
     fn make_square_instance() -> (R1CSShape<F>, R1CSInstance<F>, Vec<F>) {

@@ -2452,7 +2452,7 @@ where
 mod tests {
     use alloc::vec;
 
-    use p3_baby_bear::{BabyBear, Poseidon2BabyBear};
+    use p3_koala_bear::{KoalaBear, Poseidon2KoalaBear};
     use p3_challenger::DuplexChallenger;
     use p3_dft::Radix2DFTSmallBatch;
     use p3_field::{extension::BinomialExtensionField, PrimeCharacteristicRing};
@@ -2474,9 +2474,9 @@ mod tests {
         },
     };
 
-    type F = BabyBear;
+    type F = KoalaBear;
     type EF = BinomialExtensionField<F, 4>;
-    type Perm = Poseidon2BabyBear<16>;
+    type Perm = Poseidon2KoalaBear<16>;
     type MyHash = PaddingFreeSponge<Perm, 16, 8, 8>;
     type MyCompress = TruncatedPermutation<Perm, 2, 8, 16>;
     type MyChallenger = DuplexChallenger<F, Perm, 16, 8>;
@@ -2784,19 +2784,19 @@ mod tests {
     /// Measure the recursive circuit size: step circuit + WARP fold verifier.
     #[test]
     fn measure_recursive_circuit_size() {
-        use p3_baby_bear::GenericPoseidon2LinearLayersBabyBear;
+        use p3_koala_bear::GenericPoseidon2LinearLayersKoalaBear;
         use crate::ivc::step::{StepCircuit, TrivialStepCircuit};
 
         let poseidon_perm = Perm::new_from_rng_128(&mut SmallRng::seed_from_u64(99));
         let poseidon_config = Poseidon2CircuitConfig::<F, 16>::from_rng(
-            8, 13, 7, &mut SmallRng::seed_from_u64(99),
+            8, 20, 3, &mut SmallRng::seed_from_u64(99),
         );
         let step = TrivialStepCircuit::new(1);
 
         // Measure with verifier (the full recursive circuit)
         let (num_witness, num_constraints, _num_poly_vars_y) =
             compute_recursive_circuit_size::<
-                F, GenericPoseidon2LinearLayersBabyBear, _, _,
+                F, GenericPoseidon2LinearLayersKoalaBear, _, _,
             >(
                 &step, &[F::ZERO], &poseidon_config, &poseidon_perm,
                 3, // eval_point has 3 vars for our test shape
@@ -2829,7 +2829,7 @@ mod tests {
         let mut verifier_only_builder = CircuitBuilder::<F>::new();
         let mut verifier_chal = CircuitChallenger::<F, 16, 8>::new(&mut verifier_only_builder);
         let _ = crate::ivc::warp_fold_verifier_circuit::synthesize_warp_fold_verifier::<
-            F, GenericPoseidon2LinearLayersBabyBear, _, 16, 8,
+            F, GenericPoseidon2LinearLayersKoalaBear, _, 16, 8,
         >(
             &mut verifier_only_builder, &mut verifier_chal,
             &poseidon_config, &poseidon_perm, &dummy_witness,
@@ -2887,7 +2887,7 @@ mod tests {
     /// Full recursive IVC: init (padded) → 2 recursive steps → verify sizes match.
     #[test]
     fn warp_ivc_recursive_two_steps() {
-        use p3_baby_bear::GenericPoseidon2LinearLayersBabyBear;
+        use p3_koala_bear::GenericPoseidon2LinearLayersKoalaBear;
         use crate::ivc::step::TrivialStepCircuit;
 
         let _shape = make_shape();
@@ -2896,7 +2896,7 @@ mod tests {
         let (mh, mc) = make_hash_compress();
         let poseidon_perm = Perm::new_from_rng_128(&mut SmallRng::seed_from_u64(99));
         let poseidon_config = Poseidon2CircuitConfig::<F, 16>::from_rng(
-            8, 13, 7, &mut SmallRng::seed_from_u64(99),
+            8, 20, 3, &mut SmallRng::seed_from_u64(99),
         );
         let step = TrivialStepCircuit::new(1);
 
@@ -2911,7 +2911,7 @@ mod tests {
         // Compute target circuit size from a probe build
         let (target_witness, _target_constraints, _target_poly_vars) =
             compute_recursive_circuit_size::<
-                F, GenericPoseidon2LinearLayersBabyBear, _, _,
+                F, GenericPoseidon2LinearLayersKoalaBear, _, _,
             >(
                 &step, &[F::ZERO], &poseidon_config, &poseidon_perm, 3, 2,
             );
@@ -2949,7 +2949,7 @@ mod tests {
         let mut init_builder = CircuitBuilder::<F>::new();
         let mut init_chal = CircuitChallenger::<F, 16, 8>::new(&mut init_builder);
         let _ = synthesize_warp_ivc_circuit::<
-            F, GenericPoseidon2LinearLayersBabyBear, _, _, 16, 8,
+            F, GenericPoseidon2LinearLayersKoalaBear, _, _, 16, 8,
         >(
             &mut init_builder, &mut init_chal,
             &poseidon_config, &poseidon_perm,
@@ -3045,7 +3045,7 @@ mod tests {
         // Recursive step 1
         let mut chal1 = make_challenger(10);
         state = warp_ivc_step_recursive::<
-            F, EF, _, _, _, _, GenericPoseidon2LinearLayersBabyBear, _, _, _,
+            F, EF, _, _, _, _, GenericPoseidon2LinearLayersKoalaBear, _, _, _,
         >(
             &state,
             &step,
@@ -3062,7 +3062,7 @@ mod tests {
         // Recursive step 2
         let mut chal2 = make_challenger(20);
         state = warp_ivc_step_recursive::<
-            F, EF, _, _, _, _, GenericPoseidon2LinearLayersBabyBear, _, _, _,
+            F, EF, _, _, _, _, GenericPoseidon2LinearLayersKoalaBear, _, _, _,
         >(
             &state,
             &step,
@@ -3179,13 +3179,13 @@ mod tests {
 
     #[test]
     fn warp_ivc_union_circuit_size_smaller() {
-        use p3_baby_bear::GenericPoseidon2LinearLayersBabyBear;
+        use p3_koala_bear::GenericPoseidon2LinearLayersKoalaBear;
         use crate::ivc::step::TrivialStepCircuit;
         use crate::circuit::poseidon2::Poseidon2CircuitConfig;
 
         let poseidon_perm = Perm::new_from_rng_128(&mut SmallRng::seed_from_u64(99));
         let poseidon_config = Poseidon2CircuitConfig::<F, 16>::from_rng(
-            8, 13, 7, &mut SmallRng::seed_from_u64(99),
+            8, 20, 3, &mut SmallRng::seed_from_u64(99),
         );
         let step = TrivialStepCircuit::new(1);
         let step_input = [F::ZERO];
@@ -3194,17 +3194,17 @@ mod tests {
         // Non-union l=2 circuit size
         let log_m = 2;
         let (nw_l2, nc_l2, _) = compute_recursive_circuit_size::<
-            F, GenericPoseidon2LinearLayersBabyBear, _, _,
+            F, GenericPoseidon2LinearLayersKoalaBear, _, _,
         >(&step, &step_input, &poseidon_config, &poseidon_perm, num_eval_point_vars, log_m);
 
         // Union l=4 circuit size
         let (nw_u4, nc_u4, _) = compute_recursive_circuit_size_union::<
-            F, GenericPoseidon2LinearLayersBabyBear, _, _,
+            F, GenericPoseidon2LinearLayersKoalaBear, _, _,
         >(&step, &step_input, &poseidon_config, &poseidon_perm, num_eval_point_vars, 4, log_m);
 
         // Union l=8 circuit size
         let (nw_u8, nc_u8, _) = compute_recursive_circuit_size_union::<
-            F, GenericPoseidon2LinearLayersBabyBear, _, _,
+            F, GenericPoseidon2LinearLayersKoalaBear, _, _,
         >(&step, &step_input, &poseidon_config, &poseidon_perm, num_eval_point_vars, 8, log_m);
 
         // Union l=4 should be smaller than non-union l=2 despite more sumcheck rounds,
@@ -3238,7 +3238,7 @@ mod tests {
     /// This is the "pure" pipeline — no Symphony CP-SNARK, all FS in-circuit.
     #[test]
     fn warp_ivc_recursive_union_poseidon2_pipeline() {
-        use p3_baby_bear::GenericPoseidon2LinearLayersBabyBear;
+        use p3_koala_bear::GenericPoseidon2LinearLayersKoalaBear;
         use crate::ivc::step::TrivialStepCircuit;
         use crate::circuit::poseidon2::Poseidon2CircuitConfig;
 
@@ -3254,7 +3254,7 @@ mod tests {
         // the same permutation (same round constants). Use seed 99 for both.
         let poseidon_perm_circuit = Perm::new_from_rng_128(&mut SmallRng::seed_from_u64(99));
         let poseidon_config = Poseidon2CircuitConfig::<F, 16>::from_rng(
-            8, 13, 7, &mut SmallRng::seed_from_u64(99),
+            8, 20, 3, &mut SmallRng::seed_from_u64(99),
         );
         let perm_for_fold = poseidon_perm_circuit.clone();
         let make_union_fold_challenger = move || -> MyChallenger {
@@ -3269,7 +3269,7 @@ mod tests {
         let mut spartan_chal = make_challenger(1);
         let mut mfc = make_union_fold_challenger.clone();
         let state = warp_ivc_init_recursive_union::<
-            F, EF, _, _, _, _, GenericPoseidon2LinearLayersBabyBear, _, _, _,
+            F, EF, _, _, _, _, GenericPoseidon2LinearLayersKoalaBear, _, _, _,
         >(
             &shape, &inst0, &mut spartan_chal,
             &ivc_config, &dft, mh.clone(), mc.clone(),
@@ -3296,7 +3296,7 @@ mod tests {
         // function passes to compute_recursive_circuit_size_union.
         let log_m_orig = shape.num_cons().next_power_of_two().trailing_zeros() as usize;
         let (target_w, _, _) = compute_recursive_circuit_size_union::<
-            F, GenericPoseidon2LinearLayersBabyBear, _, _,
+            F, GenericPoseidon2LinearLayersKoalaBear, _, _,
         >(
             &step, &[F::ZERO], &poseidon_config, &poseidon_perm_circuit,
             shape.num_poly_vars_y(), arity, log_m_orig,
@@ -3304,7 +3304,7 @@ mod tests {
 
         let mut mfc2 = make_union_fold_challenger.clone();
         let state2 = warp_ivc_step_recursive_union::<
-            F, EF, _, _, _, _, GenericPoseidon2LinearLayersBabyBear, _, _, _,
+            F, EF, _, _, _, _, GenericPoseidon2LinearLayersKoalaBear, _, _, _,
         >(
             &state, &step, &step_inputs, arity,
             &mut spartan_chal2, &ivc_config, &dft, mh.clone(), mc.clone(),
@@ -3433,20 +3433,20 @@ mod tests {
     #[test]
     #[cfg(feature = "symphony")]
     fn cp_snark_vs_regular_circuit_size() {
-        use p3_baby_bear::GenericPoseidon2LinearLayersBabyBear;
+        use p3_koala_bear::GenericPoseidon2LinearLayersKoalaBear;
         use crate::ivc::step::TrivialStepCircuit;
         use crate::ivc::warp_fold_verifier_algebraic::compute_cp_circuit_size;
 
         let poseidon_perm = Perm::new_from_rng_128(&mut SmallRng::seed_from_u64(99));
         let poseidon_config = Poseidon2CircuitConfig::<F, 16>::from_rng(
-            8, 13, 7, &mut SmallRng::seed_from_u64(99),
+            8, 20, 3, &mut SmallRng::seed_from_u64(99),
         );
         let step = TrivialStepCircuit::new(1);
 
         // Regular recursive circuit size
         let (reg_witness, reg_constraints, _) = compute_recursive_circuit_size::<
             F,
-            GenericPoseidon2LinearLayersBabyBear,
+            GenericPoseidon2LinearLayersKoalaBear,
             _,
             _,
         >(&step, &[F::ZERO], &poseidon_config, &poseidon_perm, 3, 2);

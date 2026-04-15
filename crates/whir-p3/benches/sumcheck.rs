@@ -1,5 +1,5 @@
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
-use p3_baby_bear::{BabyBear, Poseidon2BabyBear};
+use p3_koala_bear::{KoalaBear, Poseidon2KoalaBear};
 use p3_challenger::{DuplexChallenger, FieldChallenger, GrindingChallenger};
 use p3_field::extension::BinomialExtensionField;
 use p3_symmetric::{PaddingFreeSponge, TruncatedPermutation};
@@ -16,9 +16,9 @@ use whir_p3::{
     },
 };
 
-type F = BabyBear;
-type EF = BinomialExtensionField<BabyBear, 4>;
-type Perm = Poseidon2BabyBear<16>;
+type F = KoalaBear;
+type EF = BinomialExtensionField<KoalaBear, 4>;
+type Perm = Poseidon2KoalaBear<16>;
 type MyHash = PaddingFreeSponge<Perm, 16, 8, 8>;
 type MyCompress = TruncatedPermutation<Perm, 2, 8, 16>;
 type MyChallenger = DuplexChallenger<F, Perm, 16, 8>;

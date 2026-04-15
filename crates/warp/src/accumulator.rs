@@ -148,10 +148,10 @@ mod tests {
     use alloc::vec;
 
     use super::*;
-    use p3_baby_bear::BabyBear;
+    use p3_koala_bear::KoalaBear;
     use p3_field::{extension::BinomialExtensionField, PrimeCharacteristicRing};
 
-    type F = BabyBear;
+    type F = KoalaBear;
     type EF = BinomialExtensionField<F, 4>;
 
     #[test]

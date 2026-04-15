@@ -310,7 +310,7 @@ where
 mod tests {
     use alloc::vec;
 
-    use p3_baby_bear::{BabyBear, GenericPoseidon2LinearLayersBabyBear, Poseidon2BabyBear};
+    use p3_koala_bear::{KoalaBear, GenericPoseidon2LinearLayersKoalaBear, Poseidon2KoalaBear};
     use p3_challenger::DuplexChallenger;
     use p3_field::PrimeCharacteristicRing;
     
@@ -319,15 +319,15 @@ mod tests {
     use super::*;
     use crate::ivc::step::TrivialStepCircuit;
 
-    type F = BabyBear;
-    type Perm = Poseidon2BabyBear<16>;
+    type F = KoalaBear;
+    type Perm = Poseidon2KoalaBear<16>;
     type MyChallenger = DuplexChallenger<F, Perm, 16, 8>;
 
     #[test]
     fn eval_fold_verifier_circuit_builds() {
         let poseidon_perm = Perm::new_from_rng_128(&mut SmallRng::seed_from_u64(99));
         let poseidon_config = Poseidon2CircuitConfig::<F, 16>::from_rng(
-            8, 13, 7, &mut SmallRng::seed_from_u64(99),
+            8, 20, 3, &mut SmallRng::seed_from_u64(99),
         );
 
         let witness = EvalFoldVerifierWitness {
@@ -343,7 +343,7 @@ mod tests {
 
         let (challenges, _final_var, final_val) =
             synthesize_eval_fold_verifier::<
-                F, GenericPoseidon2LinearLayersBabyBear, _, 16, 8,
+                F, GenericPoseidon2LinearLayersKoalaBear, _, 16, 8,
             >(
                 &mut builder, &mut challenger,
                 &poseidon_config, &poseidon_perm, &witness,
@@ -363,7 +363,7 @@ mod tests {
     fn eval_fold_ivc_circuit_builds_with_and_without_verifier() {
         let poseidon_perm = Perm::new_from_rng_128(&mut SmallRng::seed_from_u64(99));
         let poseidon_config = Poseidon2CircuitConfig::<F, 16>::from_rng(
-            8, 13, 7, &mut SmallRng::seed_from_u64(99),
+            8, 20, 3, &mut SmallRng::seed_from_u64(99),
         );
         let step = TrivialStepCircuit::new(1);
 
@@ -379,7 +379,7 @@ mod tests {
         let mut builder_with = CircuitBuilder::<F>::new();
         let mut chal_with = CircuitChallenger::<F, 16, 8>::new(&mut builder_with);
         let _ = synthesize_eval_fold_ivc_circuit::<
-            F, GenericPoseidon2LinearLayersBabyBear, _, _, 16, 8,
+            F, GenericPoseidon2LinearLayersKoalaBear, _, _, 16, 8,
         >(
             &mut builder_with, &mut chal_with,
             &poseidon_config, &poseidon_perm,
@@ -391,7 +391,7 @@ mod tests {
         let mut builder_without = CircuitBuilder::<F>::new();
         let mut chal_without = CircuitChallenger::<F, 16, 8>::new(&mut builder_without);
         let _ = synthesize_eval_fold_ivc_circuit::<
-            F, GenericPoseidon2LinearLayersBabyBear, _, _, 16, 8,
+            F, GenericPoseidon2LinearLayersKoalaBear, _, _, 16, 8,
         >(
             &mut builder_without, &mut chal_without,
             &poseidon_config, &poseidon_perm,
@@ -414,7 +414,7 @@ mod tests {
     fn compare_circuit_sizes_eval_fold_vs_constraint_batch() {
         let poseidon_perm = Perm::new_from_rng_128(&mut SmallRng::seed_from_u64(99));
         let poseidon_config = Poseidon2CircuitConfig::<F, 16>::from_rng(
-            8, 13, 7, &mut SmallRng::seed_from_u64(99),
+            8, 20, 3, &mut SmallRng::seed_from_u64(99),
         );
 
         // Eval-fold verifier (base field sumcheck, 1 round)
@@ -428,7 +428,7 @@ mod tests {
         let mut eval_builder = CircuitBuilder::<F>::new();
         let mut eval_chal = CircuitChallenger::<F, 16, 8>::new(&mut eval_builder);
         let _ = synthesize_eval_fold_verifier::<
-            F, GenericPoseidon2LinearLayersBabyBear, _, 16, 8,
+            F, GenericPoseidon2LinearLayersKoalaBear, _, 16, 8,
         >(&mut eval_builder, &mut eval_chal, &poseidon_config, &poseidon_perm, &eval_witness);
         let eval_constraints = eval_builder.num_constraints();
         let _eval_witness_vars = eval_builder.num_witness_vars();
@@ -448,8 +448,8 @@ mod tests {
         let mut v2_builder = CircuitBuilder::<F>::new();
         let mut v2_chal = CircuitChallenger::<F, 16, 8>::new(&mut v2_builder);
         let _ = crate::ivc::verifier_circuit::synthesize_accumulation_verifier::<
-            F, GenericPoseidon2LinearLayersBabyBear, _, 16, 8,
-        >(&mut v2_builder, &mut v2_chal, &poseidon_config, &poseidon_perm, &v2_witness, F::from_u64(11));
+            F, GenericPoseidon2LinearLayersKoalaBear, _, 16, 8,
+        >(&mut v2_builder, &mut v2_chal, &poseidon_config, &poseidon_perm, &v2_witness, F::from_u64(3));
         let v2_constraints = v2_builder.num_constraints();
         let _v2_witness_vars = v2_builder.num_witness_vars();
 

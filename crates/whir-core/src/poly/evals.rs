@@ -799,7 +799,7 @@ mod tests {
 
     use alloc::vec;
 
-    use p3_baby_bear::BabyBear;
+    use p3_koala_bear::KoalaBear;
     use p3_field::{
         dot_product, extension::BinomialExtensionField, PrimeCharacteristicRing, PrimeField64,
     };
@@ -808,7 +808,7 @@ mod tests {
 
     use super::*;
 
-    type F = BabyBear;
+    type F = KoalaBear;
     type EF4 = BinomialExtensionField<F, 4>;
 
     /// Naive method to evaluate a multilinear polynomial for testing.

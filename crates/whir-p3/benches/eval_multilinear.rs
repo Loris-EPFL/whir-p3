@@ -1,5 +1,5 @@
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use p3_baby_bear::BabyBear;
+use p3_koala_bear::KoalaBear;
 use p3_field::{ExtensionField, Field, extension::BinomialExtensionField};
 use rand::{
     RngExt, SeedableRng,
@@ -8,7 +8,7 @@ use rand::{
 };
 use whir_p3::poly::{evals::EvaluationsList, multilinear::MultilinearPoint};
 
-type F = BabyBear;
+type F = KoalaBear;
 type EF = BinomialExtensionField<F, 4>;
 
 // Generate random evaluation data and a random point.

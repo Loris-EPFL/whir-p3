@@ -261,13 +261,13 @@ where
 mod tests {
     use alloc::vec;
 
-    use p3_baby_bear::BabyBear;
+    use p3_koala_bear::KoalaBear;
     use p3_field::PrimeCharacteristicRing;
 
     use super::*;
     use crate::ivc::step::TrivialStepCircuit;
 
-    type F = BabyBear;
+    type F = KoalaBear;
 
     #[test]
     fn algebraic_verifier_satisfiable() {

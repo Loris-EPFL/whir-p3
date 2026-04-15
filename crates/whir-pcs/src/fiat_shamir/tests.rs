@@ -1,6 +1,6 @@
 use alloc::vec::Vec;
 
-use p3_baby_bear::{BabyBear, Poseidon2BabyBear};
+use p3_koala_bear::{KoalaBear, Poseidon2KoalaBear};
 use p3_challenger::{CanObserve, CanSample, DuplexChallenger, GrindingChallenger};
 use p3_field::extension::BinomialExtensionField;
 use proptest::prelude::*;
@@ -8,9 +8,9 @@ use rand::{rngs::SmallRng, RngExt, SeedableRng};
 
 use crate::fiat_shamir::domain_separator::DomainSeparator;
 
-type F = BabyBear;
+type F = KoalaBear;
 type EF = BinomialExtensionField<F, 4>;
-type Perm = Poseidon2BabyBear<16>;
+type Perm = Poseidon2KoalaBear<16>;
 type MyChallenger = DuplexChallenger<F, Perm, 16, 8>;
 
 fn make_challenger() -> MyChallenger {

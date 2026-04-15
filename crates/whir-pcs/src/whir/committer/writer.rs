@@ -142,7 +142,7 @@ where
 mod tests {
     use alloc::vec;
 
-    use p3_baby_bear::{BabyBear, Poseidon2BabyBear};
+    use p3_koala_bear::{KoalaBear, Poseidon2KoalaBear};
     use p3_challenger::DuplexChallenger;
     use p3_dft::Radix2DFTSmallBatch;
     use p3_symmetric::{PaddingFreeSponge, TruncatedPermutation};
@@ -156,8 +156,8 @@ mod tests {
         whir::parameters::SumcheckStrategy,
     };
 
-    type F = BabyBear;
-    type Perm = Poseidon2BabyBear<16>;
+    type F = KoalaBear;
+    type Perm = Poseidon2KoalaBear<16>;
     type MyHash = PaddingFreeSponge<Perm, 16, 8, 8>;
     type MyCompress = TruncatedPermutation<Perm, 2, 8, 16>;
     type MyChallenger = DuplexChallenger<F, Perm, 16, 8>;
@@ -200,7 +200,7 @@ mod tests {
 
         // Generate a random polynomial with 32 coefficients.
         let mut rng = SmallRng::seed_from_u64(1);
-        let polynomial = EvaluationsList::<BabyBear>::new(vec![rng.random(); 32]);
+        let polynomial = EvaluationsList::<KoalaBear>::new(vec![rng.random(); 32]);
 
         let mut proof =
             WhirProof::<F, F, F, 8>::from_protocol_parameters(&whir_params, num_variables);
@@ -284,7 +284,7 @@ mod tests {
         );
 
         let mut rng = SmallRng::seed_from_u64(1);
-        let polynomial = EvaluationsList::<BabyBear>::new(vec![rng.random(); 1024]);
+        let polynomial = EvaluationsList::<KoalaBear>::new(vec![rng.random(); 1024]);
 
         let mut proof =
             WhirProof::<F, F, F, 8>::from_protocol_parameters(&whir_params, num_variables);
@@ -347,7 +347,7 @@ mod tests {
         params.commitment_ood_samples = 0;
 
         let mut rng = SmallRng::seed_from_u64(1);
-        let polynomial = EvaluationsList::<BabyBear>::new(vec![rng.random(); 32]);
+        let polynomial = EvaluationsList::<KoalaBear>::new(vec![rng.random(); 32]);
 
         let mut proof =
             WhirProof::<F, F, F, 8>::from_protocol_parameters(&whir_params, num_variables);

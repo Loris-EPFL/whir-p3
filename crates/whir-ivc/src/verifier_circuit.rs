@@ -94,7 +94,7 @@ pub fn synthesize_accumulation_verifier<F, L, P, const WIDTH: usize, const RATE:
     poseidon_config: &Poseidon2CircuitConfig<F, WIDTH>,
     perm: &P,
     witness: &AccumulationVerifierWitness<F>,
-    w_param: F, // Extension field irreducible parameter (W=11 for BabyBear)
+    w_param: F, // Extension field irreducible parameter (W=11 for KoalaBear)
 ) -> (Vec<ExtVar<4>>, ExtVal<F, 4>) // (reduction_point_vars, combined_eval_val)
 where
     F: Field + PrimeCharacteristicRing + PrimeField64,
@@ -430,7 +430,7 @@ pub fn verify_sumcheck_round<F: Field>(
 mod tests {
     use alloc::vec;
 
-    use p3_baby_bear::{BabyBear, GenericPoseidon2LinearLayersBabyBear, Poseidon2BabyBear};
+    use p3_koala_bear::{KoalaBear, GenericPoseidon2LinearLayersKoalaBear, Poseidon2KoalaBear};
     use p3_challenger::DuplexChallenger;
     use p3_dft::Radix2DFTSmallBatch;
     use p3_field::{extension::BinomialExtensionField, BasedVectorSpace, Field, PrimeCharacteristicRing};
@@ -452,13 +452,13 @@ mod tests {
         whir::parameters::WhirConfig,
     };
 
-    type F = BabyBear;
+    type F = KoalaBear;
     type EF = BinomialExtensionField<F, 4>;
-    type Perm = Poseidon2BabyBear<16>;
+    type Perm = Poseidon2KoalaBear<16>;
     type MyHash = PaddingFreeSponge<Perm, 16, 8, 8>;
     type MyCompress = TruncatedPermutation<Perm, 2, 8, 16>;
     type MyChallenger = DuplexChallenger<F, Perm, 16, 8>;
-    type L = GenericPoseidon2LinearLayersBabyBear;
+    type L = GenericPoseidon2LinearLayersKoalaBear;
 
     fn make_shape_and_instance(square: u64) -> (R1CSShape<F>, R1CSInstance<F>) {
         let shape = R1CSShape::new(
@@ -549,7 +549,7 @@ mod tests {
 
         // 3. Synthesize the recursive circuit
         let _perm_circuit = Perm::new_from_rng_128(&mut SmallRng::seed_from_u64(99));
-        let _poseidon_config = Poseidon2CircuitConfig::<F, 16>::from_rng(8, 13, 7, &mut SmallRng::seed_from_u64(99));
+        let _poseidon_config = Poseidon2CircuitConfig::<F, 16>::from_rng(8, 20, 3, &mut SmallRng::seed_from_u64(99));
 
         // We need to initialize the circuit challenger to match the prover's challenger.
         // The prover started with seed_challenger() which includes domain separator observation.
@@ -597,7 +597,7 @@ mod tests {
 
         let perm_for_circuit = Perm::new_from_rng_128(&mut SmallRng::seed_from_u64(99));
         let config_for_circuit = Poseidon2CircuitConfig::<F, 16>::from_rng(
-            8, 13, 7, &mut SmallRng::seed_from_u64(99),
+            8, 20, 3, &mut SmallRng::seed_from_u64(99),
         );
 
         let mut builder2 = CircuitBuilder::<F>::new();
@@ -610,7 +610,7 @@ mod tests {
                 &config_for_circuit,
                 &perm_for_circuit,
                 &witness2,
-                F::from_u64(11), // W parameter for BabyBear EF
+                F::from_u64(3), // W parameter for KoalaBear EF
             );
 
         // 4. Build and verify R1CS

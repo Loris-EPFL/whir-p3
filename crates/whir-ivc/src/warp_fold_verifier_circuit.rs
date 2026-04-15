@@ -735,7 +735,7 @@ where
 mod tests {
     use alloc::vec;
 
-    use p3_baby_bear::{BabyBear, GenericPoseidon2LinearLayersBabyBear, Poseidon2BabyBear};
+    use p3_koala_bear::{KoalaBear, GenericPoseidon2LinearLayersKoalaBear, Poseidon2KoalaBear};
     use p3_challenger::DuplexChallenger;
     use p3_field::PrimeCharacteristicRing;
     use rand::{rngs::SmallRng, SeedableRng};
@@ -743,8 +743,8 @@ mod tests {
     use super::*;
     use crate::ivc::step::TrivialStepCircuit;
 
-    type F = BabyBear;
-    type Perm = Poseidon2BabyBear<16>;
+    type F = KoalaBear;
+    type Perm = Poseidon2KoalaBear<16>;
     type MyChal = DuplexChallenger<F, Perm, 16, 8>;
 
     /// Construct CORRECT sumcheck round polynomials from the actual twin-constraint
@@ -821,7 +821,7 @@ mod tests {
 
         let poseidon_perm = Perm::new_from_rng_128(&mut SmallRng::seed_from_u64(99));
         let poseidon_config =
-            Poseidon2CircuitConfig::<F, 16>::from_rng(8, 13, 7, &mut SmallRng::seed_from_u64(99));
+            Poseidon2CircuitConfig::<F, 16>::from_rng(8, 20, 3, &mut SmallRng::seed_from_u64(99));
 
         // Derive omega natively from the same Poseidon2 that the circuit will use
         let roots = vec![vec![F::ZERO; 8]; 2];
@@ -879,7 +879,7 @@ mod tests {
 
         let output = synthesize_warp_fold_verifier::<
             F,
-            GenericPoseidon2LinearLayersBabyBear,
+            GenericPoseidon2LinearLayersKoalaBear,
             _,
             16,
             8,
@@ -902,7 +902,7 @@ mod tests {
     fn warp_ivc_circuit_sizing_consistent() {
         let poseidon_perm = Perm::new_from_rng_128(&mut SmallRng::seed_from_u64(99));
         let poseidon_config =
-            Poseidon2CircuitConfig::<F, 16>::from_rng(8, 13, 7, &mut SmallRng::seed_from_u64(99));
+            Poseidon2CircuitConfig::<F, 16>::from_rng(8, 20, 3, &mut SmallRng::seed_from_u64(99));
         let step = TrivialStepCircuit::new(1);
 
         // WITH verifier
@@ -926,7 +926,7 @@ mod tests {
         let mut chal_with = CircuitChallenger::<F, 16, 8>::new(&mut builder_with);
         let (_, fold_out) = synthesize_warp_ivc_circuit::<
             F,
-            GenericPoseidon2LinearLayersBabyBear,
+            GenericPoseidon2LinearLayersKoalaBear,
             _,
             _,
             16,
@@ -949,7 +949,7 @@ mod tests {
         let mut chal_without = CircuitChallenger::<F, 16, 8>::new(&mut builder_without);
         let (_, fold_out_none) = synthesize_warp_ivc_circuit::<
             F,
-            GenericPoseidon2LinearLayersBabyBear,
+            GenericPoseidon2LinearLayersKoalaBear,
             _,
             _,
             16,
@@ -985,7 +985,7 @@ mod tests {
     fn compare_warp_vs_v2_circuit_sizes() {
         let poseidon_perm = Perm::new_from_rng_128(&mut SmallRng::seed_from_u64(99));
         let poseidon_config =
-            Poseidon2CircuitConfig::<F, 16>::from_rng(8, 13, 7, &mut SmallRng::seed_from_u64(99));
+            Poseidon2CircuitConfig::<F, 16>::from_rng(8, 20, 3, &mut SmallRng::seed_from_u64(99));
 
         // WARP fold verifier (1 round, base field)
         let warp_witness = WarpFoldVerifierWitness {
@@ -1007,7 +1007,7 @@ mod tests {
         let mut warp_chal = CircuitChallenger::<F, 16, 8>::new(&mut warp_builder);
         let _ = synthesize_warp_fold_verifier::<
             F,
-            GenericPoseidon2LinearLayersBabyBear,
+            GenericPoseidon2LinearLayersKoalaBear,
             _,
             16,
             8,
@@ -1037,7 +1037,7 @@ mod tests {
         let mut v2_chal = CircuitChallenger::<F, 16, 8>::new(&mut v2_builder);
         let _ = crate::ivc::verifier_circuit::synthesize_accumulation_verifier::<
             F,
-            GenericPoseidon2LinearLayersBabyBear,
+            GenericPoseidon2LinearLayersKoalaBear,
             _,
             16,
             8,
@@ -1047,7 +1047,7 @@ mod tests {
             &poseidon_config,
             &poseidon_perm,
             &v2_witness,
-            F::from_u64(11),
+            F::from_u64(3),
         );
         let v2_constraints = v2_builder.num_constraints();
         let v2_witness_vars = v2_builder.num_witness_vars();
@@ -1073,7 +1073,7 @@ mod tests {
 
         let poseidon_perm = Perm::new_from_rng_128(&mut SmallRng::seed_from_u64(99));
         let poseidon_config =
-            Poseidon2CircuitConfig::<F, 16>::from_rng(8, 13, 7, &mut SmallRng::seed_from_u64(99));
+            Poseidon2CircuitConfig::<F, 16>::from_rng(8, 20, 3, &mut SmallRng::seed_from_u64(99));
 
         // l=4: 1 running acc + 3 fresh -> union root replaces the 3 fresh roots
         let running_root = vec![F::from_u64(1); 8];
@@ -1156,7 +1156,7 @@ mod tests {
 
         let output = synthesize_warp_fold_verifier::<
             F,
-            GenericPoseidon2LinearLayersBabyBear,
+            GenericPoseidon2LinearLayersKoalaBear,
             _,
             16,
             8,
@@ -1179,7 +1179,7 @@ mod tests {
     fn union_verifier_fewer_constraints_than_nonunion() {
         let poseidon_perm = Perm::new_from_rng_128(&mut SmallRng::seed_from_u64(99));
         let poseidon_config =
-            Poseidon2CircuitConfig::<F, 16>::from_rng(8, 13, 7, &mut SmallRng::seed_from_u64(99));
+            Poseidon2CircuitConfig::<F, 16>::from_rng(8, 20, 3, &mut SmallRng::seed_from_u64(99));
 
         let log_n = 3; // eval point dimension
 
@@ -1204,7 +1204,7 @@ mod tests {
         let mut nonunion_chal = CircuitChallenger::<F, 16, 8>::new(&mut nonunion_builder);
         let _ = synthesize_warp_fold_verifier::<
             F,
-            GenericPoseidon2LinearLayersBabyBear,
+            GenericPoseidon2LinearLayersKoalaBear,
             _,
             16,
             8,
@@ -1237,7 +1237,7 @@ mod tests {
         let mut union_chal = CircuitChallenger::<F, 16, 8>::new(&mut union_builder);
         let _ = synthesize_warp_fold_verifier::<
             F,
-            GenericPoseidon2LinearLayersBabyBear,
+            GenericPoseidon2LinearLayersKoalaBear,
             _,
             16,
             8,
@@ -1270,7 +1270,7 @@ mod tests {
     fn union_verifier_constraint_scaling() {
         let poseidon_perm = Perm::new_from_rng_128(&mut SmallRng::seed_from_u64(99));
         let poseidon_config =
-            Poseidon2CircuitConfig::<F, 16>::from_rng(8, 13, 7, &mut SmallRng::seed_from_u64(99));
+            Poseidon2CircuitConfig::<F, 16>::from_rng(8, 20, 3, &mut SmallRng::seed_from_u64(99));
         let log_n = 3;
 
         // Verify constraint scaling across arities
@@ -1299,7 +1299,7 @@ mod tests {
             let mut c1 = CircuitChallenger::<F, 16, 8>::new(&mut b1);
             let _ = synthesize_warp_fold_verifier::<
                 F,
-                GenericPoseidon2LinearLayersBabyBear,
+                GenericPoseidon2LinearLayersKoalaBear,
                 _,
                 16,
                 8,
@@ -1326,7 +1326,7 @@ mod tests {
             let mut c2 = CircuitChallenger::<F, 16, 8>::new(&mut b2);
             let _ = synthesize_warp_fold_verifier::<
                 F,
-                GenericPoseidon2LinearLayersBabyBear,
+                GenericPoseidon2LinearLayersKoalaBear,
                 _,
                 16,
                 8,
@@ -1348,7 +1348,7 @@ mod tests {
 
         let poseidon_perm = Perm::new_from_rng_128(&mut SmallRng::seed_from_u64(99));
         let poseidon_config =
-            Poseidon2CircuitConfig::<F, 16>::from_rng(8, 13, 7, &mut SmallRng::seed_from_u64(99));
+            Poseidon2CircuitConfig::<F, 16>::from_rng(8, 20, 3, &mut SmallRng::seed_from_u64(99));
 
         // Derive omega natively from the same Poseidon2 that the circuit will use
         let roots = vec![vec![F::ZERO; 8]; 2];
@@ -1406,7 +1406,7 @@ mod tests {
 
         let _output = synthesize_warp_fold_verifier::<
             F,
-            GenericPoseidon2LinearLayersBabyBear,
+            GenericPoseidon2LinearLayersKoalaBear,
             _,
             16,
             8,
@@ -1425,7 +1425,7 @@ mod tests {
 
         let poseidon_perm = Perm::new_from_rng_128(&mut SmallRng::seed_from_u64(99));
         let poseidon_config =
-            Poseidon2CircuitConfig::<F, 16>::from_rng(8, 13, 7, &mut SmallRng::seed_from_u64(99));
+            Poseidon2CircuitConfig::<F, 16>::from_rng(8, 20, 3, &mut SmallRng::seed_from_u64(99));
 
         // Derive omega natively from the same Poseidon2 that the circuit will use
         let roots = vec![vec![F::ZERO; 8]; 2];
@@ -1488,7 +1488,7 @@ mod tests {
 
         let _output = synthesize_warp_fold_verifier::<
             F,
-            GenericPoseidon2LinearLayersBabyBear,
+            GenericPoseidon2LinearLayersKoalaBear,
             _,
             16,
             8,

@@ -6,7 +6,7 @@
 //!
 //! # Parameters
 //!
-//! - `k`: packing parameter. k=4 gives ~106 bits of security over BabyBear for degree 3.
+//! - `k`: packing parameter. k=4 gives ~106 bits of security over KoalaBear for degree 3.
 //! - `d`: degree of the sumcheck polynomial (d=2 for quadratic, d=3 for Spartan Phase 1).
 //! - Evaluation set `W = {0, 1, ..., 2k-1}` used for Lagrange interpolation.
 //! - Round polynomial `F(r)` has degree `d*(2k-1)`.
@@ -14,7 +14,7 @@
 //! # Security
 //!
 //! Per-round soundness error: `((2k-1)*d / |F|)^k`.
-//! For BabyBear (p ~ 2^31), k=4, d=3: ~2^{-106} per round.
+//! For KoalaBear (p ~ 2^31), k=4, d=3: ~2^{-106} per round.
 
 use alloc::{vec, vec::Vec};
 
@@ -312,12 +312,12 @@ pub fn evaluate_poly_from_evals<F: Field>(evals: &[F], r: F) -> F {
 mod tests {
     use alloc::vec;
 
-    use p3_baby_bear::BabyBear;
+    use p3_koala_bear::KoalaBear;
     use p3_field::PrimeCharacteristicRing;
 
     use super::*;
 
-    type F = BabyBear;
+    type F = KoalaBear;
 
     #[test]
     fn lagrange_basis_identity() {

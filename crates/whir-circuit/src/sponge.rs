@@ -215,22 +215,22 @@ impl<F: Field + PrimeCharacteristicRing, const WIDTH: usize, const RATE: usize>
 
 #[cfg(test)]
 mod tests {
-    use p3_baby_bear::{BabyBear, GenericPoseidon2LinearLayersBabyBear, Poseidon2BabyBear};
+    use p3_koala_bear::{KoalaBear, GenericPoseidon2LinearLayersKoalaBear, Poseidon2KoalaBear};
     use p3_challenger::{CanObserve, CanSample, DuplexChallenger};
     use p3_field::PrimeCharacteristicRing;
     use rand::{rngs::SmallRng, SeedableRng};
 
     use super::*;
 
-    type F = BabyBear;
-    type Perm = Poseidon2BabyBear<16>;
-    type L = GenericPoseidon2LinearLayersBabyBear;
+    type F = KoalaBear;
+    type Perm = Poseidon2KoalaBear<16>;
+    type L = GenericPoseidon2LinearLayersKoalaBear;
 
     fn make_perm_and_config() -> (Perm, Poseidon2CircuitConfig<F, 16>) {
         let mut rng = SmallRng::seed_from_u64(42);
         let perm = Perm::new_from_rng_128(&mut rng);
         let mut rng2 = SmallRng::seed_from_u64(42);
-        let config = Poseidon2CircuitConfig::<F, 16>::from_rng(8, 13, 7, &mut rng2);
+        let config = Poseidon2CircuitConfig::<F, 16>::from_rng(8, 20, 3, &mut rng2);
         (perm, config)
     }
 

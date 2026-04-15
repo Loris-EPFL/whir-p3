@@ -8,18 +8,18 @@
 ## Prover/Verifier Cost Table
 | field | shape | log_m | num_cons | num_vars | nnz_per_row | nnz_per_matrix_global | total_nnz_global | prover_ms | verifier_ms |
 |---|---|---:|---:|---:|---:|---:|---:|---:|---:|
-| BabyBear | square | 4 | 16 | 16 | 1 | 16 | 48 | 0.1579 | 0.0169 |
-| BabyBear | square | 4 | 16 | 16 | 4 | 64 | 192 | 0.4516 | 0.0228 |
-| BabyBear | square | 6 | 64 | 64 | 1 | 64 | 192 | 3.1945 | 0.0318 |
-| BabyBear | square | 6 | 64 | 64 | 4 | 256 | 768 | 13.9330 | 0.0913 |
-| BabyBear | tall | 4 | 16 | 8 | 1 | 16 | 48 | 0.0799 | 0.0132 |
-| BabyBear | tall | 4 | 16 | 8 | 4 | 64 | 192 | 0.2296 | 0.0190 |
-| BabyBear | tall | 6 | 64 | 32 | 1 | 64 | 192 | 1.4233 | 0.0272 |
-| BabyBear | tall | 6 | 64 | 32 | 4 | 256 | 768 | 5.3737 | 0.0615 |
-| BabyBear | wide | 4 | 16 | 32 | 1 | 16 | 48 | 0.2981 | 0.0147 |
-| BabyBear | wide | 4 | 16 | 32 | 4 | 64 | 192 | 0.8196 | 0.0220 |
-| BabyBear | wide | 6 | 64 | 128 | 1 | 64 | 192 | 9.3634 | 0.0372 |
-| BabyBear | wide | 6 | 64 | 128 | 4 | 256 | 768 | 18.2681 | 0.0615 |
+| KoalaBear | square | 4 | 16 | 16 | 1 | 16 | 48 | 0.1579 | 0.0169 |
+| KoalaBear | square | 4 | 16 | 16 | 4 | 64 | 192 | 0.4516 | 0.0228 |
+| KoalaBear | square | 6 | 64 | 64 | 1 | 64 | 192 | 3.1945 | 0.0318 |
+| KoalaBear | square | 6 | 64 | 64 | 4 | 256 | 768 | 13.9330 | 0.0913 |
+| KoalaBear | tall | 4 | 16 | 8 | 1 | 16 | 48 | 0.0799 | 0.0132 |
+| KoalaBear | tall | 4 | 16 | 8 | 4 | 64 | 192 | 0.2296 | 0.0190 |
+| KoalaBear | tall | 6 | 64 | 32 | 1 | 64 | 192 | 1.4233 | 0.0272 |
+| KoalaBear | tall | 6 | 64 | 32 | 4 | 256 | 768 | 5.3737 | 0.0615 |
+| KoalaBear | wide | 4 | 16 | 32 | 1 | 16 | 48 | 0.2981 | 0.0147 |
+| KoalaBear | wide | 4 | 16 | 32 | 4 | 64 | 192 | 0.8196 | 0.0220 |
+| KoalaBear | wide | 6 | 64 | 128 | 1 | 64 | 192 | 9.3634 | 0.0372 |
+| KoalaBear | wide | 6 | 64 | 128 | 4 | 256 | 768 | 18.2681 | 0.0615 |
 | Goldilocks | square | 4 | 16 | 16 | 1 | 16 | 48 | 0.3214 | 0.0398 |
 | Goldilocks | square | 4 | 16 | 16 | 4 | 64 | 192 | 0.4166 | 0.0357 |
 | Goldilocks | square | 6 | 64 | 64 | 1 | 64 | 192 | 2.0632 | 0.0470 |
@@ -60,12 +60,12 @@
 ## Crossover Thresholds
 | field | shape | log_m | runtime crossover queries | payload-fields crossover queries | full-proof-bytes crossover queries |
 |---|---|---:|---:|---:|---:|
-| BabyBear | square | 4 | 1 | 1 | 1 |
-| BabyBear | square | 6 | 1 | 1 | 1 |
-| BabyBear | tall | 4 | 1 | 1 | 1 |
-| BabyBear | tall | 6 | 1 | 1 | 1 |
-| BabyBear | wide | 4 | 1 | 1 | 1 |
-| BabyBear | wide | 6 | 1 | 1 | 1 |
+| KoalaBear | square | 4 | 1 | 1 | 1 |
+| KoalaBear | square | 6 | 1 | 1 | 1 |
+| KoalaBear | tall | 4 | 1 | 1 | 1 |
+| KoalaBear | tall | 6 | 1 | 1 | 1 |
+| KoalaBear | wide | 4 | 1 | 1 | 1 |
+| KoalaBear | wide | 6 | 1 | 1 | 1 |
 | Goldilocks | square | 4 | 1 | 1 | 1 |
 | Goldilocks | square | 6 | 1 | 1 | 1 |
 | Goldilocks | tall | 4 | 1 | 1 | 1 |

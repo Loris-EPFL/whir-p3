@@ -9,9 +9,8 @@ rust-version = "1.93"
 [workspace.dependencies]
 # Plonky3 — single pin for the whole workspace
 p3-field = { git = "https://github.com/Plonky3/Plonky3.git", rev = "c38eb05" }
-p3-baby-bear = { git = "https://github.com/Plonky3/Plonky3.git", rev = "c38eb05" }
-p3-mersenne-31 = { git = "https://github.com/Plonky3/Plonky3.git", rev = "c38eb05" }
 p3-koala-bear = { git = "https://github.com/Plonky3/Plonky3.git", rev = "c38eb05" }
+p3-mersenne-31 = { git = "https://github.com/Plonky3/Plonky3.git", rev = "c38eb05" }
 p3-merkle-tree = { git = "https://github.com/Plonky3/Plonky3.git", rev = "c38eb05" }
 p3-symmetric = { git = "https://github.com/Plonky3/Plonky3.git", rev = "c38eb05" }
 p3-matrix = { git = "https://github.com/Plonky3/Plonky3.git", rev = "c38eb05" }

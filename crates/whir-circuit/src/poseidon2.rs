@@ -29,7 +29,7 @@ pub struct Poseidon2CircuitConfig<F: Field, const WIDTH: usize> {
     pub initial_external_constants: Vec<[F; WIDTH]>,
     pub terminal_external_constants: Vec<[F; WIDTH]>,
     pub internal_constants: Vec<F>,
-    /// S-box exponent: 3 for KoalaBear, 7 for BabyBear.
+    /// S-box exponent: 3 for KoalaBear, 7 for Mersenne31/BabyBear-style fields.
     pub sbox_degree: u64,
 }
 
@@ -57,7 +57,7 @@ impl<F: Field, const WIDTH: usize> Poseidon2CircuitConfig<F, WIDTH> {
 
     /// Create by generating constants from the same RNG used for `Poseidon2::new_from_rng`.
     ///
-    /// `sbox_degree`: the S-box exponent (3 for KoalaBear, 7 for BabyBear).
+    /// `sbox_degree`: the S-box exponent (3 for KoalaBear, 7 for Mersenne31/BabyBear-style fields).
     ///
     /// # Panics
     /// Panics if `sbox_degree` is not 3 or 7.
@@ -83,7 +83,7 @@ impl<F: Field, const WIDTH: usize> Poseidon2CircuitConfig<F, WIDTH> {
 
 /// Apply the S-box x^d as R1CS constraints.
 ///
-/// Supports d=3 (KoalaBear: 2 multiplications) and d=7 (BabyBear: 4 multiplications).
+/// Supports d=3 (KoalaBear: 2 multiplications) and d=7 (4 multiplications).
 fn sbox_circuit<F: Field>(builder: &mut CircuitBuilder<F>, x: Var, x_val: F, degree: u64) -> Var {
     match degree {
         3 => {
@@ -188,7 +188,7 @@ fn apply_linear_layer_circuit<F: Field, const W: usize>(
 /// and returns `WIDTH` output variables.
 ///
 /// # Type Parameters
-/// - `L`: The generic linear layers type (e.g., `GenericPoseidon2LinearLayersBabyBear`)
+/// - `L`: The generic linear layers type (e.g., `GenericPoseidon2LinearLayersKoalaBear`)
 /// - `P`: The actual Poseidon2 permutation instance (used to compute correct values)
 pub fn poseidon2_permute_circuit<F, L, P, const WIDTH: usize>(
     builder: &mut CircuitBuilder<F>,
@@ -295,15 +295,15 @@ where
 
 #[cfg(test)]
 mod tests {
-    use p3_baby_bear::{BabyBear, GenericPoseidon2LinearLayersBabyBear, Poseidon2BabyBear};
+    use p3_koala_bear::{KoalaBear, GenericPoseidon2LinearLayersKoalaBear, Poseidon2KoalaBear};
     use p3_field::PrimeCharacteristicRing;
     use p3_symmetric::Permutation;
     use rand::{rngs::SmallRng, SeedableRng};
 
     use super::*;
 
-    type F = BabyBear;
-    type Perm = Poseidon2BabyBear<16>;
+    type F = KoalaBear;
+    type Perm = Poseidon2KoalaBear<16>;
 
     #[test]
     fn poseidon2_circuit_produces_satisfying_r1cs() {
@@ -311,7 +311,9 @@ mod tests {
         let perm = Perm::new_from_rng_128(&mut rng);
 
         let mut rng2 = SmallRng::seed_from_u64(42);
-        let config = Poseidon2CircuitConfig::<F, 16>::from_rng(8, 13, 7, &mut rng2);
+        let (rf, rp) = p3_poseidon2::poseidon2_round_numbers_128::<F>(16, 3)
+            .expect("unsupported Poseidon2 parameters");
+        let config = Poseidon2CircuitConfig::<F, 16>::from_rng(rf, rp, 3, &mut rng2);
 
         let state_vals: [F; 16] = core::array::from_fn(|i| F::from_u64(i as u64 + 1));
         let mut builder = CircuitBuilder::<F>::new();
@@ -319,7 +321,7 @@ mod tests {
             core::array::from_fn(|i| builder.alloc_witness(state_vals[i]));
 
         let (_out_vars, out_vals) =
-            poseidon2_permute_circuit::<F, GenericPoseidon2LinearLayersBabyBear, _, 16>(
+            poseidon2_permute_circuit::<F, GenericPoseidon2LinearLayersKoalaBear, _, 16>(
                 &mut builder,
                 &config,
                 &perm,
@@ -348,14 +350,16 @@ mod tests {
         let perm = Perm::new_from_rng_128(&mut rng);
 
         let mut rng2 = SmallRng::seed_from_u64(42);
-        let config = Poseidon2CircuitConfig::<F, 16>::from_rng(8, 13, 7, &mut rng2);
+        let (rf, rp) = p3_poseidon2::poseidon2_round_numbers_128::<F>(16, 3)
+            .expect("unsupported Poseidon2 parameters");
+        let config = Poseidon2CircuitConfig::<F, 16>::from_rng(rf, rp, 3, &mut rng2);
 
         let state_vals: [F; 16] = core::array::from_fn(|i| F::from_u64(i as u64 + 1));
         let mut builder = CircuitBuilder::<F>::new();
         let state_vars: [Var; 16] =
             core::array::from_fn(|i| builder.alloc_witness(state_vals[i]));
 
-        let _ = poseidon2_permute_circuit::<F, GenericPoseidon2LinearLayersBabyBear, _, 16>(
+        let _ = poseidon2_permute_circuit::<F, GenericPoseidon2LinearLayersKoalaBear, _, 16>(
             &mut builder,
             &config,
             &perm,

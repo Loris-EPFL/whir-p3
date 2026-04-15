@@ -337,10 +337,10 @@ mod tests {
     use alloc::vec;
 
     use super::*;
-    use p3_baby_bear::BabyBear;
+    use p3_koala_bear::KoalaBear;
     use p3_field::PrimeCharacteristicRing;
 
-    type F = BabyBear;
+    type F = KoalaBear;
 
     fn make_r1cs_constraints() -> Vec<SparseR1CSConstraint<F>> {
         (0..4)

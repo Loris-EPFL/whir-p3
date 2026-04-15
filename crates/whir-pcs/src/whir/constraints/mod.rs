@@ -429,13 +429,13 @@ impl<F: Field, EF: ExtensionField<F>> Constraint<F, EF> {
 mod tests {
     use alloc::{vec, vec::Vec};
 
-    use p3_baby_bear::BabyBear;
+    use p3_koala_bear::KoalaBear;
     use p3_field::{extension::BinomialExtensionField, PrimeCharacteristicRing};
 
     use super::*;
 
     /// Type alias for the base field used in tests
-    type F = BabyBear;
+    type F = KoalaBear;
 
     /// Type alias for the extension field used in tests
     type EF = BinomialExtensionField<F, 4>;

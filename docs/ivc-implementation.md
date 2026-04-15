@@ -94,7 +94,7 @@ d = s1 - s0 - s2
 new_claimed = s0 + d*r + s2*r²
 ```
 
-All operations are in the extension field (BinomialExtensionField<BabyBear, 4>), using `ext_mul` (20 R1CS constraints per EF multiplication) for `d*r`, `r²`, and `s2*r²`.
+All operations are in the extension field (BinomialExtensionField<KoalaBear, 4>), using `ext_mul` (20 R1CS constraints per EF multiplication) for `d*r`, `r²`, and `s2*r²`.
 
 ### 3. Combined Evaluation
 
@@ -145,7 +145,7 @@ ivc_prover.prove_step_recursive(...);
 
 ## Extension Field Arithmetic
 
-`BinomialExtensionField<BabyBear, 4>` uses irreducible polynomial X⁴ - 11.
+`BinomialExtensionField<KoalaBear, 4>` uses irreducible polynomial X⁴ - 11.
 
 ### Multiplication (20 R1CS constraints)
 

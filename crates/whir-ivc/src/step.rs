@@ -151,12 +151,12 @@ impl<F: Field> StepCircuit<F> for SquaringStepCircuit {
 mod tests {
     use alloc::vec;
 
-    use p3_baby_bear::BabyBear;
+    use p3_koala_bear::KoalaBear;
     use p3_field::PrimeCharacteristicRing;
 
     use super::*;
 
-    type F = BabyBear;
+    type F = KoalaBear;
 
     #[test]
     fn trivial_step_produces_valid_circuit() {

@@ -659,17 +659,6 @@ macro_rules! bench_field_impl {
 }
 
 bench_field_impl!(
-    bench_babybear,
-    "KoalaBear",
-    p3_koala_bear::KoalaBear,
-    BinomialExtensionField<p3_koala_bear::KoalaBear, 4>,
-    p3_koala_bear::Poseidon2KoalaBear<16>,
-    DuplexChallenger<p3_koala_bear::KoalaBear, p3_koala_bear::Poseidon2KoalaBear<16>, 16, 8>,
-    4,
-    32
-);
-
-bench_field_impl!(
     bench_m31,
     "M31",
     p3_mersenne_31::Mersenne31,
@@ -747,13 +736,12 @@ fn main() {
         println!();
 
         match field {
-            "koalabear" => bench_babybear::run_compare(&log_ms, repeats),
+            "koalabear" => bench_koalabear::run_compare(&log_ms, repeats),
             "m31" => bench_m31::run_compare(&log_ms, repeats),
             "goldilocks" => bench_goldilocks::run_compare(&log_ms, repeats),
             "all" => {
-                bench_babybear::run_compare(&log_ms, repeats);
-                bench_m31::run_compare(&log_ms, repeats);
                 bench_koalabear::run_compare(&log_ms, repeats);
+                bench_m31::run_compare(&log_ms, repeats);
                 bench_goldilocks::run_compare(&log_ms, repeats);
             }
             _ => {
@@ -795,7 +783,7 @@ fn main() {
     .unwrap();
 
     println!("Running KoalaBear benchmark...");
-    bench_babybear::run(
+    bench_koalabear::run(
         quick,
         repeats,
         &mut metrics,
@@ -805,15 +793,6 @@ fn main() {
 
     println!("Running M31 benchmark...");
     bench_m31::run(
-        quick,
-        repeats,
-        &mut metrics,
-        &mut opening,
-        &mut verifier_queries,
-    );
-
-    println!("Running KoalaBear benchmark...");
-    bench_koalabear::run(
         quick,
         repeats,
         &mut metrics,
