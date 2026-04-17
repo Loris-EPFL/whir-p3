@@ -51,3 +51,7 @@ symphony = ["dep:whir-cp-snark", "whir-ivc/symphony"]
 [[bin]]
 name = "bench"
 path = "src/bin/bench.rs"
+
+[[bin]]
+name = "compare_bench"
+path = "src/bin/compare_bench.rs"

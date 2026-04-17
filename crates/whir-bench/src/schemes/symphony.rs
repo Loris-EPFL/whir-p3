@@ -54,7 +54,7 @@ impl FoldingScheme for Symphony {
         let step_input = [F::ZERO];
         let (target_w, _, _) = compute_cp_circuit_size(&step, &step_input);
 
-        m.time("prove_total", || {
+        let state = m.time("prove_total", || {
             let mut spartan_ch = make_challenger(300);
             let mut state = warp_ivc_init_cp::<F, EF, _, _, _, _, _>(
                 &self.shape,
@@ -85,7 +85,10 @@ impl FoldingScheme for Symphony {
                 );
             }
             state
-        })
+        });
+        m.count("total_instances", self.ivc_steps as u64);
+        m.count("family_b", 1);
+        state
     }
 
     fn verify(&self, proof: &Self::Proof, m: &mut Metrics) -> anyhow::Result<()> {
@@ -96,9 +99,12 @@ impl FoldingScheme for Symphony {
     }
 
     fn static_metrics(&self, _proof: &Self::Proof) -> StaticMetrics {
+        let step = WorkloadStepCircuit::new(self.step_muls);
+        let step_input = [F::ZERO];
+        let (_, c, _) = compute_cp_circuit_size(&step, &step_input);
         StaticMetrics {
             proof_field_elems: 0,
-            circuit_constraints: None,
+            circuit_constraints: Some(c as u64),
         }
     }
 }

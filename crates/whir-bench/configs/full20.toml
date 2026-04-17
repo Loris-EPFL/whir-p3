@@ -1,0 +1,63 @@
+# Full 7-scheme sweep across witness sizes and IVC step counts.
+#
+# Schemes span two fairness families:
+#
+#   Family A (no step circuit): compare on prove_total / total_instances.
+#     - independent_whir  — N × WHIR, N = ivc_steps × batch
+#     - pure_warp         — fold l=2, N = ivc_steps
+#     - warp_batch        — batch-reduce + fold, N = ivc_steps × batch
+#     - warp_union        — Quasar union fold, N = ivc_steps × (arity - 1)
+#
+#   Family B (recursive IVC with step+verifier unified circuit):
+#     - quasar_warp       — Poseidon2 recursive + Quasar union, N = ivc_steps
+#     - symphony          — algebraic recursive l=2, N = ivc_steps
+#     - quasar_symphony   — algebraic recursive + Quasar union, N = ivc_steps
+#
+# Axis constraints:
+#   - arity >= 4 to keep union-based schemes alive.
+#   - ivc_steps must be divisible by (arity - 1) for quasar_warp / quasar_symphony.
+#   - batch is used by warp_batch (instances reduced per step) and independent_whir
+#     (proofs per step). Unused by pure_warp / union / recursive schemes.
+#
+# For a *tightly matched* Family A comparison, set batch = arity - 1 so that
+# independent_whir / warp_batch / warp_union all accumulate the same total
+# (ivc_steps × (arity - 1) = ivc_steps × batch); pure_warp stays at
+# ivc_steps (one fresh per step) and is normalised by total_instances in the
+# plots.
+
+schemes = [
+    "independent_whir",
+    "pure_warp",
+    "warp_batch",
+    "warp_union",
+    "quasar_warp",
+    "symphony",
+    "quasar_symphony",
+]
+warmup  = 1
+repeats = 3
+output  = "output/full20.jsonl"
+
+[axes]
+# log_n is the witness size sweep — this is the primary X axis for the
+# "prove time vs constraint size" figure. Increase for bigger benchmarks;
+# expect ~2-4x per +1 in log_n for Family A schemes and ~4-8x for Family B.
+log_n     = [10, 12, 14, 16]
+
+# Fold arity — fixed at 4. ivc_steps must be divisible by arity-1 = 3.
+arity     = [4]
+
+# Fresh instances per IVC step for batched schemes. Matches arity-1 to keep
+# independent_whir / warp_batch / warp_union at the same total_instances.
+batch     = [3]
+
+# IVC steps per run. Each must satisfy `ivc_steps % (arity - 1) == 0`.
+# 6 / 12 / 24 ⇒ 6 / 12 / 24 total step circuits (Family B) or
+# 18 / 36 / 72 total R1CS instances (Family A batched paths).
+ivc_steps = [6, 12, 24]
+
+# Multiplications per step circuit (Family B only). ~step_muls R1CS constraints
+# contributed by the user logic, then the fold verifier is added on top.
+step_muls = [100]
+
+seed      = 42

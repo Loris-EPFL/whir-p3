@@ -87,7 +87,26 @@ impl FoldingScheme for QuasarWarp {
             log_m,
         );
 
-        m.time("prove_total", || {
+        let circuit_constraints_cell = {
+            let (_, c, _) = compute_recursive_circuit_size_union::<
+                F,
+                GenericPoseidon2LinearLayersKoalaBear,
+                _,
+                _,
+            >(
+                &step,
+                &step_input,
+                &poseidon_config,
+                &poseidon_perm,
+                self.shape.num_poly_vars_y(),
+                self.arity,
+                log_m,
+            );
+            c as u64
+        };
+        m.count("circuit_constraints", circuit_constraints_cell);
+
+        let state = m.time("prove_total", || {
             let mut spartan_ch = make_challenger(100);
             let mut state = warp_ivc_init_recursive_union::<
                 F,
@@ -154,7 +173,10 @@ impl FoldingScheme for QuasarWarp {
                 );
             }
             state
-        })
+        });
+        m.count("total_instances", self.ivc_steps as u64);
+        m.count("family_b", 1);
+        state
     }
 
     fn verify(&self, proof: &Self::Proof, m: &mut Metrics) -> anyhow::Result<()> {
@@ -165,9 +187,29 @@ impl FoldingScheme for QuasarWarp {
     }
 
     fn static_metrics(&self, _proof: &Self::Proof) -> StaticMetrics {
+        let (_, c, _) = {
+            let (perm, cfg) = crate::fixtures::make_poseidon2_circuit_config();
+            let step = WorkloadStepCircuit::new(self.step_muls);
+            let step_input = [F::ZERO];
+            let log_m = self.shape.num_cons().next_power_of_two().trailing_zeros() as usize;
+            compute_recursive_circuit_size_union::<
+                F,
+                GenericPoseidon2LinearLayersKoalaBear,
+                _,
+                _,
+            >(
+                &step,
+                &step_input,
+                &cfg,
+                &perm,
+                self.shape.num_poly_vars_y(),
+                self.arity,
+                log_m,
+            )
+        };
         StaticMetrics {
             proof_field_elems: 0,
-            circuit_constraints: None,
+            circuit_constraints: Some(c as u64),
         }
     }
 }

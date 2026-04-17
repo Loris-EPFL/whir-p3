@@ -18,9 +18,14 @@ use warp::{
 use whir_core::poly::evals::EvaluationsList;
 use whir_core::poly::multilinear::MultilinearPoint;
 use whir_pcs::whir::{
-    constraints::statement::LinearStatement,
+    committer::{reader::CommitmentReader, writer::CommitmentWriter},
+    constraints::statement::{EqStatement, InitialClaim, LinearStatement},
     parameters::WhirConfig,
+    proof::{QueryOpening, WhirProof},
+    prover::Prover as WhirProver,
+    verifier::Verifier as WhirVerifier,
 };
+use p3_field::Field;
 use whir_core::parameters::{errors::SecurityAssumption, FoldingFactor, ProtocolParameters};
 use whir_pcs::fiat_shamir::domain_separator::DomainSeparator;
 use whir_spartan::{
@@ -179,6 +184,107 @@ pub fn produce_synthetic_r1cs(
         .next_power_of_two()
         .trailing_zeros() as usize;
     (shape, instance, num_witness, num_inputs, log_code, log_m)
+}
+
+/// Run a terminal WHIR prove on the final accumulated witness.
+///
+/// Used by accumulation-family schemes that want a succinct terminal proof
+/// (so verifier cost is comparable to independent WHIR proofs).
+pub fn terminal_whir_prove(
+    config: &WhirConfig<EF, F, MyHash, MyCompress, MyChallenger>,
+    witness: &[F],
+    witness_num_vars: usize,
+) -> WhirProof<F, EF, F, DIGEST> {
+    let dft = make_dft();
+    let ds = make_ds(config);
+    let mut wvec = witness.to_vec();
+    wvec.resize(wvec.len().next_power_of_two(), F::ZERO);
+    let wpoly = EvaluationsList::new(wvec);
+    let lc = LinearStatement::<F, EF>::initialize(witness_num_vars);
+    let mut stmt = config.initial_statement_with_linear(wpoly, lc);
+    let mut proof = WhirProof::<F, EF, F, DIGEST>::from_whir_config(config);
+    let mut ch = seed_ch(999, &ds);
+    let comm = CommitmentWriter::new(config)
+        .commit::<_, <F as Field>::Packing, F, <F as Field>::Packing, DIGEST>(
+            &dft, &mut proof, &mut ch, &mut stmt,
+        )
+        .unwrap();
+    WhirProver(config)
+        .prove::<_, <F as Field>::Packing, F, <F as Field>::Packing, DIGEST>(
+            &dft, &mut proof, &mut ch, &stmt, comm,
+        )
+        .unwrap();
+    proof
+}
+
+/// Run a terminal WHIR verify (succinct — no witness needed).
+pub fn terminal_whir_verify(
+    config: &WhirConfig<EF, F, MyHash, MyCompress, MyChallenger>,
+    proof: &WhirProof<F, EF, F, DIGEST>,
+    witness_num_vars: usize,
+) -> anyhow::Result<()> {
+    let ds = make_ds(config);
+    let initial_claim = InitialClaim {
+        eq_statement: EqStatement::initialize(witness_num_vars),
+        linear_statement: LinearStatement::<F, EF>::initialize(witness_num_vars),
+    };
+    let mut ch = seed_ch(999, &ds);
+    let parsed = CommitmentReader::new(config).parse_commitment::<F, DIGEST>(proof, &mut ch);
+    WhirVerifier::new(config)
+        .verify_with_initial_claim::<<F as Field>::Packing, F, <F as Field>::Packing, DIGEST>(
+            proof, &mut ch, &parsed, initial_claim,
+        )
+        .map(|_| ())
+        .map_err(|e| anyhow::anyhow!("terminal WHIR verify failed: {e:?}"))
+}
+
+/// Estimate WHIR proof size in field elements.
+pub fn whir_proof_field_elements(proof: &WhirProof<F, EF, F, DIGEST>) -> u64 {
+    let mut count: u64 = 0;
+    count += DIGEST as u64;
+    count += (proof.initial_ood_answers.len() * 4) as u64;
+    count += (proof.initial_sumcheck.polynomial_evaluations.len() * 2 * 4) as u64;
+    count += proof.initial_sumcheck.pow_witnesses.len() as u64;
+    for round in &proof.rounds {
+        count += DIGEST as u64;
+        count += (round.ood_answers.len() * 4) as u64;
+        count += 1;
+        for q in &round.queries {
+            match q {
+                QueryOpening::Base { values, proof: p } => {
+                    count += values.len() as u64;
+                    count += (p.len() * DIGEST) as u64;
+                }
+                QueryOpening::Extension { values, proof: p } => {
+                    count += (values.len() * 4) as u64;
+                    count += (p.len() * DIGEST) as u64;
+                }
+            }
+        }
+        count += (round.sumcheck.polynomial_evaluations.len() * 2 * 4) as u64;
+        count += round.sumcheck.pow_witnesses.len() as u64;
+    }
+    if let Some(ref fp) = proof.final_poly {
+        count += (fp.num_evals() * 4) as u64;
+    }
+    count += 1;
+    for q in &proof.final_queries {
+        match q {
+            QueryOpening::Base { values, proof: p } => {
+                count += values.len() as u64;
+                count += (p.len() * DIGEST) as u64;
+            }
+            QueryOpening::Extension { values, proof: p } => {
+                count += (values.len() * 4) as u64;
+                count += (p.len() * DIGEST) as u64;
+            }
+        }
+    }
+    if let Some(ref fs) = proof.final_sumcheck {
+        count += (fs.polynomial_evaluations.len() * 2 * 4) as u64;
+        count += fs.pow_witnesses.len() as u64;
+    }
+    count
 }
 
 /// Build the Poseidon2 permutation and circuit config used by recursive IVC paths.

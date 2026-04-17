@@ -26,6 +26,16 @@ fn dispatch(
     out: &mut impl Write,
 ) -> anyhow::Result<()> {
     match name {
+        "independent_whir" => run::<schemes::IndependentWhir>(axes, warmup, repeats, out),
+        "warp_batch" => run::<schemes::WarpBatch>(axes, warmup, repeats, out),
+        "warp_union" => {
+            if axes.arity < 4 {
+                skip(out, name, axes, "arity<4, union fold needs arity>=4");
+                Ok(())
+            } else {
+                run::<schemes::WarpUnion>(axes, warmup, repeats, out)
+            }
+        }
         "pure_warp" => run::<schemes::PureWarp>(axes, warmup, repeats, out),
         "quasar_warp" => {
             if axes.arity < 4 {

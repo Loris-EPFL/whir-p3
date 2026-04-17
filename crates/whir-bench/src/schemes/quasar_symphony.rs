@@ -64,7 +64,7 @@ impl FoldingScheme for QuasarSymphony {
         let (target_w, _, _) =
             compute_recursive_union_circuit_size(&step, &step_input, self.arity);
 
-        m.time("prove_total", || {
+        let state = m.time("prove_total", || {
             let state = warp_ivc_init_recursive_union_cp::<F, _>(
                 &step,
                 &step_input,
@@ -99,7 +99,10 @@ impl FoldingScheme for QuasarSymphony {
                 );
             }
             state
-        })
+        });
+        m.count("total_instances", self.ivc_steps as u64);
+        m.count("family_b", 1);
+        state
     }
 
     fn verify(&self, proof: &Self::Proof, m: &mut Metrics) -> anyhow::Result<()> {
@@ -110,9 +113,12 @@ impl FoldingScheme for QuasarSymphony {
     }
 
     fn static_metrics(&self, _proof: &Self::Proof) -> StaticMetrics {
+        let step = WorkloadStepCircuit::new(self.step_muls);
+        let step_input = [F::ZERO];
+        let (_, c, _) = compute_recursive_union_circuit_size(&step, &step_input, self.arity);
         StaticMetrics {
             proof_field_elems: 0,
-            circuit_constraints: None,
+            circuit_constraints: Some(c as u64),
         }
     }
 }

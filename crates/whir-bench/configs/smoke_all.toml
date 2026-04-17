@@ -1,0 +1,32 @@
+# Smoke-test config exercising all 7 schemes at small size.
+#
+# Two fairness families:
+#   Family A (accumulate N fresh R1CS instances, no step circuit):
+#     - independent_whir  — N × WHIR proofs, no fold
+#     - pure_warp         — fold N instances at l=2
+#     - warp_batch        — batch-reduce + fold l=2, N = ivc_steps × batch
+#     - warp_union        — Quasar union fold, N = ivc_steps × (arity-1)
+#
+#   Family B (IVC-prove N step circuits, step+verifier unified):
+#     - quasar_warp       — Poseidon2 recursive + Quasar union
+#     - symphony          — algebraic recursive, l=2
+#     - quasar_symphony   — algebraic recursive + Quasar union
+#
+# Within each family, schemes answer the same question and are apples-to-apples
+# on prover time normalized by `total_instances` (emitted as a counter).
+
+schemes = [
+    "independent_whir", "pure_warp", "warp_batch", "warp_union",
+    "quasar_warp", "symphony", "quasar_symphony",
+]
+warmup  = 0
+repeats = 1
+output  = "output/smoke_all.jsonl"
+
+[axes]
+log_n     = [10]
+arity     = [4]
+batch     = [2]
+ivc_steps = [6]
+step_muls = [100]
+seed      = 42
