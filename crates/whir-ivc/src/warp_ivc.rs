@@ -626,7 +626,11 @@ where
     Perm2: Permutation<[F; 16]>,
     S: crate::ivc::step::StepCircuit<F>,
 {
-    // Build a dummy verifier witness for l=2 (1 round, 1 fresh instance)
+    // Build a dummy verifier witness for l=2 (1 round, 1 fresh instance).
+    // Shift-authentication fields default to empty — the Phase 5 block
+    // of `synthesize_warp_fold_verifier` is a no-op when there are no
+    // shift queries to verify, so circuit-size measurements produced by
+    // this helper remain comparable to pre-Phase-3 numbers.
     let dummy_witness = WarpFoldVerifierWitness {
         input_commitment_roots: vec![vec![F::ZERO; 8]; 2],
         input_eval_claims: vec![F::ZERO; 2],
@@ -641,6 +645,19 @@ where
         all_eval_claims: None,
         all_pesat_targets: None,
         all_eval_points: None,
+        shift_positions: Vec::new(),
+        shift_input_values: Vec::new(),
+        shift_auth_paths: Vec::new(),
+        shift_folding_factor: 0,
+        shift_codeword_roots: Vec::new(),
+        shift_union_mode: false,
+        alpha_eval: F::ZERO,
+        ood_answers: Vec::new(),
+        ood_points: Vec::new(),
+        rho: F::ZERO,
+        eval_batch_round_polys: Vec::new(),
+        eval_batch_challenges: Vec::new(),
+        new_eval_claim: F::ZERO,
     };
 
     let mut builder = CircuitBuilder::<F>::new();
@@ -2825,6 +2842,19 @@ mod tests {
             all_eval_claims: None,
             all_pesat_targets: None,
             all_eval_points: None,
+            shift_positions: Vec::new(),
+            shift_input_values: Vec::new(),
+            shift_auth_paths: Vec::new(),
+            shift_folding_factor: 0,
+            shift_codeword_roots: Vec::new(),
+            shift_union_mode: false,
+            alpha_eval: F::ZERO,
+            ood_answers: Vec::new(),
+            ood_points: Vec::new(),
+            rho: F::ZERO,
+            eval_batch_round_polys: Vec::new(),
+            eval_batch_challenges: Vec::new(),
+            new_eval_claim: F::ZERO,
         };
         let mut verifier_only_builder = CircuitBuilder::<F>::new();
         let mut verifier_chal = CircuitChallenger::<F, 16, 8>::new(&mut verifier_only_builder);
@@ -2945,6 +2975,19 @@ mod tests {
             all_eval_claims: None,
             all_pesat_targets: None,
             all_eval_points: None,
+            shift_positions: Vec::new(),
+            shift_input_values: Vec::new(),
+            shift_auth_paths: Vec::new(),
+            shift_folding_factor: 0,
+            shift_codeword_roots: Vec::new(),
+            shift_union_mode: false,
+            alpha_eval: F::ZERO,
+            ood_answers: Vec::new(),
+            ood_points: Vec::new(),
+            rho: F::ZERO,
+            eval_batch_round_polys: Vec::new(),
+            eval_batch_challenges: Vec::new(),
+            new_eval_claim: F::ZERO,
         };
         let mut init_builder = CircuitBuilder::<F>::new();
         let mut init_chal = CircuitChallenger::<F, 16, 8>::new(&mut init_builder);

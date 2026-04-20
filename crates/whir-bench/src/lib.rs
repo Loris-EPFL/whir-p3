@@ -4,5 +4,7 @@ pub mod emit;
 pub mod fixtures;
 pub mod harness;
 pub mod metrics;
+pub mod microbench;
+pub mod microbenches;
 pub mod scheme;
 pub mod schemes;

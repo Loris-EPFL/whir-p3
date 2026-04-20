@@ -8,6 +8,7 @@ rust-version.workspace = true
 whir-core = { path = "../whir-core", default-features = false }
 whir-pcs = { path = "../whir-pcs", default-features = false }
 whir-spartan = { path = "../whir-spartan", default-features = false }
+whir-traits = { path = "../whir-traits", default-features = false }
 
 p3-field.workspace = true
 p3-challenger.workspace = true

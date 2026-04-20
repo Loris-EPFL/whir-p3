@@ -85,6 +85,18 @@ pub fn spartan_witnesses_to_warp_fresh<F: Field>(
 ///
 /// The Quasar squash step can optionally be inserted between these steps
 /// to reduce l instances to 1 before the fold (for fewer sumcheck rounds).
+///
+/// # ⚠️ SOUNDNESS WARNING — test-only scaffold (bug_014)
+///
+/// This function delegates to [`crate::fold::warp_fold_prove`], which uses
+/// **identity encoding** (no Reed-Solomon proximity). It is NOT sound as a
+/// production WARP fold. Use the RS-encoded variants in `crate::fold` for any
+/// real pipeline; the production accumulation paths (`warp_ivc_step*` in the
+/// `whir-ivc` crate) already do so.
+#[deprecated(
+    note = "Delegates to identity-encoding warp_fold_prove (no RS proximity). \
+            Test scaffold only. Use warp_fold_prove_rs_committed instead."
+)]
 pub fn quasar_then_warp_fold<F: Field>(
     shape: &R1CSShape<F>,
     fresh_instances: &[FreshInstance<F>],
@@ -94,6 +106,7 @@ pub fn quasar_then_warp_fold<F: Field>(
     fresh_betas: &[Vec<F>],
     transcript_round: impl FnMut(&[F]) -> F,
 ) -> crate::fold::WarpFoldResult<F> {
+    #[allow(deprecated)]
     crate::fold::warp_fold_prove(
         shape,
         fresh_instances,

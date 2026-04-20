@@ -6,6 +6,7 @@ rust-version.workspace = true
 
 [dependencies]
 whir-core = { path = "../whir-core", default-features = false }
+whir-traits = { path = "../whir-traits", default-features = false }
 
 p3-field.workspace = true
 p3-challenger.workspace = true

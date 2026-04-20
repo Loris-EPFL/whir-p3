@@ -1,0 +1,29 @@
+# Smoke version of dashboard.toml — runs everything at minimal sizes so
+# the full pipeline finishes in ~10 seconds.
+
+schemes = [
+    "independent_whir", "pure_warp", "warp_batch", "warp_union",
+    "quasar_warp", "symphony", "quasar_symphony",
+]
+microbenches = [
+    "fs_scaling", "fold_verify", "circuit_size_arity", "circuit_sizes_l2",
+    "terminal_whir", "whir_in_circuit_estimate",
+]
+warmup  = 0
+repeats = 1
+output  = "output/dashboard_smoke.jsonl"
+
+[axes]
+log_n     = [10]
+arity     = [4]
+batch     = [2]
+ivc_steps = [6]
+step_muls = [100]
+seed      = 42
+
+[microbench_axes]
+arity            = [2, 4, 8, 16]
+log_m            = 10
+log_n            = 11
+log_size         = [10]
+terminal_repeats = 1

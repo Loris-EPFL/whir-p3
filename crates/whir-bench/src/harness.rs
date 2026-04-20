@@ -2,8 +2,10 @@ use std::io::Write;
 
 use crate::{
     config::BenchConfig,
-    emit::write_row,
+    emit::{write_microbench_row, write_row},
     metrics::{Metrics, Row},
+    microbench::Microbench,
+    microbenches,
     scheme::FoldingScheme,
     schemes,
 };
@@ -14,6 +16,33 @@ pub fn run_matrix(cfg: &BenchConfig) -> anyhow::Result<()> {
         for scheme in &cfg.schemes {
             dispatch(scheme, &axes, cfg.warmup, cfg.repeats, &mut out)?;
         }
+    }
+    // Microbenches have their own axes (independent of the scheme sweep) and
+    // run once per BenchConfig invocation.
+    for mb in &cfg.microbenches {
+        dispatch_microbench(mb, &cfg.microbench_axes, &mut out)?;
+    }
+    Ok(())
+}
+
+fn dispatch_microbench(
+    name: &str,
+    axes: &crate::microbench::MicrobenchAxes,
+    out: &mut impl Write,
+) -> anyhow::Result<()> {
+    let rows = match name {
+        "fs_scaling" => microbenches::fs_scaling::FsScaling::run(axes),
+        "fold_verify" => microbenches::fold_verifier::FoldVerifier::run(axes),
+        "circuit_size_arity" => microbenches::circuit_size_arity::CircuitSizeArity::run(axes),
+        "circuit_sizes_l2" => microbenches::circuit_sizes_l2::CircuitSizesL2::run(axes),
+        "terminal_whir" => microbenches::terminal_whir::TerminalWhir::run(axes),
+        "whir_in_circuit_estimate" => {
+            microbenches::whir_in_circuit_estimate::WhirInCircuitEstimate::run(axes)
+        }
+        other => anyhow::bail!("unknown microbench: {other}"),
+    };
+    for r in rows {
+        write_microbench_row(out, &r)?;
     }
     Ok(())
 }

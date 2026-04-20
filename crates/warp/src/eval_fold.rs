@@ -12,6 +12,27 @@
 //! 5. Runs evaluation batching sumcheck to reduce to a single (α, μ) claim
 //!
 //! No WHIR proof is generated — that's deferred to the terminal decider.
+//!
+//! # bug_017 — status: FIXED
+//!
+//! Earlier versions of this module accumulated the eval claim on the
+//! **witness polynomial** while the Merkle commitment covered the
+//! **codeword**, leaving the commitment cryptographically unbound from
+//! the accumulated `(α, μ)` pair. That gap is now closed:
+//!
+//! - Phase 5 batches claims **on the codeword** (log_n vars), binding the
+//!   Phase-4 OOD answers and shift-query values directly.
+//! - `initial_eval_accumulator` initialises `eval_point` in codeword
+//!   domain.
+//! - `EvalDecider::prove` / `::verify` commit / open the **codeword**
+//!   polynomial, matching the accumulated claim's domain.
+//!
+//! End-to-end soundness still requires the caller to authenticate
+//! shift-query rows against the stored `commitment_root` via
+//! [`crate::fold::verify_shift_queries_merkle`]; that check is not
+//! internal to `eval_fold_prove` because the prover's closure only
+//! returns a root, not the tree (the tree is rebuilt by the caller or
+//! by [`crate::fold::materialize_shift_query_proofs`] post-fold).
 
 use alloc::{vec, vec::Vec};
 
@@ -85,6 +106,12 @@ pub struct EvalFoldResult<F: Field, const DIGEST_ELEMS: usize> {
     pub ood_points: Vec<Vec<F>>,
     /// OOD answers: f̃(ζ_k) at each OOD point.
     pub ood_answers: Vec<F>,
+    /// Folded codeword MLE at the twin-sumcheck folded alpha (first
+    /// claim fed into the batching sumcheck). Zero when no batching.
+    pub alpha_eval: F,
+    /// Output evaluation claim of the batching sumcheck: the folded
+    /// codeword's MLE at `instance.eval_point`. Zero when no batching.
+    pub new_eval_claim: F,
     /// Evaluation batching sumcheck round polys.
     pub eval_batch_round_polys: Vec<Vec<F>>,
     /// Evaluation batching sumcheck challenges.
@@ -308,64 +335,75 @@ where
     }
 
     // ═══════════════════════════════════════════
-    // Phase 5: Build final eval claim on WITNESS polynomial
+    // Phase 5: Build final eval claim on the CODEWORD
     // ═══════════════════════════════════════════
-    // The eval claims are on the WITNESS polynomial (not codeword).
-    // Codeword was only used for proximity testing (shift queries + OOD).
-    // The terminal WHIR proof will be on the witness polynomial.
-    let wit_log_n = accumulators[0].witness.witness_poly.num_variables();
+    //
+    // Fix for bug_017: the batching sumcheck operates on the **codeword**
+    // (log_n vars), not the witness. OOD answers and shift-query values
+    // (both computed on the codeword in Phase 4) are bound directly, so
+    // a malicious prover can no longer commit a non-proximal codeword
+    // and satisfy the batching sumcheck with witness-domain evaluations.
+    //
+    // As a consequence, the output accumulator's `eval_point` /
+    // `eval_claim` live in codeword-domain (log_n vars). Downstream
+    // consumers (EvalDecider, pipeline tests) are updated accordingly.
+    // The witness polynomial is still carried on the accumulator
+    // (witness field) so that the terminal WHIR prover can open it.
 
-    // Folded eval point in witness domain (truncate if codeword-dimensioned)
-    let folded_alpha_wit = if folded_alpha.len() > wit_log_n {
-        folded_alpha[..wit_log_n].to_vec()
-    } else {
-        folded_alpha.clone()
-    };
+    // The twin-constraint sumcheck's folded alpha may come in with
+    // accumulator-specific dimensionality. Extend to log_n with zeros
+    // (standard multilinear-extension convention).
+    let mut folded_alpha_code = folded_alpha.clone();
+    folded_alpha_code.resize(log_n, F::ZERO);
 
-    // Use evaluate_hypercube_base to compute the eval claim — this matches
-    // WHIR's convention (via MultilinearPoint/new_from_point).
-    let folded_mu_wit = folded_witness_poly.evaluate_hypercube_base(
-        &crate::poly::multilinear::MultilinearPoint::new(folded_alpha_wit.clone()),
+    // First batched claim: μ_code = MLE(codeword, α_code)
+    let alpha_eval = folded_codeword_poly.evaluate_hypercube_base(
+        &crate::poly::multilinear::MultilinearPoint::new(folded_alpha_code.clone()),
     );
 
-    // If we have OOD/shift queries, run the evaluation batching sumcheck
-    // to reduce all claims to a single point. Otherwise, just use the
-    // folded (alpha, mu) directly.
+    // Run the batching sumcheck over the CODEWORD if we have extra claims;
+    // otherwise carry (α_code, μ_code) through unchanged.
     let has_extra_claims = num_ood_samples > 0 || num_shift_queries > 0;
 
-    let (final_eval_point, final_mu, batch_round_polys, batch_challenges) = if has_extra_claims {
-        let mut all_eval_claims: Vec<(Vec<F>, F)> = Vec::new();
-        all_eval_claims.push((folded_alpha_wit.clone(), folded_mu_wit));
-        for (pt, &_val) in ood_points.iter().zip(ood_answers.iter()) {
-            // OOD claims are on the codeword — convert to witness domain
-            let wit_pt = if pt.len() > wit_log_n { pt[..wit_log_n].to_vec() } else { pt.clone() };
-            let wit_val = folded_witness_poly.evaluate_hypercube_base(
-                &crate::poly::multilinear::MultilinearPoint::new(wit_pt.clone()),
-            );
-            all_eval_claims.push((wit_pt, wit_val));
-        }
-        for (_k, &pos) in shift_query_positions.iter().enumerate() {
-            let bool_point: Vec<F> = (0..wit_log_n)
-                .map(|bit| if (pos >> bit) & 1 == 1 { F::ONE } else { F::ZERO })
-                .collect();
-            let val = folded_witness_poly.evaluate_hypercube_base(
-                &crate::poly::multilinear::MultilinearPoint::new(bool_point.clone()),
-            );
-            all_eval_claims.push((bool_point, val));
-        }
+    let (final_eval_point, final_mu, alpha_eval_out, new_eval_claim_out, batch_round_polys, batch_challenges) =
+        if has_extra_claims {
+            let mut all_eval_claims: Vec<(Vec<F>, F)> = Vec::new();
+            all_eval_claims.push((folded_alpha_code.clone(), alpha_eval));
 
-        let rho = transcript_round(&[]);
-        eval_batching_sumcheck(
-            folded_witness_poly.as_slice(),
-            &all_eval_claims,
-            rho,
-            wit_log_n,
-            &mut transcript_round,
-        )
-    } else {
-        // No extra claims — the eval claim is just the folded (alpha, mu)
-        (folded_alpha_wit.clone(), folded_mu_wit, Vec::new(), Vec::new())
-    };
+            // OOD claims — bind directly (no witness re-eval).
+            for (point, &answer) in ood_points.iter().zip(ood_answers.iter()) {
+                all_eval_claims.push((point.clone(), answer));
+            }
+
+            // Shift-query claims in codeword-domain. The value at
+            // codeword position `pos` equals the MLE at the binary
+            // encoding of `pos` in log_n bits.
+            for (k, &pos) in shift_query_positions.iter().enumerate() {
+                let bool_point: Vec<F> = (0..log_n)
+                    .map(|bit| if (pos >> bit) & 1 == 1 { F::ONE } else { F::ZERO })
+                    .collect();
+                all_eval_claims.push((bool_point, shift_query_values[k][0]));
+            }
+
+            let rho = transcript_round(&[]);
+            let (new_pt, new_mu, rp, ch) = eval_batching_sumcheck(
+                folded_codeword_poly.as_slice(),
+                &all_eval_claims,
+                rho,
+                log_n,
+                &mut transcript_round,
+            );
+            (new_pt, new_mu, alpha_eval, new_mu, rp, ch)
+        } else {
+            (
+                folded_alpha_code.clone(),
+                alpha_eval,
+                alpha_eval,
+                alpha_eval,
+                Vec::new(),
+                Vec::new(),
+            )
+        };
 
     let final_mu = final_mu;
 
@@ -383,6 +421,8 @@ where
         sumcheck_challenges: challenges,
         ood_points,
         ood_answers,
+        alpha_eval: alpha_eval_out,
+        new_eval_claim: new_eval_claim_out,
         eval_batch_round_polys: batch_round_polys,
         eval_batch_challenges: batch_challenges,
         shift_query_positions,
@@ -484,12 +524,17 @@ fn eval_batching_sumcheck<F: Field>(
 pub fn initial_eval_accumulator<F: Field, const DIGEST_ELEMS: usize>(
     code_len: usize,
     witness_len: usize,
-    witness_num_vars: usize,
+    _witness_num_vars: usize,
 ) -> EvalAccumulator<F, DIGEST_ELEMS> {
+    // Post-bug_017 fix: eval_point lives in CODEWORD domain (log_n vars)
+    // so that the accumulated (α, μ) pair is directly bound to the
+    // committed codeword via the evaluation-batching sumcheck.
+    // The `_witness_num_vars` arg is retained for API compatibility.
+    let code_log_n = code_len.trailing_zeros() as usize;
     EvalAccumulator {
         instance: EvalAccumulatorInstance {
             commitment_root: [F::ZERO; DIGEST_ELEMS],
-            eval_point: vec![F::ZERO; witness_num_vars],
+            eval_point: vec![F::ZERO; code_log_n],
             eval_claim: F::ZERO,
         },
         witness: EvalAccumulatorWitness {
@@ -609,8 +654,11 @@ where
 
     /// Prove: generate a standalone WHIR proof for the final eval accumulator.
     ///
-    /// The WHIR proof is over the **witness polynomial** (not the codeword).
-    /// WHIR handles RS encoding internally.
+    /// Post-bug_017 fix: the WHIR proof is now over the **codeword** (not the
+    /// witness) because the accumulated `(α, μ)` pair is a codeword-MLE claim
+    /// bound via the evaluation-batching sumcheck at every fold step. The
+    /// WhirConfig passed to `EvalDecider::new` must therefore have
+    /// `num_variables == log2(code_len)`.
     pub fn prove<P, W, PW, Dft, const DIGEST_ELEMS: usize>(
         &self,
         dft: &Dft,
@@ -631,31 +679,17 @@ where
         Challenger: CanObserve<Hash<F, W, DIGEST_ELEMS>>,
         [W; DIGEST_ELEMS]: serde::Serialize + for<'de> serde::Deserialize<'de>,
     {
-        let witness = &accumulator.witness.witness_poly;
-        let num_vars = witness.num_variables();
-
-        // Build the linear claim from the eval point/value
-        // The eval_point is in the codeword domain (log_n dims), but WHIR
-        // operates on the witness polynomial (log_k dims where k = n / rate).
-        // We need the eval claim to be on the witness polynomial.
-        //
-        // If eval_point has more dimensions than the witness (due to RS rate),
-        // we truncate to the witness dimensions. The extra dimensions from RS
-        // encoding are handled by WHIR's own encoding.
-        let eval_point_for_whir = if accumulator.instance.eval_point.len() > num_vars {
-            &accumulator.instance.eval_point[..num_vars]
-        } else {
-            &accumulator.instance.eval_point
-        };
+        let codeword = &accumulator.witness.codeword;
+        let num_vars = codeword.num_variables();
 
         let linear_claim = Self::eval_claim_to_linear_statement(
-            eval_point_for_whir,
+            &accumulator.instance.eval_point,
             accumulator.instance.eval_claim,
             num_vars,
         );
 
         let mut statement = self.0.initial_statement_with_linear(
-            witness.clone(),
+            codeword.clone(),
             linear_claim,
         );
 
@@ -680,8 +714,10 @@ where
 
     /// Verify: check the standalone decider proof.
     ///
-    /// Reconstructs the linear claim from the eval point/value and verifies
-    /// the WHIR proof against it.
+    /// Post-bug_017 fix: the linear claim is expressed in codeword domain
+    /// (log_n vars = log2(code_len)), matching the prover side. The
+    /// accumulator's `eval_point` and `eval_claim` are consumed directly
+    /// without truncation.
     pub fn verify<P, W, PW, const DIGEST_ELEMS: usize>(
         &self,
         challenger: &mut Challenger,
@@ -701,15 +737,10 @@ where
         Challenger: CanObserve<Hash<F, W, DIGEST_ELEMS>>,
         [W; DIGEST_ELEMS]: serde::Serialize + for<'de> serde::Deserialize<'de>,
     {
-        let num_vars = accumulator.witness.witness_poly.num_variables();
-        let eval_point_for_whir = if accumulator.instance.eval_point.len() > num_vars {
-            &accumulator.instance.eval_point[..num_vars]
-        } else {
-            &accumulator.instance.eval_point
-        };
+        let num_vars = accumulator.witness.codeword.num_variables();
 
         let linear_claim = Self::eval_claim_to_linear_statement(
-            eval_point_for_whir,
+            &accumulator.instance.eval_point,
             accumulator.instance.eval_claim,
             num_vars,
         );

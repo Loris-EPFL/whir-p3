@@ -85,6 +85,68 @@ pub struct WarpFoldVerifierWitness<F: Field> {
     pub all_pesat_targets: Option<Vec<F>>,
     /// All eval points for ALL l instances. Same semantics as `all_eval_claims`.
     pub all_eval_points: Option<Vec<Vec<F>>>,
+    /// Shift-query authentication data (Phase 3 / Phase 2.3).
+    ///
+    /// For every committed codeword the prover opened at a sampled position,
+    /// this carries the row values and the Merkle authentication path. When
+    /// empty, the circuit emits no Merkle-verify constraints (preserves
+    /// backward compatibility for call sites that pre-date Phase 3).
+    ///
+    /// In the non-union case `shift_auth_paths[q][i]` authenticates the
+    /// `i`-th input codeword's row at position `shift_positions[q]` against
+    /// `commitment_roots[i]`. In the union case (Quasar multicast) there is
+    /// exactly ONE path per query into the union tree, so
+    /// `shift_auth_paths[q].len() == 1`.
+    #[allow(clippy::struct_field_names)]
+    pub shift_positions: Vec<usize>,
+    pub shift_input_values: Vec<Vec<Vec<F>>>,
+    pub shift_auth_paths: Vec<Vec<Vec<Vec<F>>>>,
+    /// RS folding factor used when building the Merkle tree (leaf row width
+    /// = 1 << folding_factor). Zero when no shift authentication is in use.
+    pub shift_folding_factor: usize,
+    /// Per-codeword Merkle roots corresponding to `shift_auth_paths`. In the
+    /// non-union case this is `[acc_root, fresh_root_0, …]`; in the union
+    /// case it is `[union_root]`. Empty when no shift authentication.
+    pub shift_codeword_roots: Vec<Vec<F>>,
+    /// Enables union-tree Merkle verification when `true` AND
+    /// `shift_auth_paths` is non-empty. In union mode, every shift query's
+    /// `auth_paths[q]` has exactly 1 entry (the union-tree proof), and the
+    /// leaf row is reconstructed column-by-column from the per-codeword
+    /// `input_values[q][i]` as `[v_0[c], v_1[c], …, v_{l-1}[c]]` for each
+    /// column `c`. Set by the Quasar-backed callers.
+    pub shift_union_mode: bool,
+    /// OOD + evaluation-batching-sumcheck data (Phase 3.5).
+    ///
+    /// When `eval_batch_round_polys` is non-empty, the circuit verifies
+    /// the eval batching sumcheck that binds OOD answers + shift-query
+    /// values to the codeword MLE. Verifying this sumcheck closes the
+    /// OOD-binding gap: a malicious prover who commits a non-proximal
+    /// codeword cannot satisfy the sumcheck with arbitrary OOD answers,
+    /// because the linear combination Σ ρ^k · v_k must match what the
+    /// codeword's MLE implies at the derived challenge point.
+    ///
+    /// - `alpha_eval`: codeword MLE at `instance.eval_point` (first
+    ///   claim in the batched list).
+    /// - `ood_answers`: ν_k = codeword_MLE(ζ_k). Length = # OOD samples.
+    /// - `ood_points`: the ζ_k points (LSB-first convention matching
+    ///   the native prover's call into the batching sumcheck).
+    /// - `rho`: batching challenge sampled from FS after the twin
+    ///   sumcheck completes.
+    /// - `eval_batch_round_polys`: 3-eval vectors, one per round,
+    ///   `log_n` rounds total.
+    /// - `eval_batch_challenges`: per-round sumcheck challenges.
+    /// - `new_eval_claim`: the sumcheck's final eval claim; becomes the
+    ///   new accumulator eval_claim.
+    ///
+    /// All are empty/zero when the caller does not request in-circuit
+    /// batching verification.
+    pub alpha_eval: F,
+    pub ood_answers: Vec<F>,
+    pub ood_points: Vec<Vec<F>>,
+    pub rho: F,
+    pub eval_batch_round_polys: Vec<[F; 3]>,
+    pub eval_batch_challenges: Vec<F>,
+    pub new_eval_claim: F,
 }
 
 impl<F: Field + PrimeField64> WarpFoldVerifierWitness<F> {
@@ -120,6 +182,19 @@ impl<F: Field + PrimeField64> WarpFoldVerifierWitness<F> {
             all_eval_claims: Some(input_eval_claims),
             all_pesat_targets: Some(input_pesat_targets),
             all_eval_points: Some(input_eval_points),
+            shift_positions: Vec::new(),
+            shift_input_values: Vec::new(),
+            shift_auth_paths: Vec::new(),
+            shift_folding_factor: 0,
+            shift_codeword_roots: Vec::new(),
+            shift_union_mode: false,
+            alpha_eval: F::ZERO,
+            ood_answers: Vec::new(),
+            ood_points: Vec::new(),
+            rho: F::ZERO,
+            eval_batch_round_polys: Vec::new(),
+            eval_batch_challenges: Vec::new(),
+            new_eval_claim: F::ZERO,
         }
     }
 
@@ -167,7 +242,51 @@ impl<F: Field + PrimeField64> WarpFoldVerifierWitness<F> {
             all_eval_claims: Some(all_eval_claims),
             all_pesat_targets: Some(all_pesat_targets),
             all_eval_points: Some(all_eval_points),
+            shift_positions: Vec::new(),
+            shift_input_values: Vec::new(),
+            shift_auth_paths: Vec::new(),
+            shift_folding_factor: 0,
+            shift_codeword_roots: Vec::new(),
+            shift_union_mode: false,
+            alpha_eval: F::ZERO,
+            ood_answers: Vec::new(),
+            ood_points: Vec::new(),
+            rho: F::ZERO,
+            eval_batch_round_polys: Vec::new(),
+            eval_batch_challenges: Vec::new(),
+            new_eval_claim: F::ZERO,
         }
+    }
+
+    /// Attach shift-query authentication data to an already-constructed
+    /// witness. The circuit emits one Merkle-verify sub-circuit per
+    /// `(query, codeword)` pair, proving that `shift_input_values[q][i]`
+    /// is the row at `shift_positions[q]` in the codeword whose Merkle
+    /// root is `shift_codeword_roots[i]`.
+    ///
+    /// Non-union case: pass per-codeword roots in the same order as the
+    /// prover arranged them (`[acc_root, fresh_root_0, …]`).
+    /// Union case: pass `[union_root]` and a single path per query.
+    ///
+    /// `folding_factor` is the RS folding factor used to build the Merkle
+    /// tree (leaf row width = 1 << folding_factor).
+    #[must_use]
+    pub fn with_shift_authentication(
+        mut self,
+        shift_positions: Vec<usize>,
+        shift_input_values: Vec<Vec<Vec<F>>>,
+        shift_auth_paths: Vec<Vec<Vec<Vec<F>>>>,
+        folding_factor: usize,
+        codeword_roots: Vec<Vec<F>>,
+    ) -> Self {
+        assert_eq!(shift_positions.len(), shift_input_values.len());
+        assert_eq!(shift_positions.len(), shift_auth_paths.len());
+        self.shift_positions = shift_positions;
+        self.shift_input_values = shift_input_values;
+        self.shift_auth_paths = shift_auth_paths;
+        self.shift_folding_factor = folding_factor;
+        self.shift_codeword_roots = codeword_roots;
+        self
     }
 }
 
@@ -667,6 +786,491 @@ where
     // Step 4: Constrain final_claimed == expected_final
     builder.enforce_equal(claimed_var, expected_final_var);
 
+    // =============================================
+    // Phase 5 — Shift-query Merkle authentication (bug_014 / Phase 3)
+    // =============================================
+    // For every committed codeword row the prover opened at a shift
+    // position, re-hash the leaf and climb the path in-circuit against
+    // the stored Merkle root. This is the WARP paper's Construction 7.2
+    // shift-query check — it is what binds the commitment root to the
+    // prover-claimed values that feed the eval-batching sumcheck.
+    //
+    // Two flavours, gated by `witness.shift_union_mode`:
+    //   (a) Non-union — one Merkle path per (query, codeword) pair against
+    //       the individual codeword root. Per-codeword `input_values[q][i]`
+    //       IS the leaf row.
+    //   (b) Union (Quasar multicast) — a single Merkle path per query into
+    //       the union tree. The leaf row is reconstructed column-major:
+    //       for each column `c`, concatenate `[v_0[c], v_1[c], …, v_{l-1}[c]]`.
+    //
+    // When `witness.shift_auth_paths` is empty (e.g. the caller did not
+    // populate paths post-fold), Phase 5 is a no-op and the circuit
+    // reverts to the pre-Phase-3 behaviour. This preserves backward
+    // compatibility with tests / in-tree consumers that have not yet
+    // been upgraded.
+    if !witness.shift_auth_paths.is_empty() {
+        debug_assert_eq!(
+            witness.shift_positions.len(),
+            witness.shift_auth_paths.len(),
+            "shift_positions and shift_auth_paths must have matching lengths"
+        );
+        debug_assert_eq!(
+            witness.shift_positions.len(),
+            witness.shift_input_values.len(),
+            "shift_positions and shift_input_values must have matching lengths"
+        );
+
+        // Allocate witness-shaped vars for every Merkle root once and reuse
+        // across queries (a single commitment root is referenced by every
+        // shift-query at that codeword index).
+        let root_vars_per_codeword: alloc::vec::Vec<[Var; 8]> = witness
+            .shift_codeword_roots
+            .iter()
+            .map(|root| {
+                core::array::from_fn(|i| {
+                    debug_assert!(i < root.len(), "commitment root shorter than 8 elements");
+                    builder.alloc_witness(root[i])
+                })
+            })
+            .collect();
+        let root_vals_per_codeword: alloc::vec::Vec<[F; 8]> = witness
+            .shift_codeword_roots
+            .iter()
+            .map(|root| core::array::from_fn(|i| root[i]))
+            .collect();
+
+        if witness.shift_union_mode {
+            // ---------- Union-mode branch ----------
+            // Single path per query, single root, column-major reconstructed
+            // row.  Mirrors `verify_shift_queries_merkle_union` in
+            // `warp/src/fold.rs`.
+            debug_assert_eq!(
+                root_vars_per_codeword.len(),
+                1,
+                "union mode expects a single Merkle root"
+            );
+            let union_root_vars = &root_vars_per_codeword[0];
+            let union_root_vals = &root_vals_per_codeword[0];
+
+            for q in 0..witness.shift_positions.len() {
+                let pos = witness.shift_positions[q];
+                let per_codeword_values = &witness.shift_input_values[q];
+                let per_codeword_paths = &witness.shift_auth_paths[q];
+                debug_assert_eq!(
+                    per_codeword_paths.len(),
+                    1,
+                    "union mode expects exactly 1 auth path per query"
+                );
+                debug_assert!(
+                    !per_codeword_values.is_empty(),
+                    "union mode requires ≥ 1 codeword's row values"
+                );
+
+                let l_here = per_codeword_values.len();
+                let per_codeword_width = per_codeword_values[0].len();
+                // Reconstruct the union row: for each column c, push
+                // [cw_0[c], cw_1[c], …, cw_{l-1}[c]].
+                let mut union_row_vars: alloc::vec::Vec<Var> =
+                    alloc::vec::Vec::with_capacity(per_codeword_width * l_here);
+                let mut union_row_vals: alloc::vec::Vec<F> =
+                    alloc::vec::Vec::with_capacity(per_codeword_width * l_here);
+                for col in 0..per_codeword_width {
+                    for codeword in per_codeword_values.iter() {
+                        debug_assert_eq!(
+                            codeword.len(),
+                            per_codeword_width,
+                            "all codewords must share the same row width",
+                        );
+                        let val = codeword[col];
+                        let var = builder.alloc_witness(val);
+                        union_row_vars.push(var);
+                        union_row_vals.push(val);
+                    }
+                }
+
+                // Allocate the single path.
+                let auth_path = &per_codeword_paths[0];
+                let path_vars: alloc::vec::Vec<[Var; 8]> = auth_path
+                    .iter()
+                    .map(|sibling| {
+                        debug_assert_eq!(
+                            sibling.len(),
+                            8,
+                            "sibling digest must be 8 elements"
+                        );
+                        core::array::from_fn(|i| builder.alloc_witness(sibling[i]))
+                    })
+                    .collect();
+                let path_vals: alloc::vec::Vec<[F; 8]> = auth_path
+                    .iter()
+                    .map(|sibling| core::array::from_fn(|i| sibling[i]))
+                    .collect();
+
+                whir_circuit::merkle::merkle_verify_path_circuit::<F, L, P, WIDTH>(
+                    builder,
+                    poseidon_config,
+                    perm,
+                    &union_row_vars,
+                    &union_row_vals,
+                    pos,
+                    &path_vars,
+                    &path_vals,
+                    union_root_vars,
+                    union_root_vals,
+                );
+            }
+        } else {
+            // ---------- Per-codeword branch (non-union) ----------
+            for q in 0..witness.shift_positions.len() {
+                let pos = witness.shift_positions[q];
+                let per_codeword_values = &witness.shift_input_values[q];
+                let per_codeword_paths = &witness.shift_auth_paths[q];
+                debug_assert_eq!(per_codeword_values.len(), per_codeword_paths.len());
+
+                for (cw_idx, (row_vals, auth_path)) in per_codeword_values
+                    .iter()
+                    .zip(per_codeword_paths.iter())
+                    .enumerate()
+                {
+                    // Allocate row witnesses.
+                    let row_vars: alloc::vec::Vec<Var> =
+                        row_vals.iter().map(|&v| builder.alloc_witness(v)).collect();
+
+                    // Allocate path siblings as [Var; 8] per level.
+                    let path_vars: alloc::vec::Vec<[Var; 8]> = auth_path
+                        .iter()
+                        .map(|sibling| {
+                            debug_assert_eq!(
+                                sibling.len(),
+                                8,
+                                "sibling digest must be 8 elements"
+                            );
+                            core::array::from_fn(|i| builder.alloc_witness(sibling[i]))
+                        })
+                        .collect();
+                    let path_vals: alloc::vec::Vec<[F; 8]> = auth_path
+                        .iter()
+                        .map(|sibling| core::array::from_fn(|i| sibling[i]))
+                        .collect();
+
+                    // Pick the Merkle root this codeword was committed against.
+                    let root_vars = &root_vars_per_codeword[cw_idx];
+                    let root_vals = &root_vals_per_codeword[cw_idx];
+
+                    // Emit the in-circuit Merkle path verification.
+                    whir_circuit::merkle::merkle_verify_path_circuit::<F, L, P, WIDTH>(
+                        builder,
+                        poseidon_config,
+                        perm,
+                        &row_vars,
+                        row_vals,
+                        pos,
+                        &path_vars,
+                        &path_vals,
+                        root_vars,
+                        root_vals,
+                    );
+                }
+            }
+        }
+    }
+
+    // =============================================
+    // Phase 6 — Evaluation-batching sumcheck + OOD binding (Phase 3.5)
+    // =============================================
+    // Verifies the sumcheck that reduces (folded-α eval claim, OOD answers,
+    // shift-query values) into a single claim against the committed folded
+    // codeword.  This closes the OOD-binding gap: a malicious prover who
+    // commits a non-proximal codeword cannot satisfy the sumcheck with
+    // arbitrary OOD answers, because
+    //   initial_claim = Σ_k ρ^k · v_k
+    // must equal the sumcheck's first-round sum — and with random ρ this
+    // forces each `v_k` to match the codeword MLE at `p_k`.
+    //
+    // FS replay ordering matches `warp_fold_prove_rs_inner`:
+    //   1. Shift-query positions (one observe/sample per query)
+    //   2. OOD sampling (one observe/sample for the univariate challenge,
+    //      then one observe/sample absorbing the prover's answer)
+    //   3. ρ (observe counter, sample)
+    //   4. log_n eval-batch rounds (observe 3 round evals, sample r)
+    //
+    // When `eval_batch_round_polys` is empty (e.g. prover didn't commit the
+    // codeword, or tests that pre-date Phase 3.5), this block is a no-op.
+    if !witness.eval_batch_round_polys.is_empty() {
+        debug_assert_eq!(
+            witness.eval_batch_challenges.len(),
+            witness.eval_batch_round_polys.len(),
+            "eval_batch_challenges must have the same length as eval_batch_round_polys"
+        );
+
+        let num_shift = witness.shift_positions.len();
+        let num_ood = witness.ood_answers.len();
+        let log_n_batch = witness.eval_batch_round_polys.len();
+
+        // ---- Step 6.1: replay FS — shift-query positions ----
+        for q in 0..num_shift {
+            let counter_val = F::from_usize(q);
+            let counter_var = builder.alloc_witness(counter_val);
+            builder.enforce_constant(counter_var, counter_val);
+            challenger.observe_slice::<L, P>(
+                builder,
+                poseidon_config,
+                perm,
+                &[counter_var],
+                &[counter_val],
+            );
+            let _ = challenger.sample::<L, P>(builder, poseidon_config, perm);
+        }
+
+        // ---- Step 6.2: replay FS — OOD sampling ----
+        for k in 0..num_ood {
+            // Univariate challenge counter = `k + num_shift + 1000`.
+            let counter_val = F::from_usize(k + num_shift + 1000);
+            let counter_var = builder.alloc_witness(counter_val);
+            builder.enforce_constant(counter_var, counter_val);
+            challenger.observe_slice::<L, P>(
+                builder,
+                poseidon_config,
+                perm,
+                &[counter_var],
+                &[counter_val],
+            );
+            let _ = challenger.sample::<L, P>(builder, poseidon_config, perm);
+
+            // Absorb the prover's OOD answer.
+            let answer_val = witness.ood_answers[k];
+            let answer_var = builder.alloc_witness(answer_val);
+            challenger.observe_slice::<L, P>(
+                builder,
+                poseidon_config,
+                perm,
+                &[answer_var],
+                &[answer_val],
+            );
+            let _ = challenger.sample::<L, P>(builder, poseidon_config, perm);
+        }
+
+        // ---- Step 6.3: derive ρ and bind to `witness.rho` ----
+        let rho_counter_val = F::from_usize(2000);
+        let rho_counter_var = builder.alloc_witness(rho_counter_val);
+        builder.enforce_constant(rho_counter_var, rho_counter_val);
+        challenger.observe_slice::<L, P>(
+            builder,
+            poseidon_config,
+            perm,
+            &[rho_counter_var],
+            &[rho_counter_val],
+        );
+        let (derived_rho_var, _derived_rho_val) =
+            challenger.sample::<L, P>(builder, poseidon_config, perm);
+        let rho_var = builder.alloc_witness(witness.rho);
+        builder.enforce_equal(derived_rho_var, rho_var);
+
+        // ---- Step 6.4: reconstruct initial claim  Σ_k ρ^k · v_k ----
+        // v_0        = alpha_eval (first claim — codeword MLE at folded α)
+        // v_1..=no   = ood_answers   (ν_k)
+        // v_no+1..   = folded shift-query col-0 values
+        //
+        // Layout: initial_claim_val/var tracks running total;
+        //         rho_pow_val/var tracks ρ^k.
+        let alpha_eval_var = builder.alloc_witness(witness.alpha_eval);
+
+        let mut claim_val = witness.alpha_eval;
+        let mut claim_var = alpha_eval_var;
+
+        let mut rho_pow_val = F::ONE;
+        let mut rho_pow_var = builder.alloc_witness(F::ONE);
+        builder.enforce_constant(rho_pow_var, F::ONE);
+
+        // Helper: bump ρ^k → ρ^{k+1}.
+        let bump_rho_pow =
+            |builder: &mut CircuitBuilder<F>,
+             rho_pow_var: &mut Var,
+             rho_pow_val: &mut F,
+             rho_var: Var,
+             rho_val: F| {
+                let new_val = *rho_pow_val * rho_val;
+                let new_var = builder.mul(*rho_pow_var, rho_var, new_val);
+                *rho_pow_var = new_var;
+                *rho_pow_val = new_val;
+            };
+
+        let rho_val = witness.rho;
+
+        // OOD contributions  v_1..=num_ood
+        for k in 0..num_ood {
+            bump_rho_pow(
+                builder,
+                &mut rho_pow_var,
+                &mut rho_pow_val,
+                rho_var,
+                rho_val,
+            );
+            let v_val = witness.ood_answers[k];
+            let v_var = builder.alloc_witness(v_val);
+            let prod_val = rho_pow_val * v_val;
+            let prod_var = builder.mul(rho_pow_var, v_var, prod_val);
+            let new_claim_val = claim_val + prod_val;
+            let new_claim_var = builder.alloc_witness(new_claim_val);
+            builder.enforce(
+                LinearCombination::from_var(claim_var)
+                    + LinearCombination::from_var(prod_var),
+                LinearCombination::from_constant(F::ONE),
+                LinearCombination::from_var(new_claim_var),
+            );
+            claim_var = new_claim_var;
+            claim_val = new_claim_val;
+        }
+
+        // Shift-query contributions — the batched value is the folded
+        // codeword's column-0 entry at the query row, which equals
+        //     Σ_i eq(γ, i) · v_{i,0}
+        // where `v_{i,0}` = first-column value of the i-th input row.
+        for q in 0..num_shift {
+            let per_codeword_values = &witness.shift_input_values[q];
+            debug_assert!(
+                !per_codeword_values.is_empty(),
+                "shift-query {q} has no per-codeword values"
+            );
+
+            // Collect column-0 per-input-codeword values.
+            let col0_vals: alloc::vec::Vec<F> =
+                per_codeword_values.iter().map(|row| row[0]).collect();
+            let col0_vars: alloc::vec::Vec<Var> = col0_vals
+                .iter()
+                .map(|&v| builder.alloc_witness(v))
+                .collect();
+
+            // Fold with the sumcheck challenges γ (= `sumcheck_challenge_*`).
+            let (folded_col0_var, folded_col0_val) = binary_tree_fold(
+                builder,
+                &col0_vars,
+                &col0_vals,
+                &sumcheck_challenge_vars,
+                &sumcheck_challenge_vals,
+            );
+
+            bump_rho_pow(
+                builder,
+                &mut rho_pow_var,
+                &mut rho_pow_val,
+                rho_var,
+                rho_val,
+            );
+            let prod_val = rho_pow_val * folded_col0_val;
+            let prod_var = builder.mul(rho_pow_var, folded_col0_var, prod_val);
+            let new_claim_val = claim_val + prod_val;
+            let new_claim_var = builder.alloc_witness(new_claim_val);
+            builder.enforce(
+                LinearCombination::from_var(claim_var)
+                    + LinearCombination::from_var(prod_var),
+                LinearCombination::from_constant(F::ONE),
+                LinearCombination::from_var(new_claim_var),
+            );
+            claim_var = new_claim_var;
+            claim_val = new_claim_val;
+        }
+
+        // ---- Step 6.5: verify each sumcheck round ----
+        // Per round: observe [e0, e1, e2], sample r; enforce
+        //   e0 + e1 == current_claim
+        //   current_claim <- h(r), where h is the degree-2 poly through
+        //                           (0, e0), (1, e1), (2, e2).
+        let mut current_claim_var = claim_var;
+        let mut current_claim_val = claim_val;
+
+        for round in 0..log_n_batch {
+            let [e0_val, e1_val, e2_val] = witness.eval_batch_round_polys[round];
+
+            let e0_var = builder.alloc_witness(e0_val);
+            let e1_var = builder.alloc_witness(e1_val);
+            let e2_var = builder.alloc_witness(e2_val);
+
+            challenger.observe_slice::<L, P>(
+                builder,
+                poseidon_config,
+                perm,
+                &[e0_var, e1_var, e2_var],
+                &[e0_val, e1_val, e2_val],
+            );
+
+            // e0 + e1 == current_claim
+            builder.enforce(
+                LinearCombination::from_var(e0_var) + LinearCombination::from_var(e1_var),
+                LinearCombination::from_constant(F::ONE),
+                LinearCombination::from_var(current_claim_var),
+            );
+
+            let (r_var, r_val) = challenger.sample::<L, P>(builder, poseidon_config, perm);
+            let expected_r = witness.eval_batch_challenges[round];
+            // Bind the witness-provided challenge to the FS-derived one.
+            let witness_r_var = builder.alloc_witness(expected_r);
+            builder.enforce_equal(r_var, witness_r_var);
+            debug_assert_eq!(
+                r_val, expected_r,
+                "batching sumcheck: round {round} FS-derived challenge != witness"
+            );
+
+            // h(r) = e0 + d*r + c2*r*(r-1)
+            //        with d  = e1 - e0
+            //             c2 = (e2 - 2·e1 + e0) / 2
+            let d_val = e1_val - e0_val;
+            let d_var = builder.alloc_witness(d_val);
+            builder.enforce(
+                LinearCombination::from_var(e1_var) - LinearCombination::from_var(e0_var),
+                LinearCombination::from_constant(F::ONE),
+                LinearCombination::from_var(d_var),
+            );
+
+            let dr_val = d_val * r_val;
+            let dr_var = builder.mul(d_var, r_var, dr_val);
+
+            let c2_val = (e2_val - e1_val.double() + e0_val) * F::TWO.inverse();
+            let c2_var = builder.alloc_witness(c2_val);
+            builder.enforce(
+                LinearCombination::from_constant(F::TWO),
+                LinearCombination::from_var(c2_var),
+                LinearCombination::from_var(e2_var)
+                    - LinearCombination::from_scaled(e1_var, F::TWO)
+                    + LinearCombination::from_var(e0_var),
+            );
+
+            let rm1_val = r_val - F::ONE;
+            let rm1_var = builder.alloc_witness(rm1_val);
+            builder.enforce(
+                LinearCombination::from_var(r_var) - LinearCombination::from_constant(F::ONE),
+                LinearCombination::from_constant(F::ONE),
+                LinearCombination::from_var(rm1_var),
+            );
+            let r_rm1_val = r_val * rm1_val;
+            let r_rm1_var = builder.mul(r_var, rm1_var, r_rm1_val);
+
+            let c2_r_rm1_val = c2_val * r_rm1_val;
+            let c2_r_rm1_var = builder.mul(c2_var, r_rm1_var, c2_r_rm1_val);
+
+            let result_val = e0_val + dr_val + c2_r_rm1_val;
+            let result_var = builder.alloc_witness(result_val);
+            builder.enforce(
+                LinearCombination::from_var(e0_var)
+                    + LinearCombination::from_var(dr_var)
+                    + LinearCombination::from_var(c2_r_rm1_var),
+                LinearCombination::from_constant(F::ONE),
+                LinearCombination::from_var(result_var),
+            );
+
+            current_claim_var = result_var;
+            current_claim_val = result_val;
+        }
+
+        // ---- Step 6.6: final claim must equal witness.new_eval_claim ----
+        let new_eval_claim_var = builder.alloc_witness(witness.new_eval_claim);
+        builder.enforce_equal(current_claim_var, new_eval_claim_var);
+        debug_assert_eq!(
+            current_claim_val, witness.new_eval_claim,
+            "batching sumcheck: final claim != witness.new_eval_claim",
+        );
+    }
+
     WarpFoldVerifierOutput {
         challenge_vars: sumcheck_challenge_vars,
         folded_alpha_vars,
@@ -872,6 +1476,19 @@ mod tests {
             all_eval_claims: Some(eval_claims),
             all_pesat_targets: Some(pesat_targets),
             all_eval_points: Some(eval_points),
+            shift_positions: Vec::new(),
+            shift_input_values: Vec::new(),
+            shift_auth_paths: Vec::new(),
+            shift_folding_factor: 0,
+            shift_codeword_roots: Vec::new(),
+            shift_union_mode: false,
+            alpha_eval: F::ZERO,
+            ood_answers: Vec::new(),
+            ood_points: Vec::new(),
+            rho: F::ZERO,
+            eval_batch_round_polys: Vec::new(),
+            eval_batch_challenges: Vec::new(),
+            new_eval_claim: F::ZERO,
         };
 
         let mut builder = CircuitBuilder::<F>::new();
@@ -920,6 +1537,19 @@ mod tests {
             all_eval_claims: None,
             all_pesat_targets: None,
             all_eval_points: None,
+            shift_positions: Vec::new(),
+            shift_input_values: Vec::new(),
+            shift_auth_paths: Vec::new(),
+            shift_folding_factor: 0,
+            shift_codeword_roots: Vec::new(),
+            shift_union_mode: false,
+            alpha_eval: F::ZERO,
+            ood_answers: Vec::new(),
+            ood_points: Vec::new(),
+            rho: F::ZERO,
+            eval_batch_round_polys: Vec::new(),
+            eval_batch_challenges: Vec::new(),
+            new_eval_claim: F::ZERO,
         };
 
         let mut builder_with = CircuitBuilder::<F>::new();
@@ -1002,6 +1632,19 @@ mod tests {
             all_eval_claims: None,
             all_pesat_targets: None,
             all_eval_points: None,
+            shift_positions: Vec::new(),
+            shift_input_values: Vec::new(),
+            shift_auth_paths: Vec::new(),
+            shift_folding_factor: 0,
+            shift_codeword_roots: Vec::new(),
+            shift_union_mode: false,
+            alpha_eval: F::ZERO,
+            ood_answers: Vec::new(),
+            ood_points: Vec::new(),
+            rho: F::ZERO,
+            eval_batch_round_polys: Vec::new(),
+            eval_batch_challenges: Vec::new(),
+            new_eval_claim: F::ZERO,
         };
         let mut warp_builder = CircuitBuilder::<F>::new();
         let mut warp_chal = CircuitChallenger::<F, 16, 8>::new(&mut warp_builder);
@@ -1198,6 +1841,19 @@ mod tests {
             all_eval_claims: None,
             all_pesat_targets: None,
             all_eval_points: None,
+            shift_positions: Vec::new(),
+            shift_input_values: Vec::new(),
+            shift_auth_paths: Vec::new(),
+            shift_folding_factor: 0,
+            shift_codeword_roots: Vec::new(),
+            shift_union_mode: false,
+            alpha_eval: F::ZERO,
+            ood_answers: Vec::new(),
+            ood_points: Vec::new(),
+            rho: F::ZERO,
+            eval_batch_round_polys: Vec::new(),
+            eval_batch_challenges: Vec::new(),
+            new_eval_claim: F::ZERO,
         };
 
         let mut nonunion_builder = CircuitBuilder::<F>::new();
@@ -1293,6 +1949,19 @@ mod tests {
                 all_eval_claims: None,
                 all_pesat_targets: None,
                 all_eval_points: None,
+                shift_positions: Vec::new(),
+                shift_input_values: Vec::new(),
+                shift_auth_paths: Vec::new(),
+                shift_folding_factor: 0,
+                shift_codeword_roots: Vec::new(),
+                shift_union_mode: false,
+                alpha_eval: F::ZERO,
+                ood_answers: Vec::new(),
+                ood_points: Vec::new(),
+                rho: F::ZERO,
+                eval_batch_round_polys: Vec::new(),
+                eval_batch_challenges: Vec::new(),
+                new_eval_claim: F::ZERO,
             };
 
             let mut b1 = CircuitBuilder::<F>::new();
@@ -1399,6 +2068,19 @@ mod tests {
             all_eval_claims: Some(eval_claims),
             all_pesat_targets: Some(pesat_targets),
             all_eval_points: Some(eval_points),
+            shift_positions: Vec::new(),
+            shift_input_values: Vec::new(),
+            shift_auth_paths: Vec::new(),
+            shift_folding_factor: 0,
+            shift_codeword_roots: Vec::new(),
+            shift_union_mode: false,
+            alpha_eval: F::ZERO,
+            ood_answers: Vec::new(),
+            ood_points: Vec::new(),
+            rho: F::ZERO,
+            eval_batch_round_polys: Vec::new(),
+            eval_batch_challenges: Vec::new(),
+            new_eval_claim: F::ZERO,
         };
 
         let mut builder = CircuitBuilder::<F>::new();
@@ -1481,6 +2163,19 @@ mod tests {
             all_eval_claims: Some(eval_claims),
             all_pesat_targets: Some(pesat_targets),
             all_eval_points: Some(eval_points),
+            shift_positions: Vec::new(),
+            shift_input_values: Vec::new(),
+            shift_auth_paths: Vec::new(),
+            shift_folding_factor: 0,
+            shift_codeword_roots: Vec::new(),
+            shift_union_mode: false,
+            alpha_eval: F::ZERO,
+            ood_answers: Vec::new(),
+            ood_points: Vec::new(),
+            rho: F::ZERO,
+            eval_batch_round_polys: Vec::new(),
+            eval_batch_challenges: Vec::new(),
+            new_eval_claim: F::ZERO,
         };
 
         let mut builder = CircuitBuilder::<F>::new();
@@ -1499,5 +2194,694 @@ mod tests {
             !shape.is_sat(instance.witness(), instance.input()),
             "circuit should be unsatisfiable with wrong omega (Fiat-Shamir binding violated)"
         );
+    }
+
+    // ══════════════════════════════════════════════════════════════════════
+    // Phase 3 — in-circuit Merkle-path authentication tests.
+    // ══════════════════════════════════════════════════════════════════════
+
+    /// Shared helper: produce one valid Merkle proof (position 2 of a 4-row,
+    /// 4-wide matrix) using the same Poseidon2 configuration as the circuit.
+    fn build_sample_merkle_opening(
+    ) -> (alloc::vec::Vec<F>, alloc::vec::Vec<[F; 8]>, [F; 8], usize, usize) {
+        use p3_commit::Mmcs;
+        use p3_matrix::dense::RowMajorMatrix;
+        use p3_merkle_tree::MerkleTreeMmcs;
+        use p3_symmetric::{PaddingFreeSponge, TruncatedPermutation};
+
+        type LocalHash = PaddingFreeSponge<Perm, 16, 8, 8>;
+        type LocalCompress = TruncatedPermutation<Perm, 2, 8, 16>;
+
+        let perm = Perm::new_from_rng_128(&mut SmallRng::seed_from_u64(99));
+        let hasher = LocalHash::new(perm.clone());
+        let compress = LocalCompress::new(perm);
+
+        let rows: alloc::vec::Vec<F> = (0..16).map(|i| F::from_u64(i as u64 + 1)).collect();
+        let matrix = RowMajorMatrix::new(rows.clone(), 4);
+        let mmcs: MerkleTreeMmcs<_, _, _, _, 8> =
+            MerkleTreeMmcs::<F, F, _, _, 8>::new(hasher, compress);
+        let (root_hash, tree) = mmcs.commit(alloc::vec![matrix]);
+        let root: [F; 8] = root_hash.into();
+
+        let position: usize = 2;
+        let row_width = 4;
+        let opening = mmcs.open_batch(position, &tree);
+        let (opened, proof) = opening.unpack();
+        let leaf_row: alloc::vec::Vec<F> = opened.into_iter().next().unwrap();
+
+        (leaf_row, proof, root, position, row_width)
+    }
+
+    /// Honest shift-query data must produce a satisfiable in-circuit
+    /// verifier. This confirms the Phase-5 wiring matches the native
+    /// Merkle verify primitive.
+    #[test]
+    fn warp_fold_verifier_accepts_honest_shift_paths() {
+        use p3_challenger::{CanObserve, CanSample};
+        let poseidon_perm = Perm::new_from_rng_128(&mut SmallRng::seed_from_u64(99));
+        let (rf, rp) = p3_poseidon2::poseidon2_round_numbers_128::<F>(16, 3)
+            .expect("unsupported Poseidon2 parameters");
+        let poseidon_config = Poseidon2CircuitConfig::<F, 16>::from_rng(
+            rf, rp, 3, &mut SmallRng::seed_from_u64(99),
+        );
+
+        let (leaf_row, proof, root_arr, position, _row_width) = build_sample_merkle_opening();
+
+        // Minimal valid twin-constraint setup (l=2, 1 round) so the rest
+        // of the verifier accepts; we only care about Phase 5 here.
+        let roots: alloc::vec::Vec<alloc::vec::Vec<F>> = vec![vec![F::ZERO; 8]; 2];
+        let eval_points: alloc::vec::Vec<alloc::vec::Vec<F>> = vec![vec![F::ZERO; 3]; 2];
+        let eval_claims = vec![F::ZERO; 2];
+        let pesat_targets = vec![F::ZERO; 2];
+
+        let mut native_chal = MyChal::new(poseidon_perm.clone());
+        for i in 0..2 {
+            for &val in &roots[i] { native_chal.observe(val); }
+            native_chal.observe(eval_claims[i]);
+            for &val in &eval_points[i] { native_chal.observe(val); }
+            native_chal.observe(pesat_targets[i]);
+        }
+        let omega: F = native_chal.sample();
+        let tau_0: F = native_chal.sample();
+        let num_fresh = 1;
+        let log_m = 2;
+        for _ in 0..num_fresh * log_m { let _: F = native_chal.sample(); }
+
+        let round_polys = construct_correct_round_polys(
+            &eval_claims, &pesat_targets, omega, &[tau_0], &mut native_chal);
+
+        // Attach a single shift query with honest Merkle data.
+        let witness = WarpFoldVerifierWitness {
+            input_commitment_roots: roots,
+            input_eval_claims: eval_claims.clone(),
+            input_eval_points: eval_points.clone(),
+            input_pesat_targets: pesat_targets.clone(),
+            sumcheck_evals: round_polys,
+            num_rounds: 1,
+            omega,
+            num_fresh,
+            log_m,
+            union_commitment_root: None,
+            all_eval_claims: Some(eval_claims),
+            all_pesat_targets: Some(pesat_targets),
+            all_eval_points: Some(eval_points),
+            shift_positions: vec![position],
+            shift_input_values: vec![vec![leaf_row.clone()]],
+            shift_auth_paths: vec![vec![proof.iter().map(|s| s.to_vec()).collect()]],
+            shift_folding_factor: 2,
+            shift_codeword_roots: vec![root_arr.to_vec()],
+            shift_union_mode: false,
+            alpha_eval: F::ZERO,
+            ood_answers: Vec::new(),
+            ood_points: Vec::new(),
+            rho: F::ZERO,
+            eval_batch_round_polys: Vec::new(),
+            eval_batch_challenges: Vec::new(),
+            new_eval_claim: F::ZERO,
+        };
+
+        let mut builder = CircuitBuilder::<F>::new();
+        let mut challenger = CircuitChallenger::<F, 16, 8>::new(&mut builder);
+        let _ = synthesize_warp_fold_verifier::<
+            F, GenericPoseidon2LinearLayersKoalaBear, _, 16, 8,
+        >(&mut builder, &mut challenger, &poseidon_config, &poseidon_perm, &witness);
+
+        let (shape, instance) = builder.build();
+        assert!(
+            shape.is_sat(instance.witness(), instance.input()),
+            "honest Phase-5 Merkle verification must be satisfiable"
+        );
+    }
+
+    /// Tampering a shift-query **value** must make the circuit unsatisfiable
+    /// — the Merkle-verify gadget's root equality constraint fails.
+    #[test]
+    #[should_panic(expected = "derived root")]
+    fn warp_fold_verifier_rejects_tampered_shift_value() {
+        use p3_challenger::{CanObserve, CanSample};
+        let poseidon_perm = Perm::new_from_rng_128(&mut SmallRng::seed_from_u64(99));
+        let (rf, rp) = p3_poseidon2::poseidon2_round_numbers_128::<F>(16, 3)
+            .expect("unsupported Poseidon2 parameters");
+        let poseidon_config = Poseidon2CircuitConfig::<F, 16>::from_rng(
+            rf, rp, 3, &mut SmallRng::seed_from_u64(99),
+        );
+
+        let (mut leaf_row, proof, root_arr, position, _row_width) = build_sample_merkle_opening();
+        // Tamper: flip one row element.
+        leaf_row[0] += F::ONE;
+
+        let roots: alloc::vec::Vec<alloc::vec::Vec<F>> = vec![vec![F::ZERO; 8]; 2];
+        let eval_points: alloc::vec::Vec<alloc::vec::Vec<F>> = vec![vec![F::ZERO; 3]; 2];
+        let eval_claims = vec![F::ZERO; 2];
+        let pesat_targets = vec![F::ZERO; 2];
+
+        let mut native_chal = MyChal::new(poseidon_perm.clone());
+        for i in 0..2 {
+            for &val in &roots[i] { native_chal.observe(val); }
+            native_chal.observe(eval_claims[i]);
+            for &val in &eval_points[i] { native_chal.observe(val); }
+            native_chal.observe(pesat_targets[i]);
+        }
+        let omega: F = native_chal.sample();
+        let tau_0: F = native_chal.sample();
+        let num_fresh = 1;
+        let log_m = 2;
+        for _ in 0..num_fresh * log_m { let _: F = native_chal.sample(); }
+
+        let round_polys = construct_correct_round_polys(
+            &eval_claims, &pesat_targets, omega, &[tau_0], &mut native_chal);
+
+        let witness = WarpFoldVerifierWitness {
+            input_commitment_roots: roots,
+            input_eval_claims: eval_claims.clone(),
+            input_eval_points: eval_points.clone(),
+            input_pesat_targets: pesat_targets.clone(),
+            sumcheck_evals: round_polys,
+            num_rounds: 1,
+            omega,
+            num_fresh,
+            log_m,
+            union_commitment_root: None,
+            all_eval_claims: Some(eval_claims),
+            all_pesat_targets: Some(pesat_targets),
+            all_eval_points: Some(eval_points),
+            shift_positions: vec![position],
+            shift_input_values: vec![vec![leaf_row]],
+            shift_auth_paths: vec![vec![proof.iter().map(|s| s.to_vec()).collect()]],
+            shift_folding_factor: 2,
+            shift_codeword_roots: vec![root_arr.to_vec()],
+            shift_union_mode: false,
+            alpha_eval: F::ZERO,
+            ood_answers: Vec::new(),
+            ood_points: Vec::new(),
+            rho: F::ZERO,
+            eval_batch_round_polys: Vec::new(),
+            eval_batch_challenges: Vec::new(),
+            new_eval_claim: F::ZERO,
+        };
+
+        let mut builder = CircuitBuilder::<F>::new();
+        let mut challenger = CircuitChallenger::<F, 16, 8>::new(&mut builder);
+        // The gadget asserts derived_root == expected_root at compile/
+        // synthesis time — so this call panics (should_panic covers it).
+        // If the assertion were removed, the resulting R1CS would also
+        // be unsatisfiable because the enforce_equal constraint fails.
+        let _ = synthesize_warp_fold_verifier::<
+            F, GenericPoseidon2LinearLayersKoalaBear, _, 16, 8,
+        >(&mut builder, &mut challenger, &poseidon_config, &poseidon_perm, &witness);
+    }
+
+    // =======================================================================
+    // Phase 3.5 — eval-batching sumcheck + union-mode Merkle verification
+    // =======================================================================
+
+    /// Synthetic helper: build a Merkle commitment of a 2-codeword union
+    /// tree and return:
+    ///   (per-codeword rows at query position, auth path, union root,
+    ///    query position, per-codeword row width, codewords for sanity).
+    ///
+    /// Layout matches `build_union_codeword` (column-major interleaved) and
+    /// `union_folding_factor(base_ff=2, l=2) = 3` (leaf width = 8).
+    #[allow(clippy::type_complexity)]
+    fn build_sample_union_merkle_opening() -> (
+        alloc::vec::Vec<alloc::vec::Vec<F>>,
+        alloc::vec::Vec<[F; 8]>,
+        [F; 8],
+        usize,
+        usize,
+    ) {
+        use p3_commit::Mmcs;
+        use p3_matrix::dense::RowMajorMatrix;
+        use p3_merkle_tree::MerkleTreeMmcs;
+        use p3_symmetric::{PaddingFreeSponge, TruncatedPermutation};
+
+        type LocalHash = PaddingFreeSponge<Perm, 16, 8, 8>;
+        type LocalCompress = TruncatedPermutation<Perm, 2, 8, 16>;
+
+        let perm = Perm::new_from_rng_128(&mut SmallRng::seed_from_u64(99));
+        let hasher = LocalHash::new(perm.clone());
+        let compress = LocalCompress::new(perm);
+
+        // l=2 codewords of length 8 each → union codeword of length 16,
+        // committed with row width 8 → tree height 2 (1 level path).
+        let n = 8;
+        let l = 2;
+        let cw_0: alloc::vec::Vec<F> = (0..n).map(|i| F::from_u64(10 + i as u64)).collect();
+        let cw_1: alloc::vec::Vec<F> = (0..n).map(|i| F::from_u64(100 + i as u64)).collect();
+        let codewords = alloc::vec![cw_0.clone(), cw_1.clone()];
+        let union = crate::warp::encoding::build_union_codeword(&codewords);
+        debug_assert_eq!(union.len(), n * l);
+
+        let row_width = 8; // = 1 << union_folding_factor (2 + log2(2) = 3)
+        let per_codeword_width = row_width / l; // = 4
+
+        let matrix = RowMajorMatrix::new(union.clone(), row_width);
+        let mmcs: MerkleTreeMmcs<_, _, _, _, 8> =
+            MerkleTreeMmcs::<F, F, _, _, 8>::new(hasher, compress);
+        let (root_hash, tree) = mmcs.commit(alloc::vec![matrix]);
+        let root: [F; 8] = root_hash.into();
+
+        let position: usize = 1;
+        let opening = mmcs.open_batch(position, &tree);
+        let (_opened, proof) = opening.unpack();
+
+        // Per-codeword rows at `position`: codeword_i[pos*per_codeword_width + col]
+        let per_codeword_rows: alloc::vec::Vec<alloc::vec::Vec<F>> = codewords
+            .iter()
+            .map(|cw| {
+                cw[position * per_codeword_width..(position + 1) * per_codeword_width].to_vec()
+            })
+            .collect();
+
+        (per_codeword_rows, proof, root, position, per_codeword_width)
+    }
+
+    /// Honest Phase-6 (eval-batching sumcheck) data must produce a
+    /// satisfiable in-circuit verifier.  No shift / OOD contributions;
+    /// we exercise a single synthetic round where
+    ///   initial_claim = alpha_eval
+    /// and the witness-supplied `new_eval_claim` = h(r) for the sampled r.
+    #[test]
+    fn warp_fold_verifier_accepts_honest_batching_sumcheck() {
+        use p3_challenger::{CanObserve, CanSample};
+
+        let poseidon_perm = Perm::new_from_rng_128(&mut SmallRng::seed_from_u64(99));
+        let poseidon_config =
+            Poseidon2CircuitConfig::<F, 16>::from_rng(8, 20, 3, &mut SmallRng::seed_from_u64(99));
+
+        // Minimal twin-constraint setup (l=2, 1 round, all-zero claims).
+        let roots = vec![vec![F::ZERO; 8]; 2];
+        let eval_points = vec![vec![F::ZERO; 3]; 2];
+        let eval_claims = vec![F::ZERO; 2];
+        let pesat_targets = vec![F::ZERO; 2];
+
+        let mut native_chal = MyChal::new(poseidon_perm.clone());
+        for i in 0..2 {
+            for &val in &roots[i] { native_chal.observe(val); }
+            native_chal.observe(eval_claims[i]);
+            for &val in &eval_points[i] { native_chal.observe(val); }
+            native_chal.observe(pesat_targets[i]);
+        }
+        let omega: F = native_chal.sample();
+        let tau_0: F = native_chal.sample();
+        let num_fresh = 1;
+        let log_m = 2;
+        for _ in 0..num_fresh * log_m { let _: F = native_chal.sample(); }
+
+        let round_polys = construct_correct_round_polys(
+            &eval_claims, &pesat_targets, omega, &[tau_0], &mut native_chal);
+
+        // Phase 6 FS replay — no shift, no OOD, sample rho directly.
+        native_chal.observe(F::from_usize(2000));
+        let rho: F = native_chal.sample();
+
+        // Build one synthetic batching round with e0 + e1 = alpha_eval.
+        let alpha_eval = F::from_u64(17);
+        let e0 = F::from_u64(5);
+        let e1 = alpha_eval - e0;
+        let e2 = F::from_u64(7);
+        native_chal.observe(e0);
+        native_chal.observe(e1);
+        native_chal.observe(e2);
+        let r: F = native_chal.sample();
+
+        // Compute h(r) matching the circuit's degree-2 evaluation formula.
+        let c2 = (e2 - e1.double() + e0) * F::TWO.inverse();
+        let c1 = e1 - e0 - c2;
+        let new_eval_claim = e0 + c1 * r + c2 * r * r;
+
+        let witness = WarpFoldVerifierWitness {
+            input_commitment_roots: roots,
+            input_eval_claims: eval_claims.clone(),
+            input_eval_points: eval_points.clone(),
+            input_pesat_targets: pesat_targets.clone(),
+            sumcheck_evals: round_polys,
+            num_rounds: 1,
+            omega,
+            num_fresh,
+            log_m,
+            union_commitment_root: None,
+            all_eval_claims: Some(eval_claims),
+            all_pesat_targets: Some(pesat_targets),
+            all_eval_points: Some(eval_points),
+            shift_positions: Vec::new(),
+            shift_input_values: Vec::new(),
+            shift_auth_paths: Vec::new(),
+            shift_folding_factor: 0,
+            shift_codeword_roots: Vec::new(),
+            shift_union_mode: false,
+            alpha_eval,
+            ood_answers: Vec::new(),
+            ood_points: Vec::new(),
+            rho,
+            eval_batch_round_polys: vec![[e0, e1, e2]],
+            eval_batch_challenges: vec![r],
+            new_eval_claim,
+        };
+
+        let mut builder = CircuitBuilder::<F>::new();
+        let mut challenger = CircuitChallenger::<F, 16, 8>::new(&mut builder);
+        let _ = synthesize_warp_fold_verifier::<
+            F, GenericPoseidon2LinearLayersKoalaBear, _, 16, 8,
+        >(&mut builder, &mut challenger, &poseidon_config, &poseidon_perm, &witness);
+
+        let (shape, instance) = builder.build();
+        assert!(
+            shape.is_sat(instance.witness(), instance.input()),
+            "honest Phase-6 batching sumcheck verification must be satisfiable"
+        );
+    }
+
+    /// Tampering `alpha_eval` breaks the Phase-6 initial-claim check —
+    /// `e0 + e1 == current_claim` fails because current_claim now differs
+    /// from the (tampered) alpha_eval.
+    #[test]
+    fn warp_fold_verifier_rejects_tampered_alpha_eval() {
+        use p3_challenger::{CanObserve, CanSample};
+
+        let poseidon_perm = Perm::new_from_rng_128(&mut SmallRng::seed_from_u64(99));
+        let poseidon_config =
+            Poseidon2CircuitConfig::<F, 16>::from_rng(8, 20, 3, &mut SmallRng::seed_from_u64(99));
+
+        let roots = vec![vec![F::ZERO; 8]; 2];
+        let eval_points = vec![vec![F::ZERO; 3]; 2];
+        let eval_claims = vec![F::ZERO; 2];
+        let pesat_targets = vec![F::ZERO; 2];
+
+        let mut native_chal = MyChal::new(poseidon_perm.clone());
+        for i in 0..2 {
+            for &val in &roots[i] { native_chal.observe(val); }
+            native_chal.observe(eval_claims[i]);
+            for &val in &eval_points[i] { native_chal.observe(val); }
+            native_chal.observe(pesat_targets[i]);
+        }
+        let omega: F = native_chal.sample();
+        let tau_0: F = native_chal.sample();
+        let num_fresh = 1;
+        let log_m = 2;
+        for _ in 0..num_fresh * log_m { let _: F = native_chal.sample(); }
+
+        let round_polys = construct_correct_round_polys(
+            &eval_claims, &pesat_targets, omega, &[tau_0], &mut native_chal);
+
+        native_chal.observe(F::from_usize(2000));
+        let rho: F = native_chal.sample();
+
+        let alpha_eval = F::from_u64(17);
+        let e0 = F::from_u64(5);
+        let e1 = alpha_eval - e0;
+        let e2 = F::from_u64(7);
+        native_chal.observe(e0);
+        native_chal.observe(e1);
+        native_chal.observe(e2);
+        let r: F = native_chal.sample();
+
+        let c2 = (e2 - e1.double() + e0) * F::TWO.inverse();
+        let c1 = e1 - e0 - c2;
+        let new_eval_claim = e0 + c1 * r + c2 * r * r;
+
+        // Tamper: claim a different alpha_eval than what (e0, e1) sums to.
+        let tampered_alpha = alpha_eval + F::ONE;
+
+        let witness = WarpFoldVerifierWitness {
+            input_commitment_roots: roots,
+            input_eval_claims: eval_claims.clone(),
+            input_eval_points: eval_points.clone(),
+            input_pesat_targets: pesat_targets.clone(),
+            sumcheck_evals: round_polys,
+            num_rounds: 1,
+            omega,
+            num_fresh,
+            log_m,
+            union_commitment_root: None,
+            all_eval_claims: Some(eval_claims),
+            all_pesat_targets: Some(pesat_targets),
+            all_eval_points: Some(eval_points),
+            shift_positions: Vec::new(),
+            shift_input_values: Vec::new(),
+            shift_auth_paths: Vec::new(),
+            shift_folding_factor: 0,
+            shift_codeword_roots: Vec::new(),
+            shift_union_mode: false,
+            alpha_eval: tampered_alpha,
+            ood_answers: Vec::new(),
+            ood_points: Vec::new(),
+            rho,
+            eval_batch_round_polys: vec![[e0, e1, e2]],
+            eval_batch_challenges: vec![r],
+            new_eval_claim,
+        };
+
+        let mut builder = CircuitBuilder::<F>::new();
+        let mut challenger = CircuitChallenger::<F, 16, 8>::new(&mut builder);
+        let _ = synthesize_warp_fold_verifier::<
+            F, GenericPoseidon2LinearLayersKoalaBear, _, 16, 8,
+        >(&mut builder, &mut challenger, &poseidon_config, &poseidon_perm, &witness);
+
+        let (shape, instance) = builder.build();
+        assert!(
+            !shape.is_sat(instance.witness(), instance.input()),
+            "tampered alpha_eval must make Phase-6 R1CS unsatisfiable"
+        );
+    }
+
+    /// Tampering `rho` breaks the Fiat-Shamir binding: the circuit
+    /// re-derives rho from the sponge, so a mismatched witness.rho hits
+    /// the `enforce_equal(derived_rho, witness_rho)` constraint.
+    #[test]
+    fn warp_fold_verifier_rejects_tampered_rho() {
+        use p3_challenger::{CanObserve, CanSample};
+
+        let poseidon_perm = Perm::new_from_rng_128(&mut SmallRng::seed_from_u64(99));
+        let poseidon_config =
+            Poseidon2CircuitConfig::<F, 16>::from_rng(8, 20, 3, &mut SmallRng::seed_from_u64(99));
+
+        let roots = vec![vec![F::ZERO; 8]; 2];
+        let eval_points = vec![vec![F::ZERO; 3]; 2];
+        let eval_claims = vec![F::ZERO; 2];
+        let pesat_targets = vec![F::ZERO; 2];
+
+        let mut native_chal = MyChal::new(poseidon_perm.clone());
+        for i in 0..2 {
+            for &val in &roots[i] { native_chal.observe(val); }
+            native_chal.observe(eval_claims[i]);
+            for &val in &eval_points[i] { native_chal.observe(val); }
+            native_chal.observe(pesat_targets[i]);
+        }
+        let omega: F = native_chal.sample();
+        let tau_0: F = native_chal.sample();
+        let num_fresh = 1;
+        let log_m = 2;
+        for _ in 0..num_fresh * log_m { let _: F = native_chal.sample(); }
+        let round_polys = construct_correct_round_polys(
+            &eval_claims, &pesat_targets, omega, &[tau_0], &mut native_chal);
+
+        native_chal.observe(F::from_usize(2000));
+        let rho: F = native_chal.sample();
+        let alpha_eval = F::from_u64(17);
+        let e0 = F::from_u64(5);
+        let e1 = alpha_eval - e0;
+        let e2 = F::from_u64(7);
+        native_chal.observe(e0);
+        native_chal.observe(e1);
+        native_chal.observe(e2);
+        let r: F = native_chal.sample();
+        let c2 = (e2 - e1.double() + e0) * F::TWO.inverse();
+        let c1 = e1 - e0 - c2;
+        let new_eval_claim = e0 + c1 * r + c2 * r * r;
+
+        let witness = WarpFoldVerifierWitness {
+            input_commitment_roots: roots,
+            input_eval_claims: eval_claims.clone(),
+            input_eval_points: eval_points.clone(),
+            input_pesat_targets: pesat_targets.clone(),
+            sumcheck_evals: round_polys,
+            num_rounds: 1, omega, num_fresh, log_m,
+            union_commitment_root: None,
+            all_eval_claims: Some(eval_claims),
+            all_pesat_targets: Some(pesat_targets),
+            all_eval_points: Some(eval_points),
+            shift_positions: Vec::new(),
+            shift_input_values: Vec::new(),
+            shift_auth_paths: Vec::new(),
+            shift_folding_factor: 0,
+            shift_codeword_roots: Vec::new(),
+            shift_union_mode: false,
+            alpha_eval,
+            ood_answers: Vec::new(),
+            ood_points: Vec::new(),
+            rho: rho + F::ONE, // TAMPER
+            eval_batch_round_polys: vec![[e0, e1, e2]],
+            eval_batch_challenges: vec![r],
+            new_eval_claim,
+        };
+
+        let mut builder = CircuitBuilder::<F>::new();
+        let mut challenger = CircuitChallenger::<F, 16, 8>::new(&mut builder);
+        let _ = synthesize_warp_fold_verifier::<
+            F, GenericPoseidon2LinearLayersKoalaBear, _, 16, 8,
+        >(&mut builder, &mut challenger, &poseidon_config, &poseidon_perm, &witness);
+
+        let (shape, instance) = builder.build();
+        assert!(
+            !shape.is_sat(instance.witness(), instance.input()),
+            "tampered rho must break the FS binding"
+        );
+    }
+
+    /// Honest union-mode Merkle authentication must produce a satisfiable
+    /// in-circuit verifier (Phase 5 — union branch).
+    #[test]
+    fn warp_fold_verifier_accepts_honest_union_merkle() {
+        use p3_challenger::{CanObserve, CanSample};
+
+        let poseidon_perm = Perm::new_from_rng_128(&mut SmallRng::seed_from_u64(99));
+        let (rf, rp) = p3_poseidon2::poseidon2_round_numbers_128::<F>(16, 3)
+            .expect("unsupported Poseidon2 parameters");
+        let poseidon_config = Poseidon2CircuitConfig::<F, 16>::from_rng(
+            rf, rp, 3, &mut SmallRng::seed_from_u64(99),
+        );
+
+        let (per_codeword_rows, proof, union_root, position, _) =
+            build_sample_union_merkle_opening();
+
+        // Minimal twin-constraint setup — we only care that the union-mode
+        // Merkle branch of Phase 5 accepts.  l=2, log_l=1, so num_rounds=1.
+        let running_root = vec![F::ZERO; 8];
+        let running_eval_claim = F::ZERO;
+        let running_eval_point = vec![F::ZERO; 3];
+        let running_pesat_target = F::ZERO;
+
+        let mut native_chal = MyChal::new(poseidon_perm.clone());
+        // Non-union FS absorbs each accumulator; union FS absorbs only the
+        // running acc + union root (see Phase 1 union branch).
+        for &v in &running_root { native_chal.observe(v); }
+        native_chal.observe(running_eval_claim);
+        for &v in &running_eval_point { native_chal.observe(v); }
+        native_chal.observe(running_pesat_target);
+        for &v in &union_root { native_chal.observe(v); }
+
+        let omega: F = native_chal.sample();
+        let tau_0: F = native_chal.sample();
+        let num_fresh = 1;
+        let log_m = 2;
+        for _ in 0..num_fresh * log_m { let _: F = native_chal.sample(); }
+
+        // All-zero mu/eta for l=2 → round polys that sum to zero.
+        let all_mu = vec![F::ZERO; 2];
+        let all_eta = vec![F::ZERO; 2];
+        let round_polys = construct_correct_round_polys(
+            &all_mu, &all_eta, omega, &[tau_0], &mut native_chal);
+
+        let witness = WarpFoldVerifierWitness::from_fold_result_union(
+            running_root,
+            running_eval_claim,
+            running_eval_point,
+            running_pesat_target,
+            union_root.to_vec(),
+            &round_polys.iter().map(|r| r.to_vec()).collect::<Vec<_>>(),
+            omega,
+            num_fresh,
+            log_m,
+            all_mu,
+            all_eta,
+            vec![vec![F::ZERO; 3]; 2],
+        )
+        .with_shift_authentication(
+            vec![position],
+            vec![per_codeword_rows],
+            vec![vec![proof.iter().map(|s| s.to_vec()).collect()]],
+            2, // base folding factor
+            vec![union_root.to_vec()],
+        );
+
+        // Flip union mode on (not done by `with_shift_authentication`).
+        let mut witness = witness;
+        witness.shift_union_mode = true;
+
+        let mut builder = CircuitBuilder::<F>::new();
+        let mut challenger = CircuitChallenger::<F, 16, 8>::new(&mut builder);
+        let _ = synthesize_warp_fold_verifier::<
+            F, GenericPoseidon2LinearLayersKoalaBear, _, 16, 8,
+        >(&mut builder, &mut challenger, &poseidon_config, &poseidon_perm, &witness);
+
+        let (shape, instance) = builder.build();
+        assert!(
+            shape.is_sat(instance.witness(), instance.input()),
+            "honest union-mode Phase-5 verification must be satisfiable"
+        );
+    }
+
+    /// Tampering one per-codeword row value in union mode must invalidate
+    /// the Merkle opening against the union root.
+    #[test]
+    #[should_panic(expected = "derived root")]
+    fn warp_fold_verifier_union_rejects_tampered_value() {
+        use p3_challenger::{CanObserve, CanSample};
+
+        let poseidon_perm = Perm::new_from_rng_128(&mut SmallRng::seed_from_u64(99));
+        let (rf, rp) = p3_poseidon2::poseidon2_round_numbers_128::<F>(16, 3)
+            .expect("unsupported Poseidon2 parameters");
+        let poseidon_config = Poseidon2CircuitConfig::<F, 16>::from_rng(
+            rf, rp, 3, &mut SmallRng::seed_from_u64(99),
+        );
+
+        let (mut per_codeword_rows, proof, union_root, position, _) =
+            build_sample_union_merkle_opening();
+        // Tamper: flip one column of codeword 0.
+        per_codeword_rows[0][0] += F::ONE;
+
+        let running_root = vec![F::ZERO; 8];
+        let running_eval_claim = F::ZERO;
+        let running_eval_point = vec![F::ZERO; 3];
+        let running_pesat_target = F::ZERO;
+
+        let mut native_chal = MyChal::new(poseidon_perm.clone());
+        for &v in &running_root { native_chal.observe(v); }
+        native_chal.observe(running_eval_claim);
+        for &v in &running_eval_point { native_chal.observe(v); }
+        native_chal.observe(running_pesat_target);
+        for &v in &union_root { native_chal.observe(v); }
+
+        let omega: F = native_chal.sample();
+        let tau_0: F = native_chal.sample();
+        let num_fresh = 1;
+        let log_m = 2;
+        for _ in 0..num_fresh * log_m { let _: F = native_chal.sample(); }
+        let all_mu = vec![F::ZERO; 2];
+        let all_eta = vec![F::ZERO; 2];
+        let round_polys = construct_correct_round_polys(
+            &all_mu, &all_eta, omega, &[tau_0], &mut native_chal);
+
+        let mut witness = WarpFoldVerifierWitness::from_fold_result_union(
+            running_root,
+            running_eval_claim,
+            running_eval_point,
+            running_pesat_target,
+            union_root.to_vec(),
+            &round_polys.iter().map(|r| r.to_vec()).collect::<Vec<_>>(),
+            omega,
+            num_fresh,
+            log_m,
+            all_mu,
+            all_eta,
+            vec![vec![F::ZERO; 3]; 2],
+        )
+        .with_shift_authentication(
+            vec![position],
+            vec![per_codeword_rows],
+            vec![vec![proof.iter().map(|s| s.to_vec()).collect()]],
+            2,
+            vec![union_root.to_vec()],
+        );
+        witness.shift_union_mode = true;
+
+        let mut builder = CircuitBuilder::<F>::new();
+        let mut challenger = CircuitChallenger::<F, 16, 8>::new(&mut builder);
+        // The merkle gadget asserts derived_root == expected_root, so this
+        // call panics with "derived root[...] does not match expected".
+        let _ = synthesize_warp_fold_verifier::<
+            F, GenericPoseidon2LinearLayersKoalaBear, _, 16, 8,
+        >(&mut builder, &mut challenger, &poseidon_config, &poseidon_perm, &witness);
     }
 }

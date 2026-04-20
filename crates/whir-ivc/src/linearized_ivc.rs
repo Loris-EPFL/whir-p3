@@ -488,7 +488,7 @@ where
     {
         AccumulationDecider::new(self.whir_config).verify::<P, W, PW, DIGEST_ELEMS>(
             decider_challenger,
-            &state.accumulator,
+            &state.accumulator.public_instance,
             decider_proof,
         )
     }
@@ -700,7 +700,7 @@ mod tests {
             8,
         >(
             &mut decider_verify_chal,
-            &state2.accumulator,
+            &state2.accumulator.public_instance,
             &decider_proof,
         );
 
@@ -907,7 +907,7 @@ mod tests {
         let mut verify_chal = seed_challenger(&config);
         let result = decider.verify::<<F as Field>::Packing, F, <F as Field>::Packing, 8>(
             &mut verify_chal,
-            &state2.accumulator,
+            &state2.accumulator.public_instance,
             &decider_proof,
         );
         assert!(result.is_ok(), "decider failed on recursive IVC: {result:?}");

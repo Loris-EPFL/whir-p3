@@ -1,0 +1,18 @@
+[package]
+name = "whir-traits"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+description = "Shared trait definitions for the whir-p3 workspace: FoldingProver, FoldingVerifier, TerminalScheme, ParsedCommitmentView, OodStatement."
+
+[lints]
+workspace = true
+
+[dependencies]
+p3-field.workspace = true
+p3-challenger.workspace = true
+p3-symmetric.workspace = true
+serde.workspace = true
+
+[features]
+default = []

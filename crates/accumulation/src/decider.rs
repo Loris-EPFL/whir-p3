@@ -101,12 +101,23 @@ where
 
     /// Verify: check the standalone decider proof against an accumulator.
     ///
-    /// 1. Algebraic check: witness satisfies the linear claim.
-    /// 2. WHIR PCS check: the committed polynomial matches.
+    /// Succinct-verifier mode: checks the proof against `accumulator.public_instance`
+    /// only — the `witness` field of `accumulator` is ignored. The caller is expected
+    /// to have obtained the public instance through a trusted channel (e.g. the
+    /// accumulation verifier that produced it).
+    ///
+    /// Checks performed:
+    /// 1. **Commitment binding** — the WHIR proof's parsed commitment MUST equal
+    ///    `accumulator.public_instance.commitment_root`. Without this check a
+    ///    prover could commit to any polynomial that happens to satisfy the
+    ///    `linear_claim` (trivially constructible for most claims), bypassing
+    ///    the accumulator's chain-of-custody.
+    /// 2. **WHIR PCS check** — the committed polynomial satisfies the accumulated
+    ///    linear claim.
     pub fn verify<P, W, PW, const DIGEST_ELEMS: usize>(
         &self,
         challenger: &mut Challenger,
-        accumulator: &Accumulator<F, EF, W, DIGEST_ELEMS>,
+        instance: &crate::accumulator::AccumulatorInstance<F, EF, W, DIGEST_ELEMS>,
         decider_proof: &DeciderProof<F, EF, W, DIGEST_ELEMS>,
     ) -> Result<(), VerifierError>
     where
@@ -122,24 +133,27 @@ where
         Challenger: CanObserve<Hash<F, W, DIGEST_ELEMS>>,
         [W; DIGEST_ELEMS]: serde::Serialize + for<'de> serde::Deserialize<'de>,
     {
-        // Step 1: Algebraic check
-        if !decide_linearized_accumulator(accumulator) {
-            return Err(VerifierError::StirChallengeFailed {
-                challenge_id: 0,
-                details: "accumulator witness does not satisfy linear claim".into(),
-            });
-        }
-
-        // Step 2: WHIR PCS verification with fresh transcript
-        let num_vars = accumulator.public_instance.linear_claim.num_variables();
+        let num_vars = instance.linear_claim.num_variables();
         let eq_statement = EqStatement::initialize(num_vars);
         let initial_claim = InitialClaim {
             eq_statement,
-            linear_statement: accumulator.public_instance.linear_claim.clone(),
+            linear_statement: instance.linear_claim.clone(),
         };
 
         let parsed_commitment = CommitmentReader::new(self.0)
             .parse_commitment::<W, DIGEST_ELEMS>(&decider_proof.whir_proof, challenger);
+
+        // Step 1: commitment binding — fail closed if the decider's WHIR
+        // commitment does not match the accumulator's stored commitment_root.
+        let expected_root: Hash<F, W, DIGEST_ELEMS> = Hash::from(instance.commitment_root);
+        if parsed_commitment.root != expected_root {
+            return Err(VerifierError::StirChallengeFailed {
+                challenge_id: 0,
+                details: "decider commitment_root mismatch: parsed proof is not bound to accumulator".into(),
+            });
+        }
+
+        // Step 2: WHIR PCS verification with the accumulated linear claim.
         WhirVerifier::new(self.0).verify_with_initial_claim::<P, W, PW, DIGEST_ELEMS>(
             &decider_proof.whir_proof,
             challenger,
@@ -155,6 +169,130 @@ where
         accumulator: &Accumulator<F, EF, W, DIGEST_ELEMS>,
     ) -> bool {
         decide_linearized_accumulator(accumulator)
+    }
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// `whir_traits::TerminalScheme` bridge.
+//
+// We implement the trait on a zero-sized type `AccumulationTerminal` that
+// delegates to the existing `AccumulationDecider`. The `Challenger` is a
+// trait-level parameter (same pattern as `p3_commit::Pcs`), so we can
+// require `CanObserve<Hash<…>>` on it directly without leaking that bound
+// into the trait itself.
+//
+// The `Error` associated type is `DeciderError` (a new enum that merges
+// `FiatShamirError` + `VerifierError`) so that `prove` and `verify` agree
+// on a single error type.
+// ──────────────────────────────────────────────────────────────────────────
+
+/// Zero-sized bridge type that implements [`whir_traits::TerminalScheme`]
+/// by delegating to [`AccumulationDecider`].
+#[derive(Debug)]
+pub struct AccumulationTerminal<
+    EF,
+    F,
+    H,
+    C,
+    P,
+    W,
+    PW,
+    const DIGEST_ELEMS: usize,
+>(core::marker::PhantomData<fn() -> (EF, F, H, C, P, W, PW)>)
+where
+    F: Field,
+    EF: ExtensionField<F>;
+
+impl<EF, F, H, C, P, W, PW, const DIGEST_ELEMS: usize>
+    AccumulationTerminal<EF, F, H, C, P, W, PW, DIGEST_ELEMS>
+where
+    F: Field,
+    EF: ExtensionField<F>,
+{
+    #[must_use]
+    pub const fn new() -> Self {
+        Self(core::marker::PhantomData)
+    }
+}
+
+impl<EF, F, H, C, P, W, PW, const DIGEST_ELEMS: usize> Default
+    for AccumulationTerminal<EF, F, H, C, P, W, PW, DIGEST_ELEMS>
+where
+    F: Field,
+    EF: ExtensionField<F>,
+{
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Error type for the [`AccumulationTerminal`] implementation of
+/// [`whir_traits::TerminalScheme`]. Merges the two underlying error types
+/// (`FiatShamirError` from `prove`, `VerifierError` from `verify`) so that
+/// the associated `Error` type in the trait impl is single-valued.
+#[derive(Debug, thiserror::Error)]
+pub enum DeciderError {
+    /// Fiat-Shamir transcript error (typically from the prover).
+    #[error("Fiat-Shamir error: {0}")]
+    FiatShamir(#[from] FiatShamirError),
+    /// WHIR / accumulator verification error.
+    #[error("verification failed: {0:?}")]
+    Verify(VerifierError),
+}
+
+impl From<VerifierError> for DeciderError {
+    fn from(e: VerifierError) -> Self {
+        Self::Verify(e)
+    }
+}
+
+impl<EF, F, H, C, P, W, PW, Ch, const DIGEST_ELEMS: usize>
+    whir_traits::TerminalScheme<F, EF, Ch>
+    for AccumulationTerminal<EF, F, H, C, P, W, PW, DIGEST_ELEMS>
+where
+    F: TwoAdicField + Ord,
+    EF: ExtensionField<F> + TwoAdicField + Algebra<EF>,
+    P: PackedValue<Value = F> + Eq + Send + Sync,
+    W: PackedValue<Value = W> + Eq + Send + Sync + Copy + Default,
+    PW: PackedValue<Value = W> + Eq + Send + Sync,
+    H: CryptographicHasher<F, [W; DIGEST_ELEMS]>
+        + CryptographicHasher<P, [PW; DIGEST_ELEMS]>
+        + Sync,
+    C: PseudoCompressionFunction<[W; DIGEST_ELEMS], 2>
+        + PseudoCompressionFunction<[PW; DIGEST_ELEMS], 2>
+        + Sync,
+    Ch: FieldChallenger<F>
+        + GrindingChallenger<Witness = F>
+        + CanObserve<Hash<F, W, DIGEST_ELEMS>>,
+    [W; DIGEST_ELEMS]: serde::Serialize + for<'de> serde::Deserialize<'de>,
+{
+    type Config = WhirConfig<EF, F, H, C, Ch>;
+    type Accumulator = Accumulator<F, EF, W, DIGEST_ELEMS>;
+    type AccumulatorInstance = crate::accumulator::AccumulatorInstance<F, EF, W, DIGEST_ELEMS>;
+    type TerminalProof = DeciderProof<F, EF, W, DIGEST_ELEMS>;
+    type Error = DeciderError;
+
+    fn prove(
+        config: &Self::Config,
+        challenger: &mut Ch,
+        accumulator: &Self::Accumulator,
+    ) -> Result<Self::TerminalProof, Self::Error> {
+        use p3_dft::Radix2DFTSmallBatch;
+        let dft = Radix2DFTSmallBatch::<F>::default();
+        AccumulationDecider::new(config)
+            .prove::<P, W, PW, _, DIGEST_ELEMS>(&dft, challenger, accumulator)
+            .map_err(DeciderError::from)
+    }
+
+    fn verify(
+        config: &Self::Config,
+        challenger: &mut Ch,
+        instance: &Self::AccumulatorInstance,
+        proof: &Self::TerminalProof,
+    ) -> Result<(), Self::Error> {
+        AccumulationDecider::new(config)
+            .verify::<P, W, PW, DIGEST_ELEMS>(challenger, instance, proof)
+            .map_err(DeciderError::from)
     }
 }
 
@@ -292,7 +430,8 @@ mod tests {
             )
             .unwrap();
 
-        // Decider: verify with fresh challenger
+        // Decider: verify with fresh challenger.
+        // Succinct verifier consumes only `public_instance`.
         let mut verify_challenger = seed_challenger(&config);
         let result = decider.verify::<
             <F as Field>::Packing,
@@ -300,10 +439,60 @@ mod tests {
             <F as Field>::Packing,
             8,
         >(
-            &mut verify_challenger, &output, &decider_proof
+            &mut verify_challenger, &output.public_instance, &decider_proof
         );
 
         assert!(result.is_ok(), "decider rejected valid accumulator: {result:?}");
+    }
+
+    #[test]
+    fn terminal_scheme_trait_roundtrips() {
+        use whir_traits::TerminalScheme;
+        type Terminal =
+            AccumulationTerminal<EF, F, MyHash, MyCompress, <F as Field>::Packing, F, <F as Field>::Packing, 8>;
+
+        let (shape, instance0) = make_shape_and_instance(9);
+        let (_, instance1) = make_shape_and_instance(16);
+        let spartan = R1CSProver::new();
+
+        let mut chal0 =
+            MyChallenger::new(Perm::new_from_rng_128(&mut SmallRng::seed_from_u64(1)));
+        let proof0 = spartan.prove::<EF, _>(&instance0, &mut chal0);
+        let mut chal1 =
+            MyChallenger::new(Perm::new_from_rng_128(&mut SmallRng::seed_from_u64(2)));
+        let proof1 = spartan.prove::<EF, _>(&instance1, &mut chal1);
+
+        let acc0 = initialize_accumulator_from_spartan::<F, EF, F, 8>(
+            &shape, &proof0, spartan.prepare_witness(&instance0),
+            [F::ZERO; 8], EF::from_u64(3),
+        );
+        let acc1 = initialize_accumulator_from_spartan::<F, EF, F, 8>(
+            &shape, &proof1, spartan.prepare_witness(&instance1),
+            [F::ONE; 8], EF::from_u64(3),
+        );
+
+        let config = make_whir_config();
+        let dft = Radix2DFTSmallBatch::<F>::default();
+        let mut prover_challenger = seed_challenger(&config);
+        let (output, _) = LinearizedAccumulationProver::new(&config)
+            .accumulate::<_, F, <F as Field>::Packing, _, 8>(
+                &dft, &mut prover_challenger, &[acc0, acc1], 2,
+            )
+            .unwrap();
+
+        // Prove via the trait.
+        let mut prove_chal = seed_challenger(&config);
+        let proof = <Terminal as TerminalScheme<F, EF, MyChallenger>>::prove(
+            &config, &mut prove_chal, &output,
+        )
+        .expect("TerminalScheme::prove failed");
+
+        // Verify via the trait.
+        let mut verify_chal = seed_challenger(&config);
+        <Terminal as TerminalScheme<F, EF, MyChallenger>>::verify(
+            &config, &mut verify_chal, &output.public_instance, &proof,
+        )
+        .expect("TerminalScheme::verify failed");
     }
 
     #[test]
@@ -358,8 +547,9 @@ mod tests {
             )
             .unwrap();
 
-        // Tamper with the witness after proving
-        output.witness.poly.as_mut_slice()[0] += F::ONE;
+        // Tamper with the public instance's commitment_root. With the
+        // bug_013 fix, verify must catch this via the commitment binding check.
+        output.public_instance.commitment_root[0] += F::ONE;
 
         let mut verify_challenger = seed_challenger(&config);
         let result = decider.verify::<
@@ -368,10 +558,10 @@ mod tests {
             <F as Field>::Packing,
             8,
         >(
-            &mut verify_challenger, &output, &decider_proof
+            &mut verify_challenger, &output.public_instance, &decider_proof
         );
 
-        assert!(result.is_err(), "decider accepted tampered witness");
+        assert!(result.is_err(), "decider accepted tampered commitment_root");
     }
 
     #[test]

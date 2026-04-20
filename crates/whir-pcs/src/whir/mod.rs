@@ -3,6 +3,7 @@ pub mod constraints;
 pub mod parameters;
 pub mod proof;
 pub mod prover;
+mod traits_impl;
 pub mod utils;
 pub mod verifier;
 

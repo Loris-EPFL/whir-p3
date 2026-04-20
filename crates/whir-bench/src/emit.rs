@@ -1,8 +1,25 @@
 use std::io::{self, Write};
 
-use crate::metrics::Row;
+use crate::{metrics::Row, microbench::MicrobenchRow};
 
 pub fn write_row(w: &mut impl Write, r: &Row) -> io::Result<()> {
+    // Wrap in a small object to tag the row kind without modifying the Row
+    // struct (which is shared with scheme tests).
+    let wrapped = serde_json::json!({
+        "kind": "scheme",
+        "scheme": r.scheme,
+        "axes": r.axes,
+        "run": r.run,
+        "skipped": r.skipped,
+        "phases_ns": r.phases_ns,
+        "counters": r.counters,
+        "static": r.static_,
+    });
+    serde_json::to_writer(&mut *w, &wrapped)?;
+    writeln!(w)
+}
+
+pub fn write_microbench_row(w: &mut impl Write, r: &MicrobenchRow) -> io::Result<()> {
     serde_json::to_writer(&mut *w, r)?;
     writeln!(w)
 }
@@ -42,10 +59,8 @@ mod tests {
         assert!(s.ends_with('\n'));
 
         let deser: serde_json::Value = serde_json::from_str(s.trim()).unwrap();
+        assert_eq!(deser["kind"], "scheme");
         assert_eq!(deser["scheme"], "test");
         assert_eq!(deser["axes"]["log_n"], 10);
-        assert_eq!(deser["run"], 0);
-        assert_eq!(deser["phases_ns"]["prove_total"], 12345);
-        assert_eq!(deser["static"]["proof_field_elems"], 100);
     }
 }

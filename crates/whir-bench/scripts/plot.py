@@ -21,6 +21,7 @@ import pandas as pd
 
 
 def load_jsonl(path: str) -> pd.DataFrame:
+    """Load scheme rows (kind=='scheme') from a unified JSONL."""
     rows = []
     with open(path) as f:
         for line in f:
@@ -28,6 +29,8 @@ def load_jsonl(path: str) -> pd.DataFrame:
             if not line:
                 continue
             obj = json.loads(line)
+            if obj.get("kind") and obj.get("kind") != "scheme":
+                continue
             if obj.get("skipped"):
                 continue
             flat = {
@@ -43,6 +46,22 @@ def load_jsonl(path: str) -> pd.DataFrame:
                 flat[f"static_{k}"] = v
             rows.append(flat)
     return pd.DataFrame(rows)
+
+
+def load_microbenches(path: str) -> dict[str, pd.DataFrame]:
+    """Load microbench rows (kind=='microbench'), grouped by `name`."""
+    buckets: dict[str, list] = defaultdict(list)
+    with open(path) as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            obj = json.loads(line)
+            if obj.get("kind") != "microbench":
+                continue
+            flat = {**obj.get("axes", {}), **obj.get("values", {})}
+            buckets[obj["name"]].append(flat)
+    return {k: pd.DataFrame(v) for k, v in buckets.items()}
 
 
 def bootstrap_ci(values, n_boot=2000, ci=0.95):
@@ -546,8 +565,131 @@ def _plot_circuit_size_arity(df, ax):
     ax.legend(fontsize=8)
 
 
+def plot_unified_dashboard(path: str, out: str):
+    """Unified dashboard: scheme rows (prover comparisons) + microbench rows
+    (verifier/circuit/terminal microbenches) in one 5×3 figure."""
+    df_scheme = load_jsonl(path)
+    mb = load_microbenches(path)
+
+    fig, axes = plt.subplots(5, 3, figsize=(22, 24))
+
+    # Row 1 — Family A scheme comparison: prove time + total_instances-normalized
+    _plot_scheme_prove(df_scheme, axes[0, 0], family_counter="counter_family_a",
+                       title="Family A — prove_total vs log_n")
+    _plot_scheme_normalized(df_scheme, axes[0, 1], family_counter="counter_family_a",
+                            title="Family A — ms per R1CS instance (fair)")
+    _plot_scheme_verify(df_scheme, axes[0, 2], family_counter="counter_family_a",
+                        title="Family A — verify_total")
+
+    # Row 2 — Family B scheme comparison
+    _plot_scheme_prove(df_scheme, axes[1, 0], family_counter="counter_family_b",
+                       title="Family B — prove_total vs log_n")
+    _plot_scheme_normalized(df_scheme, axes[1, 1], family_counter="counter_family_b",
+                            title="Family B — ms per step circuit (fair)")
+    _plot_scheme_verify(df_scheme, axes[1, 2], family_counter="counter_family_b",
+                        title="Family B — verify_total")
+
+    # Row 3 — Native verifier microbenches
+    _plot_fs_scaling_abs(mb.get("fs_scaling", pd.DataFrame()), axes[2, 0])
+    _plot_fold_verify_full(mb.get("fold_verify", pd.DataFrame()), axes[2, 1])
+    _plot_fs_scaling_speedup(mb.get("fs_scaling", pd.DataFrame()), axes[2, 2])
+
+    # Row 4 — In-circuit verifier microbenches
+    _plot_circuit_size_arity(mb.get("circuit_size_arity", pd.DataFrame()), axes[3, 0])
+    _plot_circuit_sizes(mb.get("circuit_sizes_l2", pd.DataFrame()), axes[3, 1])
+    _plot_circuit_size_arity_speedup(mb.get("circuit_size_arity", pd.DataFrame()),
+                                     axes[3, 2])
+
+    # Row 5 — Terminal + in-circuit WHIR estimate + fold_verify speedup
+    _plot_terminal_whir(mb.get("terminal_whir", pd.DataFrame()), axes[4, 0])
+    _plot_whir_estimate(mb.get("whir_in_circuit_estimate", pd.DataFrame()), axes[4, 1])
+    _plot_fold_verify_speedup(mb.get("fold_verify", pd.DataFrame()), axes[4, 2])
+
+    for row in axes:
+        for ax in row:
+            ax.grid(True, alpha=0.3)
+    fig.suptitle("whir-bench unified dashboard", fontsize=15)
+    fig.tight_layout()
+    fig.savefig(out)
+    plt.close(fig)
+    print(f"Saved: {out}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Scheme-row panels for the unified dashboard
+# ─────────────────────────────────────────────────────────────────────────────
+
+SCHEME_STYLES_FULL = {
+    "independent_whir": {"color": "#7f7f7f", "marker": "x", "label": "independent_whir"},
+    "pure_warp":        {"color": "#1f77b4", "marker": "o", "label": "pure_warp"},
+    "warp_batch":       {"color": "#ff7f0e", "marker": "s", "label": "warp_batch"},
+    "warp_union":       {"color": "#2ca02c", "marker": "^", "label": "warp_union"},
+    "quasar_warp":      {"color": "#1f77b4", "marker": "o", "label": "quasar_warp"},
+    "symphony":         {"color": "#2ca02c", "marker": "^", "label": "symphony"},
+    "quasar_symphony":  {"color": "#d62728", "marker": "D", "label": "quasar_symphony"},
+}
+
+
+def _filter_family(df: pd.DataFrame, family_counter: str) -> pd.DataFrame:
+    if family_counter in df.columns:
+        return df[df[family_counter].fillna(0) > 0]
+    return df.iloc[0:0]
+
+
+def _plot_scheme_prove(df, ax, family_counter: str, title: str):
+    sub = _filter_family(df, family_counter)
+    if sub.empty:
+        ax.text(0.5, 0.5, "(no data in this family)",
+                transform=ax.transAxes, ha="center", color="gray")
+        return
+    agg = sub.groupby(["scheme", "log_n"])["phase_prove_total"].median().reset_index()
+    for scheme, g in agg.groupby("scheme"):
+        g = g.sort_values("log_n")
+        st = SCHEME_STYLES_FULL.get(scheme, {"color": "gray", "marker": "x", "label": scheme})
+        ax.plot(g["log_n"], g["phase_prove_total"] / 1e6, "-",
+                marker=st["marker"], color=st["color"], label=st["label"], linewidth=1.5)
+    ax.set(xlabel="log₂(constraints)", ylabel="prove_total (ms)", title=title)
+    ax.legend(fontsize=7)
+
+
+def _plot_scheme_verify(df, ax, family_counter: str, title: str):
+    sub = _filter_family(df, family_counter)
+    if sub.empty:
+        ax.text(0.5, 0.5, "(no data in this family)",
+                transform=ax.transAxes, ha="center", color="gray")
+        return
+    agg = sub.groupby(["scheme", "log_n"])["phase_verify_total"].median().reset_index()
+    for scheme, g in agg.groupby("scheme"):
+        g = g.sort_values("log_n")
+        st = SCHEME_STYLES_FULL.get(scheme, {"color": "gray", "marker": "x", "label": scheme})
+        ax.plot(g["log_n"], g["phase_verify_total"] / 1e3, "-",
+                marker=st["marker"], color=st["color"], label=st["label"], linewidth=1.5)
+    ax.set(xlabel="log₂(constraints)", ylabel="verify_total (µs)",
+           title=title, yscale="log")
+    ax.legend(fontsize=7)
+
+
+def _plot_scheme_normalized(df, ax, family_counter: str, title: str):
+    """Prove time per instance: phase_prove_total / counter_total_instances."""
+    sub = _filter_family(df, family_counter)
+    if sub.empty or "counter_total_instances" not in sub.columns:
+        ax.text(0.5, 0.5, "(no instance counter)",
+                transform=ax.transAxes, ha="center", color="gray")
+        return
+    sub = sub.copy()
+    sub["ms_per_instance"] = (sub["phase_prove_total"] / 1e6) / sub["counter_total_instances"]
+    agg = sub.groupby(["scheme", "log_n"])["ms_per_instance"].median().reset_index()
+    for scheme, g in agg.groupby("scheme"):
+        g = g.sort_values("log_n")
+        st = SCHEME_STYLES_FULL.get(scheme, {"color": "gray", "marker": "x", "label": scheme})
+        ax.plot(g["log_n"], g["ms_per_instance"], "-",
+                marker=st["marker"], color=st["color"], label=st["label"], linewidth=1.5)
+    ax.set(xlabel="log₂(constraints)", ylabel="ms / instance", title=title)
+    ax.legend(fontsize=7)
+
+
 def plot_compare_all(path: str, out: str):
-    """Render every compare_bench table on a single 5×3 multi-panel figure."""
+    """Legacy compare_bench renderer — still works for old compare_bench JSONL."""
     tables = load_compare_jsonl(path)
     apples = tables.get("apples", pd.DataFrame())
     recursive = tables.get("recursive", pd.DataFrame())
@@ -675,25 +817,43 @@ def main():
                         help="Input is a compare_bench JSONL; requires --out for the multi-panel figure")
     args = parser.parse_args()
 
-    # Auto-detect format: compare_bench rows carry a "table" field,
-    # whir-bench rows carry "phases_ns"/"axes".
-    def _is_compare_bench(path: str) -> bool:
+    # Auto-detect JSONL format:
+    #   - compare_bench legacy format → rows have top-level `table` field
+    #   - unified format → rows have `kind` in {"scheme", "microbench"}
+    def _detect_format(path: str) -> str:
         try:
             with open(path) as f:
+                has_compare = False
+                has_microbench = False
                 for line in f:
                     line = line.strip()
                     if not line:
                         continue
                     obj = json.loads(line)
-                    return "table" in obj
+                    if "table" in obj:
+                        has_compare = True
+                    if obj.get("kind") == "microbench":
+                        has_microbench = True
+                if has_compare and not has_microbench:
+                    return "compare_bench"
+                if has_microbench:
+                    return "unified"
+                return "whir_bench_scheme_only"
         except OSError:
-            return False
-        return False
+            return "unknown"
 
-    if args.compare or _is_compare_bench(args.input):
+    fmt = _detect_format(args.input)
+
+    if args.compare or fmt == "compare_bench":
         if not args.out:
             parser.error("compare_bench JSONL requires --out")
         plot_compare_all(args.input, args.out)
+        return
+
+    if fmt == "unified":
+        if not args.out:
+            parser.error("unified JSONL requires --out")
+        plot_unified_dashboard(args.input, args.out)
         return
 
     df = load_jsonl(args.input)

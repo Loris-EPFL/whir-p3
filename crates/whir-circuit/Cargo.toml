@@ -23,6 +23,9 @@ rand.workspace = true
 
 [dev-dependencies]
 p3-keccak.workspace = true
+p3-matrix.workspace = true
+p3-merkle-tree.workspace = true
+p3-commit.workspace = true
 rand = { workspace = true, features = ["std", "std_rng", "thread_rng"] }
 
 [features]

@@ -1,0 +1,61 @@
+# Unified benchmark config — single TOML for every measurement that used to
+# live in compare_bench. Produces one JSONL that plot.py renders into the full
+# dashboard.
+#
+# Two kinds of benches run from this config:
+#
+#   [schemes]       — FoldingScheme impls (setup / prove / verify pipelines).
+#                     Swept across the cartesian product of `axes` below.
+#                     Family A (no step circuit; accumulate N R1CS instances):
+#                       independent_whir, pure_warp, warp_batch, warp_union
+#                     Family B (recursive IVC; N step circuits):
+#                       quasar_warp, symphony, quasar_symphony
+#
+#   [microbenches]  — isolated measurements (no FoldingScheme shape).
+#                     Use their own [microbench_axes] section.
+#                     fs_scaling, fold_verify          : sweep arity
+#                     circuit_size_arity               : sweep arity, 2 variants
+#                     circuit_sizes_l2                 : single snapshot (l=2)
+#                     terminal_whir                    : sweep log_size
+#                     whir_in_circuit_estimate         : sweep log_size (formula)
+
+schemes = [
+    "independent_whir",
+    "pure_warp",
+    "warp_batch",
+    "warp_union",
+    "quasar_warp",
+    "symphony",
+    "quasar_symphony",
+]
+
+microbenches = [
+    "fs_scaling",
+    "fold_verify",
+    "circuit_size_arity",
+    "circuit_sizes_l2",
+    "terminal_whir",
+    "whir_in_circuit_estimate",
+]
+
+warmup  = 1
+repeats = 3
+output  = "output/dashboard.jsonl"
+
+# ── Scheme sweep axes ────────────────────────────────────────────
+[axes]
+log_n     = [14, 16, 18, 20]
+arity     = [4]       # arity>=4 needed by union & quasar paths
+batch     = [8]       # batch-reduce fan-in for warp_batch
+ivc_steps = [4, 8, 16, 32]
+step_muls = [100]
+seed      = 42
+
+# ── Microbench axes ─────────────────────────────────────────────
+# Shared by all microbenches; each one picks the axes it needs.
+[microbench_axes]
+arity            = [2, 4, 8, 16, 32, 64]   # fs_scaling, fold_verify, circuit_size_arity
+log_m            = 20                       # fs_scaling, fold_verify
+log_n            = 21                       # fs_scaling, fold_verify
+log_size         = [14, 16, 18, 20]        # terminal_whir, whir_in_circuit_estimate
+terminal_repeats = 3                        # median of N runs for terminal_whir

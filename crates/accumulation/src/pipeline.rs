@@ -365,14 +365,16 @@ mod tests {
 
         let cw01 = rs_encode(&combined_01, rs_config.folding_factor, rs_config.log_inv_rate, &dft);
         let code_len = cw01.as_slice().len();
-        let _log_n = code_len.trailing_zeros() as usize;
+        let code_log_n = code_len.trailing_zeros() as usize;
 
-        // Eval claim on WITNESS polynomial
+        // Post-bug_017 fix: accumulated eval claim is on the CODEWORD.
+        // The eval_point lives in codeword domain (code_log_n vars); for
+        // the zero-eval-point the corresponding claim is codeword[0].
         let fresh_acc_01 = EvalAccumulator {
             instance: EvalAccumulatorInstance {
                 commitment_root: [F::ZERO; 8],
-                eval_point: vec![F::ZERO; witness_num_vars],
-                eval_claim: combined_01.as_slice()[0], // f̃_wit(0..0)
+                eval_point: vec![F::ZERO; code_log_n],
+                eval_claim: cw01.as_slice()[0],
             },
             witness: EvalAccumulatorWitness {
                 codeword: cw01,
@@ -404,8 +406,8 @@ mod tests {
         let fresh_acc_23 = EvalAccumulator {
             instance: EvalAccumulatorInstance {
                 commitment_root: [F::ZERO; 8],
-                eval_point: vec![F::ZERO; witness_num_vars],
-                eval_claim: combined_23.as_slice()[0],
+                eval_point: vec![F::ZERO; code_log_n],
+                eval_claim: cw23.as_slice()[0],
             },
             witness: EvalAccumulatorWitness {
                 codeword: cw23,
@@ -427,8 +429,10 @@ mod tests {
         assert_eq!(running.witness.witness_poly.num_evals(), 1 << witness_num_vars);
 
         // ── Terminal WHIR proof ──
-        // WHIR operates on the witness polynomial (not codeword)
-        let whir_config = make_whir_config(witness_num_vars);
+        // Post-bug_017 fix: WHIR now operates on the CODEWORD polynomial
+        // (code_log_n vars) because the accumulated eval claim is in
+        // codeword-domain. Configure WHIR accordingly.
+        let whir_config = make_whir_config(code_log_n);
         let decider = EvalDecider::<EF, F, MyHash, MyCompress, MyChallenger>::new(&whir_config);
 
         // Prove
