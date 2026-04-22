@@ -564,6 +564,110 @@ mod tests {
         assert!(result.is_err(), "decider accepted tampered commitment_root");
     }
 
+    // ── bug_013 regression: substitute-polynomial attack ──────────────────
+    //
+    // Before the fix the verifier only checked that the *witness* algebraically
+    // satisfies the linear claim, not that the WHIR proof was for the *same*
+    // polynomial that was committed to. A cheating prover could:
+    //   1. Hold a valid accumulator A with commitment_root C_A.
+    //   2. Build any polynomial B whose WHIR proof opens successfully against
+    //      A's linear_claim (e.g. another honest accumulator's polynomial).
+    //   3. Present proof_B with instance_A → old verifier accepted.
+    //
+    // The fix (commitment binding check) rejects this because the parsed root
+    // C_B ≠ C_A. The test below simulates this attack and asserts that the
+    // rejection comes from the binding check specifically (not a later PCS
+    // check), by matching the exact error details string.
+    //
+    // Stronger variant (not implemented here): construct a polynomial P' that
+    // satisfies A's linear_claim exactly (P' in null(weight)^⊥ of A's claim),
+    // so the PCS check would also pass — only the binding check can catch it.
+    // That requires direct access to the weight vector in LinearStatement.
+    #[test]
+    fn decider_rejects_substitute_polynomial_proof() {
+        let (shape, instance_a0) = make_shape_and_instance(9);
+        let (_, instance_a1) = make_shape_and_instance(16);
+        let (_, instance_b0) = make_shape_and_instance(25);
+        let (_, instance_b1) = make_shape_and_instance(36);
+        let spartan = R1CSProver::new();
+
+        let mut chal_a0 =
+            MyChallenger::new(Perm::new_from_rng_128(&mut SmallRng::seed_from_u64(10)));
+        let proof_a0 = spartan.prove::<EF, _>(&instance_a0, &mut chal_a0);
+        let mut chal_a1 =
+            MyChallenger::new(Perm::new_from_rng_128(&mut SmallRng::seed_from_u64(11)));
+        let proof_a1 = spartan.prove::<EF, _>(&instance_a1, &mut chal_a1);
+        let mut chal_b0 =
+            MyChallenger::new(Perm::new_from_rng_128(&mut SmallRng::seed_from_u64(12)));
+        let proof_b0 = spartan.prove::<EF, _>(&instance_b0, &mut chal_b0);
+        let mut chal_b1 =
+            MyChallenger::new(Perm::new_from_rng_128(&mut SmallRng::seed_from_u64(13)));
+        let proof_b1 = spartan.prove::<EF, _>(&instance_b1, &mut chal_b1);
+
+        let acc_a0 = initialize_accumulator_from_spartan::<F, EF, F, 8>(
+            &shape, &proof_a0, spartan.prepare_witness(&instance_a0),
+            [F::ZERO; 8], EF::from_u64(3),
+        );
+        let acc_a1 = initialize_accumulator_from_spartan::<F, EF, F, 8>(
+            &shape, &proof_a1, spartan.prepare_witness(&instance_a1),
+            [F::ONE; 8], EF::from_u64(3),
+        );
+        let acc_b0 = initialize_accumulator_from_spartan::<F, EF, F, 8>(
+            &shape, &proof_b0, spartan.prepare_witness(&instance_b0),
+            [F::ZERO; 8], EF::from_u64(5),
+        );
+        let acc_b1 = initialize_accumulator_from_spartan::<F, EF, F, 8>(
+            &shape, &proof_b1, spartan.prepare_witness(&instance_b1),
+            [F::ONE; 8], EF::from_u64(5),
+        );
+
+        let config = make_whir_config();
+        let dft = Radix2DFTSmallBatch::<F>::default();
+
+        let mut chal = seed_challenger(&config);
+        let (output_a, _) = LinearizedAccumulationProver::new(&config)
+            .accumulate::<_, F, <F as Field>::Packing, _, 8>(
+                &dft, &mut chal, &[acc_a0, acc_a1], 2,
+            )
+            .unwrap();
+
+        let mut chal = seed_challenger(&config);
+        let (output_b, _) = LinearizedAccumulationProver::new(&config)
+            .accumulate::<_, F, <F as Field>::Packing, _, 8>(
+                &dft, &mut chal, &[acc_b0, acc_b1], 2,
+            )
+            .unwrap();
+
+        // Cheating prover: generate a valid WHIR decider proof for B...
+        let decider = AccumulationDecider::new(&config);
+        let mut prove_chal = seed_challenger(&config);
+        let proof_b = decider
+            .prove::<_, F, <F as Field>::Packing, _, 8>(&dft, &mut prove_chal, &output_b)
+            .unwrap();
+
+        // ...then present it against A's public instance (C_B ≠ C_A).
+        let mut verify_chal = seed_challenger(&config);
+        let result = decider.verify::<
+            <F as Field>::Packing,
+            F,
+            <F as Field>::Packing,
+            8,
+        >(&mut verify_chal, &output_a.public_instance, &proof_b);
+
+        match result {
+            Err(VerifierError::StirChallengeFailed { details, .. }) => {
+                assert!(
+                    details.contains("commitment_root mismatch"),
+                    "binding check fired but with unexpected details: {details}"
+                );
+            }
+            Err(e) => panic!(
+                "wrong error variant — commitment binding check may be absent: {e:?}"
+            ),
+            Ok(()) => panic!("decider accepted a WHIR proof for a different polynomial"),
+        }
+    }
+
     #[test]
     fn algebraic_decider_accepts_valid() {
         let (shape, instance) = make_shape_and_instance(9);
