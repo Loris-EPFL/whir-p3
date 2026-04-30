@@ -1,0 +1,21 @@
+schemes = []
+microbenches = ["circuit_size_arity"]
+
+warmup  = 0
+repeats = 1
+output  = "output/circuit_size_only.jsonl"
+
+[axes]
+log_n     = [14]
+arity     = [4]
+batch     = [1]
+ivc_steps = [3]
+step_muls = [100]
+seed      = 42
+
+[microbench_axes]
+arity            = [2, 4, 8, 16, 32, 64]
+log_m            = 20
+log_n            = 21
+log_size         = [14]
+terminal_repeats = 1

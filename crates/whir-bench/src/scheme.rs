@@ -1,4 +1,7 @@
-use crate::{axes::Axes, metrics::{Metrics, StaticMetrics}};
+use crate::{
+    axes::Axes,
+    metrics::{Metrics, StaticMetrics},
+};
 
 pub trait FoldingScheme {
     const NAME: &'static str;

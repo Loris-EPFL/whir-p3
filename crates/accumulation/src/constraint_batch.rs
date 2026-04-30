@@ -79,7 +79,11 @@ where
     };
 
     // Initial claimed sum: Σᵢ γⁱ σᵢ
-    let initial_sum: EF = coeffs.iter().zip(targets.iter()).map(|(&c, &s)| c * s).sum();
+    let initial_sum: EF = coeffs
+        .iter()
+        .zip(targets.iter())
+        .map(|(&c, &s)| c * s)
+        .sum();
 
     // Promote witness polys to extension field for uniform handling after round 1
     let mut ext_polys: Vec<EvaluationsList<EF>> = polys
@@ -177,7 +181,11 @@ where
     };
 
     // Initial claimed sum: Σᵢ γⁱ σᵢ
-    let mut claimed_sum: EF = coeffs.iter().zip(targets.iter()).map(|(&c, &s)| c * s).sum();
+    let mut claimed_sum: EF = coeffs
+        .iter()
+        .zip(targets.iter())
+        .map(|(&c, &s)| c * s)
+        .sum();
 
     // Verify sumcheck rounds
     if proof.round_polys.len() != num_vars {
@@ -235,10 +243,10 @@ where
 mod tests {
     use alloc::vec;
 
-    use p3_koala_bear::{KoalaBear, Poseidon2KoalaBear};
     use p3_challenger::DuplexChallenger;
-    use p3_field::{extension::BinomialExtensionField, PrimeCharacteristicRing};
-    use rand::{rngs::SmallRng, SeedableRng};
+    use p3_field::{PrimeCharacteristicRing, extension::BinomialExtensionField};
+    use p3_koala_bear::{KoalaBear, Poseidon2KoalaBear};
+    use rand::{SeedableRng, rngs::SmallRng};
 
     use super::*;
 

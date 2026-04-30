@@ -47,10 +47,8 @@ pub fn warp_decide_algebraic<F: Field>(
     shape: &R1CSShape<F>,
     acc: &WarpAccumulator<F, F, F, 8>,
 ) -> Result<(), WarpDeciderError> {
-    let computed_mu = crate::fold::evaluate_mle_lsb(
-        &acc.witness.codeword,
-        &acc.instance.eval_point,
-    );
+    let computed_mu =
+        crate::fold::evaluate_mle_lsb(&acc.witness.codeword, &acc.instance.eval_point);
 
     if computed_mu != acc.instance.eval_claim {
         return Err(WarpDeciderError::EvaluationClaimFailed);
@@ -85,10 +83,8 @@ pub fn warp_decide_algebraic_rs<F: Field>(
     acc: &WarpAccumulator<F, F, F, 8>,
 ) -> Result<(), WarpDeciderError> {
     // Check 1: Evaluation claim f̂(α) = μ
-    let computed_mu = crate::fold::evaluate_mle_lsb(
-        &acc.witness.codeword,
-        &acc.instance.eval_point,
-    );
+    let computed_mu =
+        crate::fold::evaluate_mle_lsb(&acc.witness.codeword, &acc.instance.eval_point);
 
     if computed_mu != acc.instance.eval_claim {
         return Err(WarpDeciderError::EvaluationClaimFailed);
@@ -127,10 +123,8 @@ where
     Dft: p3_dft::TwoAdicSubgroupDft<F>,
 {
     // Check 1: Evaluation claim f̂(α) = μ
-    let computed_mu = crate::fold::evaluate_mle_lsb(
-        &acc.witness.codeword,
-        &acc.instance.eval_point,
-    );
+    let computed_mu =
+        crate::fold::evaluate_mle_lsb(&acc.witness.codeword, &acc.instance.eval_point);
     if computed_mu != acc.instance.eval_claim {
         return Err(WarpDeciderError::EvaluationClaimFailed);
     }
@@ -148,7 +142,8 @@ where
     let mut wit_padded = acc.witness.witness.clone();
     wit_padded.resize(wit_len, F::ZERO);
     let witness_poly = crate::poly::evals::EvaluationsList::new(wit_padded);
-    let expected_codeword = crate::encoding::rs_encode(&witness_poly, folding_factor, log_inv_rate, dft);
+    let expected_codeword =
+        crate::encoding::rs_encode(&witness_poly, folding_factor, log_inv_rate, dft);
     if expected_codeword.as_slice() != acc.witness.codeword.as_slice() {
         return Err(WarpDeciderError::CodewordValidityFailed);
     }
@@ -168,6 +163,9 @@ pub enum TerminalWhirError {
     /// WHIR verify failed.
     #[error("WHIR verify failed")]
     VerifyFailed,
+    /// WHIR proved a different commitment root than the accumulated instance.
+    #[error("terminal WHIR commitment root does not match accumulator root")]
+    CommitmentRootMismatch,
 }
 
 /// Terminal WHIR proof: full prover-side decider + WHIR prove + WHIR verify.
@@ -210,8 +208,10 @@ where
     EF: p3_field::ExtensionField<F> + p3_field::TwoAdicField,
     Dft: p3_dft::TwoAdicSubgroupDft<F>,
     H: p3_symmetric::CryptographicHasher<F, [F; 8]>
-        + p3_symmetric::CryptographicHasher<<F as p3_field::Field>::Packing, [<F as p3_field::Field>::Packing; 8]>
-        + Sync
+        + p3_symmetric::CryptographicHasher<
+            <F as p3_field::Field>::Packing,
+            [<F as p3_field::Field>::Packing; 8],
+        > + Sync
         + Clone,
     C: p3_symmetric::PseudoCompressionFunction<[F; 8], 2>
         + p3_symmetric::PseudoCompressionFunction<[<F as p3_field::Field>::Packing; 8], 2>
@@ -225,8 +225,8 @@ where
     use crate::{
         poly::evals::EvaluationsList,
         whir::{
-            committer::writer::CommitmentWriter,
             committer::reader::CommitmentReader,
+            committer::writer::CommitmentWriter,
             constraints::statement::{EqStatement, InitialClaim, LinearStatement},
             proof::WhirProof,
             prover::Prover as WhirProver,
@@ -247,21 +247,30 @@ where
     let witness_num_vars = witness_poly.num_variables();
 
     let linear_claim = LinearStatement::<F, EF>::initialize(witness_num_vars);
-    let mut statement = whir_config.initial_statement_with_linear(
-        witness_poly, linear_claim,
-    );
+    let mut statement = whir_config.initial_statement_with_linear(witness_poly, linear_claim);
     let mut whir_proof = WhirProof::<F, EF, F, 8>::from_whir_config(whir_config);
     let mut prove_challenger = make_whir_challenger();
 
     let commitment = CommitmentWriter::new(whir_config)
         .commit::<_, <F as p3_field::Field>::Packing, F, <F as p3_field::Field>::Packing, 8>(
-            dft, &mut whir_proof, &mut prove_challenger, &mut statement,
+            dft,
+            &mut whir_proof,
+            &mut prove_challenger,
+            &mut statement,
         )
         .map_err(|_| TerminalWhirError::ProveFailed)?;
 
+    if whir_proof.initial_commitment != acc.instance.commitment_root {
+        return Err(TerminalWhirError::CommitmentRootMismatch);
+    }
+
     WhirProver(whir_config)
         .prove::<_, <F as p3_field::Field>::Packing, F, <F as p3_field::Field>::Packing, 8>(
-            dft, &mut whir_proof, &mut prove_challenger, &statement, commitment,
+            dft,
+            &mut whir_proof,
+            &mut prove_challenger,
+            &statement,
+            commitment,
         )
         .map_err(|_| TerminalWhirError::ProveFailed)?;
 
@@ -288,13 +297,15 @@ mod tests {
 
     use super::*;
     use crate::poly::evals::EvaluationsList;
+    use crate::spartan::r1cs::{R1CSShape, SparseMatEntry};
     use crate::{
-        accumulator::{FreshInstance, WarpAccumulator, WarpAccumulatorInstance, WarpAccumulatorWitness},
+        accumulator::{
+            FreshInstance, WarpAccumulator, WarpAccumulatorInstance, WarpAccumulatorWitness,
+        },
         fold::warp_fold_prove,
     };
-    use crate::spartan::r1cs::{R1CSShape, SparseMatEntry};
-    use p3_koala_bear::KoalaBear;
     use p3_field::PrimeCharacteristicRing;
+    use p3_koala_bear::KoalaBear;
 
     type F = KoalaBear;
 
@@ -316,19 +327,11 @@ mod tests {
         let square = root * root;
         FreshInstance {
             public_input: vec![F::ZERO; 2],
-            witness: vec![
-                F::from_u64(root),
-                F::from_u64(square),
-                F::ZERO,
-                F::ZERO,
-            ],
+            witness: vec![F::from_u64(root), F::from_u64(square), F::ZERO, F::ZERO],
         }
     }
 
-    fn make_initial_accumulator(
-        code_len: usize,
-        log_m: usize,
-    ) -> WarpAccumulator<F, F, F, 8> {
+    fn make_initial_accumulator(code_len: usize, log_m: usize) -> WarpAccumulator<F, F, F, 8> {
         WarpAccumulator::new(
             WarpAccumulatorInstance {
                 commitment_root: [F::ZERO; 8],
@@ -369,10 +372,8 @@ mod tests {
         );
 
         // Compute eval_claim = f̂(α) using LSB-first convention from fold
-        let eval_claim = crate::fold::evaluate_mle_lsb(
-            &result.witness.codeword,
-            &result.instance.eval_point,
-        );
+        let eval_claim =
+            crate::fold::evaluate_mle_lsb(&result.witness.codeword, &result.instance.eval_point);
 
         WarpAccumulator::new(
             WarpAccumulatorInstance {
@@ -398,7 +399,10 @@ mod tests {
         // - P*(0, 0) = 0 = η (trivially satisfied)
         // - codeword = witness (identity encoding of zeros)
         let result = warp_decide_algebraic(&shape, &acc);
-        assert!(result.is_ok(), "decider should accept initial accumulator: {result:?}");
+        assert!(
+            result.is_ok(),
+            "decider should accept initial accumulator: {result:?}"
+        );
     }
 
     #[test]
@@ -411,7 +415,10 @@ mod tests {
         let folded = run_fold_and_build_acc(&shape, &acc, &fresh, 0);
 
         let result = warp_decide_algebraic(&shape, &folded);
-        assert!(result.is_ok(), "decider should accept after 1 fold: {result:?}");
+        assert!(
+            result.is_ok(),
+            "decider should accept after 1 fold: {result:?}"
+        );
     }
 
     #[test]
@@ -487,10 +494,7 @@ mod tests {
 
         // This should fail because now f̂(α) ≠ μ or P*(β,z) ≠ η
         let result = warp_decide_algebraic(&shape, &folded);
-        assert!(
-            result.is_err(),
-            "decider should reject tampered witness"
-        );
+        assert!(result.is_err(), "decider should reject tampered witness");
     }
 
     #[test]
@@ -548,7 +552,8 @@ mod tests {
 
         // RS-encode it
         let witness_poly = EvaluationsList::new(witness_raw.clone());
-        let codeword = crate::encoding::rs_encode(&witness_poly, folding_factor, log_inv_rate, &dft);
+        let codeword =
+            crate::encoding::rs_encode(&witness_poly, folding_factor, log_inv_rate, &dft);
 
         // Compute eval claim at an arbitrary eval_point
         let eval_point = vec![F::from_u64(2); codeword.num_variables()];
@@ -591,7 +596,8 @@ mod tests {
         witness_raw.resize(num_vars_y, F::ZERO);
 
         let witness_poly = EvaluationsList::new(witness_raw.clone());
-        let mut codeword = crate::encoding::rs_encode(&witness_poly, folding_factor, log_inv_rate, &dft);
+        let mut codeword =
+            crate::encoding::rs_encode(&witness_poly, folding_factor, log_inv_rate, &dft);
 
         let eval_point = vec![F::from_u64(2); codeword.num_variables()];
 
@@ -635,7 +641,8 @@ mod tests {
         witness_raw.resize(num_vars_y, F::ZERO);
 
         let witness_poly = EvaluationsList::new(witness_raw.clone());
-        let codeword = crate::encoding::rs_encode(&witness_poly, folding_factor, log_inv_rate, &dft);
+        let codeword =
+            crate::encoding::rs_encode(&witness_poly, folding_factor, log_inv_rate, &dft);
 
         let eval_point = vec![F::from_u64(2); codeword.num_variables()];
         let eval_claim = crate::fold::evaluate_mle_lsb(&codeword, &eval_point) + F::ONE; // tampered

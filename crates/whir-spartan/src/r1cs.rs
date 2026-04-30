@@ -323,8 +323,8 @@ impl<F: Field> R1CSInstance<F> {
 mod tests {
     use super::*;
     use alloc::vec;
+    use p3_field::{PrimeCharacteristicRing, extension::BinomialExtensionField};
     use p3_koala_bear::KoalaBear;
-    use p3_field::{extension::BinomialExtensionField, PrimeCharacteristicRing};
 
     type F = KoalaBear;
     type EF = BinomialExtensionField<F, 4>;
@@ -336,7 +336,9 @@ mod tests {
         let a_entries = vec![SparseMatEntry::new(0, 0, F::ONE)];
         let b_entries = vec![SparseMatEntry::new(0, 0, F::ONE)];
         let c_entries = vec![SparseMatEntry::new(0, 1, F::ONE)];
-        let shape = R1CSShape::new(num_cons, num_vars, num_inputs, a_entries, b_entries, c_entries);
+        let shape = R1CSShape::new(
+            num_cons, num_vars, num_inputs, a_entries, b_entries, c_entries,
+        );
         let mut witness = vec![F::ZERO; num_vars];
         witness[0] = F::from_u64(2);
         witness[1] = F::from_u64(4);
@@ -456,8 +458,7 @@ mod tests {
         let mut z = vec![F::ZERO; 2 * shape.num_vars()];
         z[..shape.num_vars()].copy_from_slice(&witness);
         z[shape.num_vars()] = F::ONE;
-        z[shape.num_vars() + 1..shape.num_vars() + 1 + shape.num_inputs()]
-            .copy_from_slice(&input);
+        z[shape.num_vars() + 1..shape.num_vars() + 1 + shape.num_inputs()].copy_from_slice(&input);
 
         let (az, bz, cz) = shape.multiply_vec(&z[..shape.num_vars() + 1 + shape.num_inputs()]);
         // For constraint 0: A*z = w[0] = 2, B*z = w[0] = 2, C*z = w[1] = 4

@@ -22,7 +22,7 @@ use p3_poseidon2::GenericPoseidon2LinearLayers;
 use p3_symmetric::Permutation;
 
 use crate::builder::{CircuitBuilder, LinearCombination, Var};
-use crate::poseidon2::{poseidon2_permute_circuit, Poseidon2CircuitConfig};
+use crate::poseidon2::{Poseidon2CircuitConfig, poseidon2_permute_circuit};
 
 /// Poseidon2 2-to-1 compression over a width-16 state.
 ///
@@ -46,7 +46,10 @@ where
     L: GenericPoseidon2LinearLayers<WIDTH>,
     P: Permutation<[F; WIDTH]>,
 {
-    assert_eq!(WIDTH, 16, "compress_circuit currently supports WIDTH=16 only");
+    assert_eq!(
+        WIDTH, 16,
+        "compress_circuit currently supports WIDTH=16 only"
+    );
 
     // Build a width-WIDTH state = left || right.
     let mut state_vars = [left_vars[0]; WIDTH];
@@ -58,8 +61,13 @@ where
         state_vals[i + 8] = right_vals[i];
     }
 
-    let (out_vars, out_vals) =
-        poseidon2_permute_circuit::<F, L, P, WIDTH>(builder, config, perm, &state_vars, &state_vals);
+    let (out_vars, out_vals) = poseidon2_permute_circuit::<F, L, P, WIDTH>(
+        builder,
+        config,
+        perm,
+        &state_vars,
+        &state_vals,
+    );
 
     // Truncate to first 8.
     let mut compressed_vars = [out_vars[0]; 8];
@@ -93,7 +101,10 @@ where
     L: GenericPoseidon2LinearLayers<WIDTH>,
     P: Permutation<[F; WIDTH]>,
 {
-    assert_eq!(WIDTH, 16, "hash_leaf_circuit currently supports WIDTH=16 only");
+    assert_eq!(
+        WIDTH, 16,
+        "hash_leaf_circuit currently supports WIDTH=16 only"
+    );
     assert!(
         row_vars.len() <= 8,
         "hash_leaf_circuit: row_len {} > 8; multi-block absorption not implemented",
@@ -112,8 +123,13 @@ where
         state_vals[i] = row_vals[i];
     }
 
-    let (out_vars, out_vals) =
-        poseidon2_permute_circuit::<F, L, P, WIDTH>(builder, config, perm, &state_vars, &state_vals);
+    let (out_vars, out_vals) = poseidon2_permute_circuit::<F, L, P, WIDTH>(
+        builder,
+        config,
+        perm,
+        &state_vars,
+        &state_vals,
+    );
 
     let mut digest_vars = [out_vars[0]; 8];
     let mut digest_vals = [F::ZERO; 8];
@@ -164,19 +180,32 @@ pub fn merkle_verify_path_circuit<F, L, P, const WIDTH: usize>(
         poseidon2_hash_leaf_circuit::<F, L, P, WIDTH>(builder, config, perm, row_vars, row_vals);
 
     // Step 2: climb the path.
-    for (level, (sibling_vars, sibling_vals)) in path_vars.iter().zip(path_vals.iter()).enumerate() {
+    for (level, (sibling_vars, sibling_vals)) in path_vars.iter().zip(path_vals.iter()).enumerate()
+    {
         let bit = (position >> level) & 1;
         if bit == 0 {
             // current is the left child
             let (next_vars, next_vals) = poseidon2_compress_circuit::<F, L, P, WIDTH>(
-                builder, config, perm, &cur_vars, &cur_vals, sibling_vars, sibling_vals,
+                builder,
+                config,
+                perm,
+                &cur_vars,
+                &cur_vals,
+                sibling_vars,
+                sibling_vals,
             );
             cur_vars = next_vars;
             cur_vals = next_vals;
         } else {
             // current is the right child
             let (next_vars, next_vals) = poseidon2_compress_circuit::<F, L, P, WIDTH>(
-                builder, config, perm, sibling_vars, sibling_vals, &cur_vars, &cur_vals,
+                builder,
+                config,
+                perm,
+                sibling_vars,
+                sibling_vals,
+                &cur_vars,
+                &cur_vals,
             );
             cur_vars = next_vars;
             cur_vals = next_vals;
@@ -206,7 +235,7 @@ mod tests {
     use p3_field::PrimeCharacteristicRing;
     use p3_koala_bear::{GenericPoseidon2LinearLayersKoalaBear, KoalaBear, Poseidon2KoalaBear};
     use p3_symmetric::{PaddingFreeSponge, PseudoCompressionFunction, TruncatedPermutation};
-    use rand::{rngs::SmallRng, SeedableRng};
+    use rand::{SeedableRng, rngs::SmallRng};
 
     type F = KoalaBear;
     type Perm = Poseidon2KoalaBear<16>;
@@ -217,9 +246,8 @@ mod tests {
         let perm = Perm::new_from_rng_128(&mut SmallRng::seed_from_u64(99));
         let (rf, rp) = p3_poseidon2::poseidon2_round_numbers_128::<F>(16, 3)
             .expect("unsupported Poseidon2 parameters");
-        let cfg = Poseidon2CircuitConfig::<F, 16>::from_rng(
-            rf, rp, 3, &mut SmallRng::seed_from_u64(99),
-        );
+        let cfg =
+            Poseidon2CircuitConfig::<F, 16>::from_rng(rf, rp, 3, &mut SmallRng::seed_from_u64(99));
         (perm, cfg)
     }
 
@@ -238,14 +266,17 @@ mod tests {
         let right_vars: [Var; 8] = core::array::from_fn(|i| builder.alloc_witness(right[i]));
         let (_out_vars, out_vals) =
             poseidon2_compress_circuit::<F, GenericPoseidon2LinearLayersKoalaBear, _, 16>(
-                &mut builder, &cfg, &perm, &left_vars, &left, &right_vars, &right,
+                &mut builder,
+                &cfg,
+                &perm,
+                &left_vars,
+                &left,
+                &right_vars,
+                &right,
             );
 
         for i in 0..8 {
-            assert_eq!(
-                out_vals[i], expected[i],
-                "compress mismatch at digest[{i}]"
-            );
+            assert_eq!(out_vals[i], expected[i], "compress mismatch at digest[{i}]");
         }
 
         let (_shape, instance) = builder.build();
@@ -263,11 +294,14 @@ mod tests {
         let expected = hasher.hash_slice(&row);
 
         let mut builder = CircuitBuilder::<F>::new();
-        let row_vars: alloc::vec::Vec<Var> = row.iter().map(|&v| builder.alloc_witness(v)).collect();
-        let (_out_vars, out_vals) =
-            poseidon2_hash_leaf_circuit::<F, GenericPoseidon2LinearLayersKoalaBear, _, 16>(
-                &mut builder, &cfg, &perm, &row_vars, &row,
-            );
+        let row_vars: alloc::vec::Vec<Var> =
+            row.iter().map(|&v| builder.alloc_witness(v)).collect();
+        let (_out_vars, out_vals) = poseidon2_hash_leaf_circuit::<
+            F,
+            GenericPoseidon2LinearLayersKoalaBear,
+            _,
+            16,
+        >(&mut builder, &cfg, &perm, &row_vars, &row);
 
         for i in 0..8 {
             assert_eq!(
@@ -311,8 +345,10 @@ mod tests {
 
         // Wire into the circuit.
         let mut builder = CircuitBuilder::<F>::new();
-        let row_vars: alloc::vec::Vec<Var> =
-            row_at_pos.iter().map(|&v| builder.alloc_witness(v)).collect();
+        let row_vars: alloc::vec::Vec<Var> = row_at_pos
+            .iter()
+            .map(|&v| builder.alloc_witness(v))
+            .collect();
         let path_vars: alloc::vec::Vec<[Var; 8]> = path_vals
             .iter()
             .map(|sib| core::array::from_fn(|i| builder.alloc_witness(sib[i])))
@@ -333,7 +369,10 @@ mod tests {
         );
 
         let (_shape, instance) = builder.build();
-        assert!(instance.verify(), "honest Merkle-verify circuit must satisfy R1CS");
+        assert!(
+            instance.verify(),
+            "honest Merkle-verify circuit must satisfy R1CS"
+        );
     }
 
     #[test]
@@ -364,8 +403,10 @@ mod tests {
         let path_vals: alloc::vec::Vec<[F; 8]> = proof;
 
         let mut builder = CircuitBuilder::<F>::new();
-        let row_vars: alloc::vec::Vec<Var> =
-            row_at_pos.iter().map(|&v| builder.alloc_witness(v)).collect();
+        let row_vars: alloc::vec::Vec<Var> = row_at_pos
+            .iter()
+            .map(|&v| builder.alloc_witness(v))
+            .collect();
         let path_vars: alloc::vec::Vec<[Var; 8]> = path_vals
             .iter()
             .map(|sib| core::array::from_fn(|i| builder.alloc_witness(sib[i])))

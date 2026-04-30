@@ -150,8 +150,14 @@ impl<F: Field + PrimeCharacteristicRing, const WIDTH: usize, const RATE: usize>
             self.duplexing::<L, P>(builder, config, perm);
         }
 
-        let val = self.output_buffer_vals.pop().expect("output buffer empty after duplexing");
-        let var = self.output_buffer_vars.pop().expect("output buffer empty after duplexing");
+        let val = self
+            .output_buffer_vals
+            .pop()
+            .expect("output buffer empty after duplexing");
+        let var = self
+            .output_buffer_vars
+            .pop()
+            .expect("output buffer empty after duplexing");
         (var, val)
     }
 
@@ -215,10 +221,10 @@ impl<F: Field + PrimeCharacteristicRing, const WIDTH: usize, const RATE: usize>
 
 #[cfg(test)]
 mod tests {
-    use p3_koala_bear::{KoalaBear, GenericPoseidon2LinearLayersKoalaBear, Poseidon2KoalaBear};
     use p3_challenger::{CanObserve, CanSample, DuplexChallenger};
     use p3_field::PrimeCharacteristicRing;
-    use rand::{rngs::SmallRng, SeedableRng};
+    use p3_koala_bear::{GenericPoseidon2LinearLayersKoalaBear, KoalaBear, Poseidon2KoalaBear};
+    use rand::{SeedableRng, rngs::SmallRng};
 
     use super::*;
 
@@ -255,8 +261,7 @@ mod tests {
 
         // Sample and compare
         let real_sample: F = real_challenger.sample();
-        let (_, circuit_sample) =
-            circuit_challenger.sample::<L, _>(&mut builder, &config, &perm);
+        let (_, circuit_sample) = circuit_challenger.sample::<L, _>(&mut builder, &config, &perm);
 
         assert_eq!(
             real_sample, circuit_sample,

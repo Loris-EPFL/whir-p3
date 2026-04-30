@@ -14,4 +14,5 @@ pub mod encoding;
 pub mod eval_fold;
 pub mod fold;
 pub mod quasar_adapter;
+pub mod quasar_multicast;
 pub mod twin_constraint;

@@ -583,7 +583,8 @@ where
         let t_val = all_mu[i] + omega_eta_val;
         let t_var = builder.alloc_witness(t_val);
         builder.enforce(
-            LinearCombination::from_var(all_mu_vars[i]) + LinearCombination::from_var(omega_eta_var),
+            LinearCombination::from_var(all_mu_vars[i])
+                + LinearCombination::from_var(omega_eta_var),
             LinearCombination::from_constant(F::ONE),
             LinearCombination::from_var(t_var),
         );
@@ -656,8 +657,7 @@ where
         builder.enforce(
             LinearCombination::from_constant(F::TWO),
             LinearCombination::from_var(c2_var),
-            LinearCombination::from_var(e2_var)
-                - LinearCombination::from_scaled(e1_var, F::TWO)
+            LinearCombination::from_var(e2_var) - LinearCombination::from_scaled(e1_var, F::TWO)
                 + LinearCombination::from_var(e0_var),
         );
 
@@ -774,14 +774,16 @@ where
     let mu_plus_omega_eta_val = folded_mu_val + omega_eta_folded_val;
     let mu_plus_omega_eta_var = builder.alloc_witness(mu_plus_omega_eta_val);
     builder.enforce(
-        LinearCombination::from_var(folded_mu_var) + LinearCombination::from_var(omega_eta_folded_var),
+        LinearCombination::from_var(folded_mu_var)
+            + LinearCombination::from_var(omega_eta_folded_var),
         LinearCombination::from_constant(F::ONE),
         LinearCombination::from_var(mu_plus_omega_eta_var),
     );
 
     // Step 3: expected = eq(τ, γ) · (folded_mu + ω · folded_eta)
     let expected_final_val = eq_tau_gamma_val * mu_plus_omega_eta_val;
-    let expected_final_var = builder.mul(eq_tau_gamma_var, mu_plus_omega_eta_var, expected_final_val);
+    let expected_final_var =
+        builder.mul(eq_tau_gamma_var, mu_plus_omega_eta_var, expected_final_val);
 
     // Step 4: Constrain final_claimed == expected_final
     builder.enforce_equal(claimed_var, expected_final_var);
@@ -893,11 +895,7 @@ where
                 let path_vars: alloc::vec::Vec<[Var; 8]> = auth_path
                     .iter()
                     .map(|sibling| {
-                        debug_assert_eq!(
-                            sibling.len(),
-                            8,
-                            "sibling digest must be 8 elements"
-                        );
+                        debug_assert_eq!(sibling.len(), 8, "sibling digest must be 8 elements");
                         core::array::from_fn(|i| builder.alloc_witness(sibling[i]))
                     })
                     .collect();
@@ -940,11 +938,7 @@ where
                     let path_vars: alloc::vec::Vec<[Var; 8]> = auth_path
                         .iter()
                         .map(|sibling| {
-                            debug_assert_eq!(
-                                sibling.len(),
-                                8,
-                                "sibling digest must be 8 elements"
-                            );
+                            debug_assert_eq!(sibling.len(), 8, "sibling digest must be 8 elements");
                             core::array::from_fn(|i| builder.alloc_witness(sibling[i]))
                         })
                         .collect();
@@ -1083,17 +1077,16 @@ where
         builder.enforce_constant(rho_pow_var, F::ONE);
 
         // Helper: bump ρ^k → ρ^{k+1}.
-        let bump_rho_pow =
-            |builder: &mut CircuitBuilder<F>,
-             rho_pow_var: &mut Var,
-             rho_pow_val: &mut F,
-             rho_var: Var,
-             rho_val: F| {
-                let new_val = *rho_pow_val * rho_val;
-                let new_var = builder.mul(*rho_pow_var, rho_var, new_val);
-                *rho_pow_var = new_var;
-                *rho_pow_val = new_val;
-            };
+        let bump_rho_pow = |builder: &mut CircuitBuilder<F>,
+                            rho_pow_var: &mut Var,
+                            rho_pow_val: &mut F,
+                            rho_var: Var,
+                            rho_val: F| {
+            let new_val = *rho_pow_val * rho_val;
+            let new_var = builder.mul(*rho_pow_var, rho_var, new_val);
+            *rho_pow_var = new_var;
+            *rho_pow_val = new_val;
+        };
 
         let rho_val = witness.rho;
 
@@ -1113,8 +1106,7 @@ where
             let new_claim_val = claim_val + prod_val;
             let new_claim_var = builder.alloc_witness(new_claim_val);
             builder.enforce(
-                LinearCombination::from_var(claim_var)
-                    + LinearCombination::from_var(prod_var),
+                LinearCombination::from_var(claim_var) + LinearCombination::from_var(prod_var),
                 LinearCombination::from_constant(F::ONE),
                 LinearCombination::from_var(new_claim_var),
             );
@@ -1162,8 +1154,7 @@ where
             let new_claim_val = claim_val + prod_val;
             let new_claim_var = builder.alloc_witness(new_claim_val);
             builder.enforce(
-                LinearCombination::from_var(claim_var)
-                    + LinearCombination::from_var(prod_var),
+                LinearCombination::from_var(claim_var) + LinearCombination::from_var(prod_var),
                 LinearCombination::from_constant(F::ONE),
                 LinearCombination::from_var(new_claim_var),
             );
@@ -1312,7 +1303,11 @@ where
     // Part 2: WARP fold verifier (FIX C1: keep the output instead of discarding)
     let fold_output = verifier_witness.map(|witness| {
         synthesize_warp_fold_verifier::<F, L, P, WIDTH, RATE>(
-            builder, challenger, poseidon_config, perm, witness,
+            builder,
+            challenger,
+            poseidon_config,
+            perm,
+            witness,
         )
     });
 
@@ -1339,10 +1334,10 @@ where
 mod tests {
     use alloc::vec;
 
-    use p3_koala_bear::{KoalaBear, GenericPoseidon2LinearLayersKoalaBear, Poseidon2KoalaBear};
     use p3_challenger::DuplexChallenger;
     use p3_field::PrimeCharacteristicRing;
-    use rand::{rngs::SmallRng, SeedableRng};
+    use p3_koala_bear::{GenericPoseidon2LinearLayersKoalaBear, KoalaBear, Poseidon2KoalaBear};
+    use rand::{SeedableRng, rngs::SmallRng};
 
     use super::*;
     use crate::ivc::step::TrivialStepCircuit;
@@ -1363,8 +1358,8 @@ mod tests {
         tau_challenges: &[F],
         native_chal: &mut MyChal,
     ) -> Vec<[F; 3]> {
-        use p3_challenger::{CanObserve, CanSample};
         use crate::spartan::encoding::eq_poly_at_index;
+        use p3_challenger::{CanObserve, CanSample};
 
         let l = mu.len();
         let log_l = tau_challenges.len();
@@ -1374,9 +1369,7 @@ mod tests {
         let mut tau_evals: Vec<F> = (0..l)
             .map(|idx| eq_poly_at_index::<F, F>(idx, tau_challenges))
             .collect();
-        let mut target_table: Vec<F> = (0..l)
-            .map(|i| mu[i] + omega * eta[i])
-            .collect();
+        let mut target_table: Vec<F> = (0..l).map(|i| mu[i] + omega * eta[i]).collect();
 
         let mut round_polys = Vec::with_capacity(log_l);
 
@@ -1407,8 +1400,7 @@ mod tests {
 
             // Fold tables
             for i in 0..half {
-                tau_evals[i] =
-                    tau_evals[2 * i] + r * (tau_evals[2 * i + 1] - tau_evals[2 * i]);
+                tau_evals[i] = tau_evals[2 * i] + r * (tau_evals[2 * i + 1] - tau_evals[2 * i]);
                 target_table[i] =
                     target_table[2 * i] + r * (target_table[2 * i + 1] - target_table[2 * i]);
             }
@@ -1459,8 +1451,13 @@ mod tests {
         }
 
         // Construct correct round polys from the actual twin-constraint polynomial
-        let round_polys =
-            construct_correct_round_polys(&eval_claims, &pesat_targets, omega, &[tau_0], &mut native_chal);
+        let round_polys = construct_correct_round_polys(
+            &eval_claims,
+            &pesat_targets,
+            omega,
+            &[tau_0],
+            &mut native_chal,
+        );
 
         let witness = WarpFoldVerifierWitness {
             input_commitment_roots: roots,
@@ -1494,13 +1491,14 @@ mod tests {
         let mut builder = CircuitBuilder::<F>::new();
         let mut challenger = CircuitChallenger::<F, 16, 8>::new(&mut builder);
 
-        let output = synthesize_warp_fold_verifier::<
-            F,
-            GenericPoseidon2LinearLayersKoalaBear,
-            _,
-            16,
-            8,
-        >(&mut builder, &mut challenger, &poseidon_config, &poseidon_perm, &witness);
+        let output =
+            synthesize_warp_fold_verifier::<F, GenericPoseidon2LinearLayersKoalaBear, _, 16, 8>(
+                &mut builder,
+                &mut challenger,
+                &poseidon_config,
+                &poseidon_perm,
+                &witness,
+            );
 
         assert_eq!(
             output.challenge_vars.len(),
@@ -1554,46 +1552,34 @@ mod tests {
 
         let mut builder_with = CircuitBuilder::<F>::new();
         let mut chal_with = CircuitChallenger::<F, 16, 8>::new(&mut builder_with);
-        let (_, fold_out) = synthesize_warp_ivc_circuit::<
-            F,
-            GenericPoseidon2LinearLayersKoalaBear,
-            _,
-            _,
-            16,
-            8,
-        >(
-            &mut builder_with,
-            &mut chal_with,
-            &poseidon_config,
-            &poseidon_perm,
-            &step,
-            &[F::ZERO],
-            Some(&witness),
-            None,
-        );
+        let (_, fold_out) =
+            synthesize_warp_ivc_circuit::<F, GenericPoseidon2LinearLayersKoalaBear, _, _, 16, 8>(
+                &mut builder_with,
+                &mut chal_with,
+                &poseidon_config,
+                &poseidon_perm,
+                &step,
+                &[F::ZERO],
+                Some(&witness),
+                None,
+            );
         assert!(fold_out.is_some(), "fold output should be present");
         let target = builder_with.num_witness_vars();
 
         // WITHOUT verifier, padded to same size
         let mut builder_without = CircuitBuilder::<F>::new();
         let mut chal_without = CircuitChallenger::<F, 16, 8>::new(&mut builder_without);
-        let (_, fold_out_none) = synthesize_warp_ivc_circuit::<
-            F,
-            GenericPoseidon2LinearLayersKoalaBear,
-            _,
-            _,
-            16,
-            8,
-        >(
-            &mut builder_without,
-            &mut chal_without,
-            &poseidon_config,
-            &poseidon_perm,
-            &step,
-            &[F::ZERO],
-            None,
-            Some(target),
-        );
+        let (_, fold_out_none) =
+            synthesize_warp_ivc_circuit::<F, GenericPoseidon2LinearLayersKoalaBear, _, _, 16, 8>(
+                &mut builder_without,
+                &mut chal_without,
+                &poseidon_config,
+                &poseidon_perm,
+                &step,
+                &[F::ZERO],
+                None,
+                Some(target),
+            );
         assert!(fold_out_none.is_none(), "fold output should be absent");
 
         let (shape_with, _) = builder_with.build();
@@ -1648,13 +1634,7 @@ mod tests {
         };
         let mut warp_builder = CircuitBuilder::<F>::new();
         let mut warp_chal = CircuitChallenger::<F, 16, 8>::new(&mut warp_builder);
-        let _ = synthesize_warp_fold_verifier::<
-            F,
-            GenericPoseidon2LinearLayersKoalaBear,
-            _,
-            16,
-            8,
-        >(
+        let _ = synthesize_warp_fold_verifier::<F, GenericPoseidon2LinearLayersKoalaBear, _, 16, 8>(
             &mut warp_builder,
             &mut warp_chal,
             &poseidon_config,
@@ -1726,18 +1706,8 @@ mod tests {
         let union_root = vec![F::from_u64(42); 8];
 
         // All l=4 instance data (running + 3 fresh with zeros)
-        let all_eval_claims = vec![
-            running_eval_claim,
-            F::ZERO,
-            F::ZERO,
-            F::ZERO,
-        ];
-        let all_pesat_targets = vec![
-            running_pesat_target,
-            F::ZERO,
-            F::ZERO,
-            F::ZERO,
-        ];
+        let all_eval_claims = vec![running_eval_claim, F::ZERO, F::ZERO, F::ZERO];
+        let all_pesat_targets = vec![running_pesat_target, F::ZERO, F::ZERO, F::ZERO];
         let all_eval_points = vec![
             running_eval_point.clone(),
             vec![F::ZERO; 3],
@@ -1773,8 +1743,13 @@ mod tests {
         }
 
         // l=4 -> log_l=2 -> 2 sumcheck rounds from actual polynomial
-        let round_polys =
-            construct_correct_round_polys(&all_eval_claims, &all_pesat_targets, omega, &[tau_0, tau_1], &mut native_chal);
+        let round_polys = construct_correct_round_polys(
+            &all_eval_claims,
+            &all_pesat_targets,
+            omega,
+            &[tau_0, tau_1],
+            &mut native_chal,
+        );
 
         let witness = WarpFoldVerifierWitness::from_fold_result_union(
             running_root,
@@ -1797,13 +1772,14 @@ mod tests {
         let mut builder = CircuitBuilder::<F>::new();
         let mut challenger = CircuitChallenger::<F, 16, 8>::new(&mut builder);
 
-        let output = synthesize_warp_fold_verifier::<
-            F,
-            GenericPoseidon2LinearLayersKoalaBear,
-            _,
-            16,
-            8,
-        >(&mut builder, &mut challenger, &poseidon_config, &poseidon_perm, &witness);
+        let output =
+            synthesize_warp_fold_verifier::<F, GenericPoseidon2LinearLayersKoalaBear, _, 16, 8>(
+                &mut builder,
+                &mut challenger,
+                &poseidon_config,
+                &poseidon_perm,
+                &witness,
+            );
 
         assert_eq!(
             output.challenge_vars.len(),
@@ -1858,13 +1834,7 @@ mod tests {
 
         let mut nonunion_builder = CircuitBuilder::<F>::new();
         let mut nonunion_chal = CircuitChallenger::<F, 16, 8>::new(&mut nonunion_builder);
-        let _ = synthesize_warp_fold_verifier::<
-            F,
-            GenericPoseidon2LinearLayersKoalaBear,
-            _,
-            16,
-            8,
-        >(
+        let _ = synthesize_warp_fold_verifier::<F, GenericPoseidon2LinearLayersKoalaBear, _, 16, 8>(
             &mut nonunion_builder,
             &mut nonunion_chal,
             &poseidon_config,
@@ -1891,13 +1861,7 @@ mod tests {
 
         let mut union_builder = CircuitBuilder::<F>::new();
         let mut union_chal = CircuitChallenger::<F, 16, 8>::new(&mut union_builder);
-        let _ = synthesize_warp_fold_verifier::<
-            F,
-            GenericPoseidon2LinearLayersKoalaBear,
-            _,
-            16,
-            8,
-        >(
+        let _ = synthesize_warp_fold_verifier::<F, GenericPoseidon2LinearLayersKoalaBear, _, 16, 8>(
             &mut union_builder,
             &mut union_chal,
             &poseidon_config,
@@ -1972,7 +1936,13 @@ mod tests {
                 _,
                 16,
                 8,
-            >(&mut b1, &mut c1, &poseidon_config, &poseidon_perm, &nonunion_witness);
+            >(
+                &mut b1,
+                &mut c1,
+                &poseidon_config,
+                &poseidon_perm,
+                &nonunion_witness,
+            );
             let nc = b1.num_constraints();
 
             // Union: absorb 1 running + 1 union root
@@ -1999,11 +1969,20 @@ mod tests {
                 _,
                 16,
                 8,
-            >(&mut b2, &mut c2, &poseidon_config, &poseidon_perm, &union_witness);
+            >(
+                &mut b2,
+                &mut c2,
+                &poseidon_config,
+                &poseidon_perm,
+                &union_witness,
+            );
             let uc = b2.num_constraints();
 
             // Union should never be more expensive
-            assert!(uc <= nc, "union should not add constraints at arity {arity}");
+            assert!(
+                uc <= nc,
+                "union should not add constraints at arity {arity}"
+            );
             // At arity >= 4, union should be strictly cheaper
             if arity >= 4 {
                 assert!(uc < nc, "union should be cheaper at arity {arity}");
@@ -2086,13 +2065,14 @@ mod tests {
         let mut builder = CircuitBuilder::<F>::new();
         let mut challenger = CircuitChallenger::<F, 16, 8>::new(&mut builder);
 
-        let _output = synthesize_warp_fold_verifier::<
-            F,
-            GenericPoseidon2LinearLayersKoalaBear,
-            _,
-            16,
-            8,
-        >(&mut builder, &mut challenger, &poseidon_config, &poseidon_perm, &witness);
+        let _output =
+            synthesize_warp_fold_verifier::<F, GenericPoseidon2LinearLayersKoalaBear, _, 16, 8>(
+                &mut builder,
+                &mut challenger,
+                &poseidon_config,
+                &poseidon_perm,
+                &witness,
+            );
 
         let (shape, instance) = builder.build();
         assert!(
@@ -2130,7 +2110,10 @@ mod tests {
 
         // Use a WRONG omega that does not match Poseidon2 derivation
         let wrong_omega = F::from_u64(12345);
-        assert_ne!(correct_omega, wrong_omega, "test sanity: omegas should differ");
+        assert_ne!(
+            correct_omega, wrong_omega,
+            "test sanity: omegas should differ"
+        );
 
         // l=2: 1 round of sumcheck, 1 fresh instance, log_m=2
         let num_fresh = 1;
@@ -2146,8 +2129,13 @@ mod tests {
 
         // Construct round polys using the WRONG omega. The circuit will derive the correct
         // omega and the constraint derived_omega == witness.omega will fail.
-        let round_polys =
-            construct_correct_round_polys(&eval_claims, &pesat_targets, wrong_omega, &[tau_0], &mut native_chal);
+        let round_polys = construct_correct_round_polys(
+            &eval_claims,
+            &pesat_targets,
+            wrong_omega,
+            &[tau_0],
+            &mut native_chal,
+        );
 
         let witness = WarpFoldVerifierWitness {
             input_commitment_roots: roots,
@@ -2181,13 +2169,14 @@ mod tests {
         let mut builder = CircuitBuilder::<F>::new();
         let mut challenger = CircuitChallenger::<F, 16, 8>::new(&mut builder);
 
-        let _output = synthesize_warp_fold_verifier::<
-            F,
-            GenericPoseidon2LinearLayersKoalaBear,
-            _,
-            16,
-            8,
-        >(&mut builder, &mut challenger, &poseidon_config, &poseidon_perm, &witness);
+        let _output =
+            synthesize_warp_fold_verifier::<F, GenericPoseidon2LinearLayersKoalaBear, _, 16, 8>(
+                &mut builder,
+                &mut challenger,
+                &poseidon_config,
+                &poseidon_perm,
+                &witness,
+            );
 
         let (shape, instance) = builder.build();
         assert!(
@@ -2202,8 +2191,13 @@ mod tests {
 
     /// Shared helper: produce one valid Merkle proof (position 2 of a 4-row,
     /// 4-wide matrix) using the same Poseidon2 configuration as the circuit.
-    fn build_sample_merkle_opening(
-    ) -> (alloc::vec::Vec<F>, alloc::vec::Vec<[F; 8]>, [F; 8], usize, usize) {
+    fn build_sample_merkle_opening() -> (
+        alloc::vec::Vec<F>,
+        alloc::vec::Vec<[F; 8]>,
+        [F; 8],
+        usize,
+        usize,
+    ) {
         use p3_commit::Mmcs;
         use p3_matrix::dense::RowMajorMatrix;
         use p3_merkle_tree::MerkleTreeMmcs;
@@ -2241,9 +2235,8 @@ mod tests {
         let poseidon_perm = Perm::new_from_rng_128(&mut SmallRng::seed_from_u64(99));
         let (rf, rp) = p3_poseidon2::poseidon2_round_numbers_128::<F>(16, 3)
             .expect("unsupported Poseidon2 parameters");
-        let poseidon_config = Poseidon2CircuitConfig::<F, 16>::from_rng(
-            rf, rp, 3, &mut SmallRng::seed_from_u64(99),
-        );
+        let poseidon_config =
+            Poseidon2CircuitConfig::<F, 16>::from_rng(rf, rp, 3, &mut SmallRng::seed_from_u64(99));
 
         let (leaf_row, proof, root_arr, position, _row_width) = build_sample_merkle_opening();
 
@@ -2256,19 +2249,30 @@ mod tests {
 
         let mut native_chal = MyChal::new(poseidon_perm.clone());
         for i in 0..2 {
-            for &val in &roots[i] { native_chal.observe(val); }
+            for &val in &roots[i] {
+                native_chal.observe(val);
+            }
             native_chal.observe(eval_claims[i]);
-            for &val in &eval_points[i] { native_chal.observe(val); }
+            for &val in &eval_points[i] {
+                native_chal.observe(val);
+            }
             native_chal.observe(pesat_targets[i]);
         }
         let omega: F = native_chal.sample();
         let tau_0: F = native_chal.sample();
         let num_fresh = 1;
         let log_m = 2;
-        for _ in 0..num_fresh * log_m { let _: F = native_chal.sample(); }
+        for _ in 0..num_fresh * log_m {
+            let _: F = native_chal.sample();
+        }
 
         let round_polys = construct_correct_round_polys(
-            &eval_claims, &pesat_targets, omega, &[tau_0], &mut native_chal);
+            &eval_claims,
+            &pesat_targets,
+            omega,
+            &[tau_0],
+            &mut native_chal,
+        );
 
         // Attach a single shift query with honest Merkle data.
         let witness = WarpFoldVerifierWitness {
@@ -2302,9 +2306,13 @@ mod tests {
 
         let mut builder = CircuitBuilder::<F>::new();
         let mut challenger = CircuitChallenger::<F, 16, 8>::new(&mut builder);
-        let _ = synthesize_warp_fold_verifier::<
-            F, GenericPoseidon2LinearLayersKoalaBear, _, 16, 8,
-        >(&mut builder, &mut challenger, &poseidon_config, &poseidon_perm, &witness);
+        let _ = synthesize_warp_fold_verifier::<F, GenericPoseidon2LinearLayersKoalaBear, _, 16, 8>(
+            &mut builder,
+            &mut challenger,
+            &poseidon_config,
+            &poseidon_perm,
+            &witness,
+        );
 
         let (shape, instance) = builder.build();
         assert!(
@@ -2322,9 +2330,8 @@ mod tests {
         let poseidon_perm = Perm::new_from_rng_128(&mut SmallRng::seed_from_u64(99));
         let (rf, rp) = p3_poseidon2::poseidon2_round_numbers_128::<F>(16, 3)
             .expect("unsupported Poseidon2 parameters");
-        let poseidon_config = Poseidon2CircuitConfig::<F, 16>::from_rng(
-            rf, rp, 3, &mut SmallRng::seed_from_u64(99),
-        );
+        let poseidon_config =
+            Poseidon2CircuitConfig::<F, 16>::from_rng(rf, rp, 3, &mut SmallRng::seed_from_u64(99));
 
         let (mut leaf_row, proof, root_arr, position, _row_width) = build_sample_merkle_opening();
         // Tamper: flip one row element.
@@ -2337,19 +2344,30 @@ mod tests {
 
         let mut native_chal = MyChal::new(poseidon_perm.clone());
         for i in 0..2 {
-            for &val in &roots[i] { native_chal.observe(val); }
+            for &val in &roots[i] {
+                native_chal.observe(val);
+            }
             native_chal.observe(eval_claims[i]);
-            for &val in &eval_points[i] { native_chal.observe(val); }
+            for &val in &eval_points[i] {
+                native_chal.observe(val);
+            }
             native_chal.observe(pesat_targets[i]);
         }
         let omega: F = native_chal.sample();
         let tau_0: F = native_chal.sample();
         let num_fresh = 1;
         let log_m = 2;
-        for _ in 0..num_fresh * log_m { let _: F = native_chal.sample(); }
+        for _ in 0..num_fresh * log_m {
+            let _: F = native_chal.sample();
+        }
 
         let round_polys = construct_correct_round_polys(
-            &eval_claims, &pesat_targets, omega, &[tau_0], &mut native_chal);
+            &eval_claims,
+            &pesat_targets,
+            omega,
+            &[tau_0],
+            &mut native_chal,
+        );
 
         let witness = WarpFoldVerifierWitness {
             input_commitment_roots: roots,
@@ -2386,9 +2404,13 @@ mod tests {
         // synthesis time — so this call panics (should_panic covers it).
         // If the assertion were removed, the resulting R1CS would also
         // be unsatisfiable because the enforce_equal constraint fails.
-        let _ = synthesize_warp_fold_verifier::<
-            F, GenericPoseidon2LinearLayersKoalaBear, _, 16, 8,
-        >(&mut builder, &mut challenger, &poseidon_config, &poseidon_perm, &witness);
+        let _ = synthesize_warp_fold_verifier::<F, GenericPoseidon2LinearLayersKoalaBear, _, 16, 8>(
+            &mut builder,
+            &mut challenger,
+            &poseidon_config,
+            &poseidon_perm,
+            &witness,
+        );
     }
 
     // =======================================================================
@@ -2477,19 +2499,30 @@ mod tests {
 
         let mut native_chal = MyChal::new(poseidon_perm.clone());
         for i in 0..2 {
-            for &val in &roots[i] { native_chal.observe(val); }
+            for &val in &roots[i] {
+                native_chal.observe(val);
+            }
             native_chal.observe(eval_claims[i]);
-            for &val in &eval_points[i] { native_chal.observe(val); }
+            for &val in &eval_points[i] {
+                native_chal.observe(val);
+            }
             native_chal.observe(pesat_targets[i]);
         }
         let omega: F = native_chal.sample();
         let tau_0: F = native_chal.sample();
         let num_fresh = 1;
         let log_m = 2;
-        for _ in 0..num_fresh * log_m { let _: F = native_chal.sample(); }
+        for _ in 0..num_fresh * log_m {
+            let _: F = native_chal.sample();
+        }
 
         let round_polys = construct_correct_round_polys(
-            &eval_claims, &pesat_targets, omega, &[tau_0], &mut native_chal);
+            &eval_claims,
+            &pesat_targets,
+            omega,
+            &[tau_0],
+            &mut native_chal,
+        );
 
         // Phase 6 FS replay — no shift, no OOD, sample rho directly.
         native_chal.observe(F::from_usize(2000));
@@ -2541,9 +2574,13 @@ mod tests {
 
         let mut builder = CircuitBuilder::<F>::new();
         let mut challenger = CircuitChallenger::<F, 16, 8>::new(&mut builder);
-        let _ = synthesize_warp_fold_verifier::<
-            F, GenericPoseidon2LinearLayersKoalaBear, _, 16, 8,
-        >(&mut builder, &mut challenger, &poseidon_config, &poseidon_perm, &witness);
+        let _ = synthesize_warp_fold_verifier::<F, GenericPoseidon2LinearLayersKoalaBear, _, 16, 8>(
+            &mut builder,
+            &mut challenger,
+            &poseidon_config,
+            &poseidon_perm,
+            &witness,
+        );
 
         let (shape, instance) = builder.build();
         assert!(
@@ -2570,19 +2607,30 @@ mod tests {
 
         let mut native_chal = MyChal::new(poseidon_perm.clone());
         for i in 0..2 {
-            for &val in &roots[i] { native_chal.observe(val); }
+            for &val in &roots[i] {
+                native_chal.observe(val);
+            }
             native_chal.observe(eval_claims[i]);
-            for &val in &eval_points[i] { native_chal.observe(val); }
+            for &val in &eval_points[i] {
+                native_chal.observe(val);
+            }
             native_chal.observe(pesat_targets[i]);
         }
         let omega: F = native_chal.sample();
         let tau_0: F = native_chal.sample();
         let num_fresh = 1;
         let log_m = 2;
-        for _ in 0..num_fresh * log_m { let _: F = native_chal.sample(); }
+        for _ in 0..num_fresh * log_m {
+            let _: F = native_chal.sample();
+        }
 
         let round_polys = construct_correct_round_polys(
-            &eval_claims, &pesat_targets, omega, &[tau_0], &mut native_chal);
+            &eval_claims,
+            &pesat_targets,
+            omega,
+            &[tau_0],
+            &mut native_chal,
+        );
 
         native_chal.observe(F::from_usize(2000));
         let rho: F = native_chal.sample();
@@ -2634,9 +2682,13 @@ mod tests {
 
         let mut builder = CircuitBuilder::<F>::new();
         let mut challenger = CircuitChallenger::<F, 16, 8>::new(&mut builder);
-        let _ = synthesize_warp_fold_verifier::<
-            F, GenericPoseidon2LinearLayersKoalaBear, _, 16, 8,
-        >(&mut builder, &mut challenger, &poseidon_config, &poseidon_perm, &witness);
+        let _ = synthesize_warp_fold_verifier::<F, GenericPoseidon2LinearLayersKoalaBear, _, 16, 8>(
+            &mut builder,
+            &mut challenger,
+            &poseidon_config,
+            &poseidon_perm,
+            &witness,
+        );
 
         let (shape, instance) = builder.build();
         assert!(
@@ -2663,18 +2715,29 @@ mod tests {
 
         let mut native_chal = MyChal::new(poseidon_perm.clone());
         for i in 0..2 {
-            for &val in &roots[i] { native_chal.observe(val); }
+            for &val in &roots[i] {
+                native_chal.observe(val);
+            }
             native_chal.observe(eval_claims[i]);
-            for &val in &eval_points[i] { native_chal.observe(val); }
+            for &val in &eval_points[i] {
+                native_chal.observe(val);
+            }
             native_chal.observe(pesat_targets[i]);
         }
         let omega: F = native_chal.sample();
         let tau_0: F = native_chal.sample();
         let num_fresh = 1;
         let log_m = 2;
-        for _ in 0..num_fresh * log_m { let _: F = native_chal.sample(); }
+        for _ in 0..num_fresh * log_m {
+            let _: F = native_chal.sample();
+        }
         let round_polys = construct_correct_round_polys(
-            &eval_claims, &pesat_targets, omega, &[tau_0], &mut native_chal);
+            &eval_claims,
+            &pesat_targets,
+            omega,
+            &[tau_0],
+            &mut native_chal,
+        );
 
         native_chal.observe(F::from_usize(2000));
         let rho: F = native_chal.sample();
@@ -2696,7 +2759,10 @@ mod tests {
             input_eval_points: eval_points.clone(),
             input_pesat_targets: pesat_targets.clone(),
             sumcheck_evals: round_polys,
-            num_rounds: 1, omega, num_fresh, log_m,
+            num_rounds: 1,
+            omega,
+            num_fresh,
+            log_m,
             union_commitment_root: None,
             all_eval_claims: Some(eval_claims),
             all_pesat_targets: Some(pesat_targets),
@@ -2718,9 +2784,13 @@ mod tests {
 
         let mut builder = CircuitBuilder::<F>::new();
         let mut challenger = CircuitChallenger::<F, 16, 8>::new(&mut builder);
-        let _ = synthesize_warp_fold_verifier::<
-            F, GenericPoseidon2LinearLayersKoalaBear, _, 16, 8,
-        >(&mut builder, &mut challenger, &poseidon_config, &poseidon_perm, &witness);
+        let _ = synthesize_warp_fold_verifier::<F, GenericPoseidon2LinearLayersKoalaBear, _, 16, 8>(
+            &mut builder,
+            &mut challenger,
+            &poseidon_config,
+            &poseidon_perm,
+            &witness,
+        );
 
         let (shape, instance) = builder.build();
         assert!(
@@ -2738,9 +2808,8 @@ mod tests {
         let poseidon_perm = Perm::new_from_rng_128(&mut SmallRng::seed_from_u64(99));
         let (rf, rp) = p3_poseidon2::poseidon2_round_numbers_128::<F>(16, 3)
             .expect("unsupported Poseidon2 parameters");
-        let poseidon_config = Poseidon2CircuitConfig::<F, 16>::from_rng(
-            rf, rp, 3, &mut SmallRng::seed_from_u64(99),
-        );
+        let poseidon_config =
+            Poseidon2CircuitConfig::<F, 16>::from_rng(rf, rp, 3, &mut SmallRng::seed_from_u64(99));
 
         let (per_codeword_rows, proof, union_root, position, _) =
             build_sample_union_merkle_opening();
@@ -2755,23 +2824,31 @@ mod tests {
         let mut native_chal = MyChal::new(poseidon_perm.clone());
         // Non-union FS absorbs each accumulator; union FS absorbs only the
         // running acc + union root (see Phase 1 union branch).
-        for &v in &running_root { native_chal.observe(v); }
+        for &v in &running_root {
+            native_chal.observe(v);
+        }
         native_chal.observe(running_eval_claim);
-        for &v in &running_eval_point { native_chal.observe(v); }
+        for &v in &running_eval_point {
+            native_chal.observe(v);
+        }
         native_chal.observe(running_pesat_target);
-        for &v in &union_root { native_chal.observe(v); }
+        for &v in &union_root {
+            native_chal.observe(v);
+        }
 
         let omega: F = native_chal.sample();
         let tau_0: F = native_chal.sample();
         let num_fresh = 1;
         let log_m = 2;
-        for _ in 0..num_fresh * log_m { let _: F = native_chal.sample(); }
+        for _ in 0..num_fresh * log_m {
+            let _: F = native_chal.sample();
+        }
 
         // All-zero mu/eta for l=2 → round polys that sum to zero.
         let all_mu = vec![F::ZERO; 2];
         let all_eta = vec![F::ZERO; 2];
-        let round_polys = construct_correct_round_polys(
-            &all_mu, &all_eta, omega, &[tau_0], &mut native_chal);
+        let round_polys =
+            construct_correct_round_polys(&all_mu, &all_eta, omega, &[tau_0], &mut native_chal);
 
         let witness = WarpFoldVerifierWitness::from_fold_result_union(
             running_root,
@@ -2801,9 +2878,13 @@ mod tests {
 
         let mut builder = CircuitBuilder::<F>::new();
         let mut challenger = CircuitChallenger::<F, 16, 8>::new(&mut builder);
-        let _ = synthesize_warp_fold_verifier::<
-            F, GenericPoseidon2LinearLayersKoalaBear, _, 16, 8,
-        >(&mut builder, &mut challenger, &poseidon_config, &poseidon_perm, &witness);
+        let _ = synthesize_warp_fold_verifier::<F, GenericPoseidon2LinearLayersKoalaBear, _, 16, 8>(
+            &mut builder,
+            &mut challenger,
+            &poseidon_config,
+            &poseidon_perm,
+            &witness,
+        );
 
         let (shape, instance) = builder.build();
         assert!(
@@ -2822,9 +2903,8 @@ mod tests {
         let poseidon_perm = Perm::new_from_rng_128(&mut SmallRng::seed_from_u64(99));
         let (rf, rp) = p3_poseidon2::poseidon2_round_numbers_128::<F>(16, 3)
             .expect("unsupported Poseidon2 parameters");
-        let poseidon_config = Poseidon2CircuitConfig::<F, 16>::from_rng(
-            rf, rp, 3, &mut SmallRng::seed_from_u64(99),
-        );
+        let poseidon_config =
+            Poseidon2CircuitConfig::<F, 16>::from_rng(rf, rp, 3, &mut SmallRng::seed_from_u64(99));
 
         let (mut per_codeword_rows, proof, union_root, position, _) =
             build_sample_union_merkle_opening();
@@ -2837,21 +2917,29 @@ mod tests {
         let running_pesat_target = F::ZERO;
 
         let mut native_chal = MyChal::new(poseidon_perm.clone());
-        for &v in &running_root { native_chal.observe(v); }
+        for &v in &running_root {
+            native_chal.observe(v);
+        }
         native_chal.observe(running_eval_claim);
-        for &v in &running_eval_point { native_chal.observe(v); }
+        for &v in &running_eval_point {
+            native_chal.observe(v);
+        }
         native_chal.observe(running_pesat_target);
-        for &v in &union_root { native_chal.observe(v); }
+        for &v in &union_root {
+            native_chal.observe(v);
+        }
 
         let omega: F = native_chal.sample();
         let tau_0: F = native_chal.sample();
         let num_fresh = 1;
         let log_m = 2;
-        for _ in 0..num_fresh * log_m { let _: F = native_chal.sample(); }
+        for _ in 0..num_fresh * log_m {
+            let _: F = native_chal.sample();
+        }
         let all_mu = vec![F::ZERO; 2];
         let all_eta = vec![F::ZERO; 2];
-        let round_polys = construct_correct_round_polys(
-            &all_mu, &all_eta, omega, &[tau_0], &mut native_chal);
+        let round_polys =
+            construct_correct_round_polys(&all_mu, &all_eta, omega, &[tau_0], &mut native_chal);
 
         let mut witness = WarpFoldVerifierWitness::from_fold_result_union(
             running_root,
@@ -2880,8 +2968,12 @@ mod tests {
         let mut challenger = CircuitChallenger::<F, 16, 8>::new(&mut builder);
         // The merkle gadget asserts derived_root == expected_root, so this
         // call panics with "derived root[...] does not match expected".
-        let _ = synthesize_warp_fold_verifier::<
-            F, GenericPoseidon2LinearLayersKoalaBear, _, 16, 8,
-        >(&mut builder, &mut challenger, &poseidon_config, &poseidon_perm, &witness);
+        let _ = synthesize_warp_fold_verifier::<F, GenericPoseidon2LinearLayersKoalaBear, _, 16, 8>(
+            &mut builder,
+            &mut challenger,
+            &poseidon_config,
+            &poseidon_perm,
+            &witness,
+        );
     }
 }

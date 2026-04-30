@@ -117,7 +117,11 @@ pub struct CircuitBuilder<F: Field> {
     /// Values for public inputs.
     public_input_values: Vec<F>,
     /// Constraints as (A, B, C) linear combinations, where A*B = C.
-    constraints: Vec<(LinearCombination<F>, LinearCombination<F>, LinearCombination<F>)>,
+    constraints: Vec<(
+        LinearCombination<F>,
+        LinearCombination<F>,
+        LinearCombination<F>,
+    )>,
 }
 
 impl<F: Field> CircuitBuilder<F> {
@@ -299,7 +303,9 @@ impl<F: Field> CircuitBuilder<F> {
             }
         }
 
-        let shape = R1CSShape::new(num_cons, num_vars, num_inputs, a_entries, b_entries, c_entries);
+        let shape = R1CSShape::new(
+            num_cons, num_vars, num_inputs, a_entries, b_entries, c_entries,
+        );
 
         // Pad witness to num_vars
         let mut witness = self.witness_values;
@@ -318,8 +324,8 @@ impl<F: Field> Default for CircuitBuilder<F> {
 
 #[cfg(test)]
 mod tests {
-    use p3_koala_bear::KoalaBear;
     use p3_field::PrimeCharacteristicRing;
+    use p3_koala_bear::KoalaBear;
 
     use super::*;
 
@@ -333,7 +339,10 @@ mod tests {
         let _y = builder.mul(x, x, F::from_u64(9));
 
         let (shape, instance) = builder.build();
-        assert!(instance.verify(), "simple multiplication should satisfy R1CS");
+        assert!(
+            instance.verify(),
+            "simple multiplication should satisfy R1CS"
+        );
         assert!(shape.is_sat(instance.witness(), instance.input()));
     }
 
@@ -384,7 +393,10 @@ mod tests {
         builder.enforce_equal(product, pi);
 
         let (shape, instance) = builder.build();
-        assert!(instance.verify(), "public input constraint should satisfy R1CS");
+        assert!(
+            instance.verify(),
+            "public input constraint should satisfy R1CS"
+        );
         assert!(shape.is_sat(instance.witness(), instance.input()));
     }
 
@@ -435,10 +447,10 @@ mod tests {
 
     #[test]
     fn spartan_integration() {
-        use p3_koala_bear::Poseidon2KoalaBear;
         use p3_challenger::DuplexChallenger;
         use p3_field::extension::BinomialExtensionField;
-        use rand::{rngs::SmallRng, SeedableRng};
+        use p3_koala_bear::Poseidon2KoalaBear;
+        use rand::{SeedableRng, rngs::SmallRng};
 
         type EF = BinomialExtensionField<F, 4>;
         type Perm = Poseidon2KoalaBear<16>;

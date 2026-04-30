@@ -51,7 +51,7 @@ use crate::{
         parameters::WhirConfig,
         proof::WhirProof,
         prover::Prover as WhirProver,
-        verifier::{errors::VerifierError, Verifier as WhirVerifier},
+        verifier::{Verifier as WhirVerifier, errors::VerifierError},
     },
 };
 
@@ -145,7 +145,11 @@ fn compute_eq_table<F: Field>(tau: &[F]) -> Vec<F> {
 /// Compute μ_i = f̃_i(α_i) via eq-table inner product.
 fn compute_mu<F: Field>(codeword: &[F], alpha: &[F]) -> F {
     let eq_table = compute_eq_table(alpha);
-    codeword.iter().zip(eq_table.iter()).map(|(&f, &e)| f * e).sum()
+    codeword
+        .iter()
+        .zip(eq_table.iter())
+        .map(|(&f, &e)| f * e)
+        .sum()
 }
 
 // ── Core fold ────────────────────────────────────────────────────────
@@ -209,7 +213,11 @@ where
         .collect();
 
     // Initial claim: Σ_i eq(τ, i) · μ_i
-    let initial_claim: F = tau_evals.iter().zip(mu_table.iter()).map(|(&t, &m)| t * m).sum();
+    let initial_claim: F = tau_evals
+        .iter()
+        .zip(mu_table.iter())
+        .map(|(&t, &m)| t * m)
+        .sum();
 
     // Degree-2 table-based sumcheck: Σ_b eq(τ,b) · μ̃(b) = σ
     let mut current_claim = initial_claim;
@@ -235,7 +243,8 @@ where
         }
 
         assert_eq!(
-            evals[0] + evals[1], current_claim,
+            evals[0] + evals[1],
+            current_claim,
             "eval fold sumcheck: round claim mismatch"
         );
 
@@ -365,45 +374,57 @@ where
     // otherwise carry (α_code, μ_code) through unchanged.
     let has_extra_claims = num_ood_samples > 0 || num_shift_queries > 0;
 
-    let (final_eval_point, final_mu, alpha_eval_out, new_eval_claim_out, batch_round_polys, batch_challenges) =
-        if has_extra_claims {
-            let mut all_eval_claims: Vec<(Vec<F>, F)> = Vec::new();
-            all_eval_claims.push((folded_alpha_code.clone(), alpha_eval));
+    let (
+        final_eval_point,
+        final_mu,
+        alpha_eval_out,
+        new_eval_claim_out,
+        batch_round_polys,
+        batch_challenges,
+    ) = if has_extra_claims {
+        let mut all_eval_claims: Vec<(Vec<F>, F)> = Vec::new();
+        all_eval_claims.push((folded_alpha_code.clone(), alpha_eval));
 
-            // OOD claims — bind directly (no witness re-eval).
-            for (point, &answer) in ood_points.iter().zip(ood_answers.iter()) {
-                all_eval_claims.push((point.clone(), answer));
-            }
+        // OOD claims — bind directly (no witness re-eval).
+        for (point, &answer) in ood_points.iter().zip(ood_answers.iter()) {
+            all_eval_claims.push((point.clone(), answer));
+        }
 
-            // Shift-query claims in codeword-domain. The value at
-            // codeword position `pos` equals the MLE at the binary
-            // encoding of `pos` in log_n bits.
-            for (k, &pos) in shift_query_positions.iter().enumerate() {
-                let bool_point: Vec<F> = (0..log_n)
-                    .map(|bit| if (pos >> bit) & 1 == 1 { F::ONE } else { F::ZERO })
-                    .collect();
-                all_eval_claims.push((bool_point, shift_query_values[k][0]));
-            }
+        // Shift-query claims in codeword-domain. The value at
+        // codeword position `pos` equals the MLE at the binary
+        // encoding of `pos` in log_n bits.
+        for (k, &pos) in shift_query_positions.iter().enumerate() {
+            let bool_point: Vec<F> = (0..log_n)
+                .map(|bit| {
+                    if (pos >> bit) & 1 == 1 {
+                        F::ONE
+                    } else {
+                        F::ZERO
+                    }
+                })
+                .collect();
+            all_eval_claims.push((bool_point, shift_query_values[k][0]));
+        }
 
-            let rho = transcript_round(&[]);
-            let (new_pt, new_mu, rp, ch) = eval_batching_sumcheck(
-                folded_codeword_poly.as_slice(),
-                &all_eval_claims,
-                rho,
-                log_n,
-                &mut transcript_round,
-            );
-            (new_pt, new_mu, alpha_eval, new_mu, rp, ch)
-        } else {
-            (
-                folded_alpha_code.clone(),
-                alpha_eval,
-                alpha_eval,
-                alpha_eval,
-                Vec::new(),
-                Vec::new(),
-            )
-        };
+        let rho = transcript_round(&[]);
+        let (new_pt, new_mu, rp, ch) = eval_batching_sumcheck(
+            folded_codeword_poly.as_slice(),
+            &all_eval_claims,
+            rho,
+            log_n,
+            &mut transcript_round,
+        );
+        (new_pt, new_mu, alpha_eval, new_mu, rp, ch)
+    } else {
+        (
+            folded_alpha_code.clone(),
+            alpha_eval,
+            alpha_eval,
+            alpha_eval,
+            Vec::new(),
+            Vec::new(),
+        )
+    };
 
     let final_mu = final_mu;
 
@@ -490,7 +511,11 @@ fn eval_batching_sumcheck<F: Field>(
             evals[2] += (b_lo + b_d.double()) * (f_lo + f_d.double());
         }
 
-        assert_eq!(evals[0] + evals[1], current_claim, "eval batch: round mismatch");
+        assert_eq!(
+            evals[0] + evals[1],
+            current_claim,
+            "eval batch: round mismatch"
+        );
 
         let round_evals = evals.to_vec();
         let r = transcript_round(&round_evals);
@@ -617,9 +642,7 @@ where
 ///
 /// This is the ONLY place a WHIR proof is generated in the entire pipeline.
 #[derive(Debug)]
-pub struct EvalDecider<'a, EF, F, H, C, Challenger>(
-    &'a WhirConfig<EF, F, H, C, Challenger>,
-)
+pub struct EvalDecider<'a, EF, F, H, C, Challenger>(&'a WhirConfig<EF, F, H, C, Challenger>)
 where
     F: Field,
     EF: ExtensionField<F>;
@@ -688,13 +711,11 @@ where
             num_vars,
         );
 
-        let mut statement = self.0.initial_statement_with_linear(
-            codeword.clone(),
-            linear_claim,
-        );
+        let mut statement = self
+            .0
+            .initial_statement_with_linear(codeword.clone(), linear_claim);
 
-        let mut whir_proof =
-            WhirProof::<F, EF, W, DIGEST_ELEMS>::from_whir_config(self.0);
+        let mut whir_proof = WhirProof::<F, EF, W, DIGEST_ELEMS>::from_whir_config(self.0);
         let commitment = CommitmentWriter::new(self.0).commit::<_, P, W, PW, DIGEST_ELEMS>(
             dft,
             &mut whir_proof,
@@ -765,10 +786,10 @@ where
 
 #[cfg(test)]
 mod tests {
-    use alloc::vec;
     use super::*;
-    use p3_koala_bear::KoalaBear;
+    use alloc::vec;
     use p3_field::PrimeCharacteristicRing;
+    use p3_koala_bear::KoalaBear;
 
     type F = KoalaBear;
 
@@ -805,7 +826,10 @@ mod tests {
             &p3_dft::Radix2DFTSmallBatch::<F>::default(),
             0, // no OOD for this basic test
             0, // no shift queries for this basic test
-            |_| { ctr += 1; F::from_u64(ctr + 100) },
+            |_| {
+                ctr += 1;
+                F::from_u64(ctr + 100)
+            },
             |_cw, _ff| [F::ZERO; 8],
         );
 
@@ -833,8 +857,12 @@ mod tests {
             &tau,
             &rs_config,
             &p3_dft::Radix2DFTSmallBatch::<F>::default(),
-            0, 0,
-            |_| { ctr += 1; F::from_u64(ctr + 200) },
+            0,
+            0,
+            |_| {
+                ctr += 1;
+                F::from_u64(ctr + 200)
+            },
             |_cw, _ff| [F::ZERO; 8],
         );
 
@@ -868,8 +896,12 @@ mod tests {
                 &tau,
                 &rs_config,
                 &dft,
-                0, 0,
-                |_| { ctr += 1; F::from_u64(ctr + 500) },
+                0,
+                0,
+                |_| {
+                    ctr += 1;
+                    F::from_u64(ctr + 500)
+                },
                 |_cw, _ff| [F::ZERO; 8],
             );
 

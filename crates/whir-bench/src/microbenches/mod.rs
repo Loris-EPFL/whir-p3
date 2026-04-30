@@ -6,4 +6,5 @@ pub mod circuit_sizes_l2;
 pub mod fold_verifier;
 pub mod fs_scaling;
 pub mod terminal_whir;
+pub mod warp_vs_whir;
 pub mod whir_in_circuit_estimate;

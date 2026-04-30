@@ -26,8 +26,8 @@ use crate::{
     sumcheck::svo::SplitEq,
     whir::{
         constraints::{
-            statement::{EqStatement, LinearStatement, SelectStatement},
             Constraint,
+            statement::{EqStatement, LinearStatement, SelectStatement},
         },
         parameters::SumcheckStrategy,
     },
@@ -296,8 +296,8 @@ impl<F: Field, EF: ExtensionField<F>> InitialStatementInner<F, EF> {
 
 #[cfg(test)]
 mod tests {
+    use p3_field::{PrimeCharacteristicRing, extension::BinomialExtensionField};
     use p3_koala_bear::KoalaBear;
-    use p3_field::{extension::BinomialExtensionField, PrimeCharacteristicRing};
 
     use super::*;
 

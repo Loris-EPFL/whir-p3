@@ -3,7 +3,7 @@
 //! O(ℓ·log_m) fresh_betas, so the wall-clock speedup plateaus.
 
 use p3_field::PrimeCharacteristicRing;
-use rand::{rngs::SmallRng, SeedableRng};
+use rand::{SeedableRng, rngs::SmallRng};
 use warp::fold::{derive_fold_challenges, derive_fold_challenges_union};
 
 use crate::{

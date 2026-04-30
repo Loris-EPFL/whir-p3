@@ -396,9 +396,9 @@ impl<F: Field> R1CSSumcheck<F> {
 mod tests {
     use super::*;
     use alloc::vec;
-    use p3_koala_bear::KoalaBear;
     use p3_challenger::DuplexChallenger;
     use p3_field::PrimeCharacteristicRing;
+    use p3_koala_bear::KoalaBear;
     use rand::SeedableRng;
 
     #[test]

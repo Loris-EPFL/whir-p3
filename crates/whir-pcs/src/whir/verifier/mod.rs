@@ -19,9 +19,9 @@ use crate::{
     poly::{evals::EvaluationsList, multilinear::MultilinearPoint},
     whir::{
         constraints::{
-            evaluator::ConstraintPolyEvaluator,
-            statement::{initial::InitialClaim, EqStatement, LinearStatement, SelectStatement},
             Constraint,
+            evaluator::ConstraintPolyEvaluator,
+            statement::{EqStatement, LinearStatement, SelectStatement, initial::InitialClaim},
         },
         parameters::WhirConfig,
         proof::{QueryOpening, WhirProof},

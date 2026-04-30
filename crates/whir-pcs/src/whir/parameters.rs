@@ -5,9 +5,9 @@ use p3_challenger::{FieldChallenger, GrindingChallenger};
 use p3_field::{ExtensionField, Field, TwoAdicField};
 
 use crate::{
-    parameters::{errors::SecurityAssumption, FoldingFactor, ProtocolParameters},
+    parameters::{FoldingFactor, ProtocolParameters, errors::SecurityAssumption},
     poly::evals::EvaluationsList,
-    whir::constraints::statement::{initial::InitialStatement, LinearStatement},
+    whir::constraints::statement::{LinearStatement, initial::InitialStatement},
 };
 
 /// Configuration for the initial phase of the WHIR protocol.
@@ -482,9 +482,9 @@ where
 mod tests {
     use alloc::vec;
 
-    use p3_koala_bear::{KoalaBear, Poseidon2KoalaBear};
     use p3_challenger::DuplexChallenger;
     use p3_field::PrimeCharacteristicRing;
+    use p3_koala_bear::{KoalaBear, Poseidon2KoalaBear};
     use p3_symmetric::{PaddingFreeSponge, TruncatedPermutation};
 
     use super::*;
@@ -496,8 +496,8 @@ mod tests {
     type MyChallenger = DuplexChallenger<F, Perm, 16, 8>;
 
     /// Generates default WHIR parameters
-    const fn default_whir_params(
-    ) -> ProtocolParameters<Poseidon2Sponge<u8>, Poseidon2Compression<u8>> {
+    const fn default_whir_params()
+    -> ProtocolParameters<Poseidon2Sponge<u8>, Poseidon2Compression<u8>> {
         ProtocolParameters {
             security_level: 100,
             pow_bits: 20,

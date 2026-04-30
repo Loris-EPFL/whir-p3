@@ -5,15 +5,15 @@ use p3_symmetric::{CryptographicHasher, Hash, PseudoCompressionFunction};
 
 use crate::{
     accumulator::Accumulator,
-    linearized::decide_linearized_accumulator,
     fiat_shamir::errors::FiatShamirError,
+    linearized::decide_linearized_accumulator,
     whir::{
         committer::{reader::CommitmentReader, writer::CommitmentWriter},
         constraints::statement::{EqStatement, InitialClaim},
         parameters::WhirConfig,
         proof::WhirProof,
         prover::Prover as WhirProver,
-        verifier::{errors::VerifierError, Verifier as WhirVerifier},
+        verifier::{Verifier as WhirVerifier, errors::VerifierError},
     },
 };
 
@@ -80,8 +80,7 @@ where
             accumulator.public_instance.linear_claim.clone(),
         );
 
-        let mut whir_proof =
-            WhirProof::<F, EF, W, DIGEST_ELEMS>::from_whir_config(self.0);
+        let mut whir_proof = WhirProof::<F, EF, W, DIGEST_ELEMS>::from_whir_config(self.0);
         let commitment = CommitmentWriter::new(self.0).commit::<_, P, W, PW, DIGEST_ELEMS>(
             dft,
             &mut whir_proof,
@@ -149,7 +148,9 @@ where
         if parsed_commitment.root != expected_root {
             return Err(VerifierError::StirChallengeFailed {
                 challenge_id: 0,
-                details: "decider commitment_root mismatch: parsed proof is not bound to accumulator".into(),
+                details:
+                    "decider commitment_root mismatch: parsed proof is not bound to accumulator"
+                        .into(),
             });
         }
 
@@ -189,16 +190,9 @@ where
 /// Zero-sized bridge type that implements [`whir_traits::TerminalScheme`]
 /// by delegating to [`AccumulationDecider`].
 #[derive(Debug)]
-pub struct AccumulationTerminal<
-    EF,
-    F,
-    H,
-    C,
-    P,
-    W,
-    PW,
-    const DIGEST_ELEMS: usize,
->(core::marker::PhantomData<fn() -> (EF, F, H, C, P, W, PW)>)
+pub struct AccumulationTerminal<EF, F, H, C, P, W, PW, const DIGEST_ELEMS: usize>(
+    core::marker::PhantomData<fn() -> (EF, F, H, C, P, W, PW)>,
+)
 where
     F: Field,
     EF: ExtensionField<F>;
@@ -246,8 +240,7 @@ impl From<VerifierError> for DeciderError {
     }
 }
 
-impl<EF, F, H, C, P, W, PW, Ch, const DIGEST_ELEMS: usize>
-    whir_traits::TerminalScheme<F, EF, Ch>
+impl<EF, F, H, C, P, W, PW, Ch, const DIGEST_ELEMS: usize> whir_traits::TerminalScheme<F, EF, Ch>
     for AccumulationTerminal<EF, F, H, C, P, W, PW, DIGEST_ELEMS>
 where
     F: TwoAdicField + Ord,
@@ -261,9 +254,7 @@ where
     C: PseudoCompressionFunction<[W; DIGEST_ELEMS], 2>
         + PseudoCompressionFunction<[PW; DIGEST_ELEMS], 2>
         + Sync,
-    Ch: FieldChallenger<F>
-        + GrindingChallenger<Witness = F>
-        + CanObserve<Hash<F, W, DIGEST_ELEMS>>,
+    Ch: FieldChallenger<F> + GrindingChallenger<Witness = F> + CanObserve<Hash<F, W, DIGEST_ELEMS>>,
     [W; DIGEST_ELEMS]: serde::Serialize + for<'de> serde::Deserialize<'de>,
 {
     type Config = WhirConfig<EF, F, H, C, Ch>;
@@ -300,19 +291,19 @@ where
 mod tests {
     use alloc::vec;
 
-    use p3_koala_bear::{KoalaBear, Poseidon2KoalaBear};
     use p3_challenger::DuplexChallenger;
     use p3_dft::Radix2DFTSmallBatch;
-    use p3_field::{extension::BinomialExtensionField, Field, PrimeCharacteristicRing};
+    use p3_field::{Field, PrimeCharacteristicRing, extension::BinomialExtensionField};
+    use p3_koala_bear::{KoalaBear, Poseidon2KoalaBear};
     use p3_symmetric::{PaddingFreeSponge, TruncatedPermutation};
-    use rand::{rngs::SmallRng, SeedableRng};
+    use rand::{SeedableRng, rngs::SmallRng};
 
     use super::*;
     use crate::{
-        linearized::initialize_accumulator_from_spartan,
-        scheme::LinearizedAccumulationProver,
         fiat_shamir::domain_separator::DomainSeparator,
-        parameters::{errors::SecurityAssumption, FoldingFactor, ProtocolParameters},
+        linearized::initialize_accumulator_from_spartan,
+        parameters::{FoldingFactor, ProtocolParameters, errors::SecurityAssumption},
+        scheme::LinearizedAccumulationProver,
         spartan::{
             r1cs::{R1CSInstance, R1CSShape, SparseMatEntry},
             r1cs_prover::R1CSProver,
@@ -383,11 +374,9 @@ mod tests {
         let (_, instance1) = make_shape_and_instance(16);
         let spartan = R1CSProver::new();
 
-        let mut chal0 =
-            MyChallenger::new(Perm::new_from_rng_128(&mut SmallRng::seed_from_u64(1)));
+        let mut chal0 = MyChallenger::new(Perm::new_from_rng_128(&mut SmallRng::seed_from_u64(1)));
         let proof0 = spartan.prove::<EF, _>(&instance0, &mut chal0);
-        let mut chal1 =
-            MyChallenger::new(Perm::new_from_rng_128(&mut SmallRng::seed_from_u64(2)));
+        let mut chal1 = MyChallenger::new(Perm::new_from_rng_128(&mut SmallRng::seed_from_u64(2)));
         let proof1 = spartan.prove::<EF, _>(&instance1, &mut chal1);
 
         let acc0 = initialize_accumulator_from_spartan::<F, EF, F, 8>(
@@ -423,52 +412,60 @@ mod tests {
         let decider = AccumulationDecider::new(&config);
         let mut prove_challenger = seed_challenger(&config);
         let decider_proof = decider
-            .prove::<_, F, <F as Field>::Packing, _, 8>(
-                &dft,
-                &mut prove_challenger,
-                &output,
-            )
+            .prove::<_, F, <F as Field>::Packing, _, 8>(&dft, &mut prove_challenger, &output)
             .unwrap();
 
         // Decider: verify with fresh challenger.
         // Succinct verifier consumes only `public_instance`.
         let mut verify_challenger = seed_challenger(&config);
-        let result = decider.verify::<
-            <F as Field>::Packing,
-            F,
-            <F as Field>::Packing,
-            8,
-        >(
-            &mut verify_challenger, &output.public_instance, &decider_proof
+        let result = decider.verify::<<F as Field>::Packing, F, <F as Field>::Packing, 8>(
+            &mut verify_challenger,
+            &output.public_instance,
+            &decider_proof,
         );
 
-        assert!(result.is_ok(), "decider rejected valid accumulator: {result:?}");
+        assert!(
+            result.is_ok(),
+            "decider rejected valid accumulator: {result:?}"
+        );
     }
 
     #[test]
     fn terminal_scheme_trait_roundtrips() {
         use whir_traits::TerminalScheme;
-        type Terminal =
-            AccumulationTerminal<EF, F, MyHash, MyCompress, <F as Field>::Packing, F, <F as Field>::Packing, 8>;
+        type Terminal = AccumulationTerminal<
+            EF,
+            F,
+            MyHash,
+            MyCompress,
+            <F as Field>::Packing,
+            F,
+            <F as Field>::Packing,
+            8,
+        >;
 
         let (shape, instance0) = make_shape_and_instance(9);
         let (_, instance1) = make_shape_and_instance(16);
         let spartan = R1CSProver::new();
 
-        let mut chal0 =
-            MyChallenger::new(Perm::new_from_rng_128(&mut SmallRng::seed_from_u64(1)));
+        let mut chal0 = MyChallenger::new(Perm::new_from_rng_128(&mut SmallRng::seed_from_u64(1)));
         let proof0 = spartan.prove::<EF, _>(&instance0, &mut chal0);
-        let mut chal1 =
-            MyChallenger::new(Perm::new_from_rng_128(&mut SmallRng::seed_from_u64(2)));
+        let mut chal1 = MyChallenger::new(Perm::new_from_rng_128(&mut SmallRng::seed_from_u64(2)));
         let proof1 = spartan.prove::<EF, _>(&instance1, &mut chal1);
 
         let acc0 = initialize_accumulator_from_spartan::<F, EF, F, 8>(
-            &shape, &proof0, spartan.prepare_witness(&instance0),
-            [F::ZERO; 8], EF::from_u64(3),
+            &shape,
+            &proof0,
+            spartan.prepare_witness(&instance0),
+            [F::ZERO; 8],
+            EF::from_u64(3),
         );
         let acc1 = initialize_accumulator_from_spartan::<F, EF, F, 8>(
-            &shape, &proof1, spartan.prepare_witness(&instance1),
-            [F::ONE; 8], EF::from_u64(3),
+            &shape,
+            &proof1,
+            spartan.prepare_witness(&instance1),
+            [F::ONE; 8],
+            EF::from_u64(3),
         );
 
         let config = make_whir_config();
@@ -476,21 +473,29 @@ mod tests {
         let mut prover_challenger = seed_challenger(&config);
         let (output, _) = LinearizedAccumulationProver::new(&config)
             .accumulate::<_, F, <F as Field>::Packing, _, 8>(
-                &dft, &mut prover_challenger, &[acc0, acc1], 2,
+                &dft,
+                &mut prover_challenger,
+                &[acc0, acc1],
+                2,
             )
             .unwrap();
 
         // Prove via the trait.
         let mut prove_chal = seed_challenger(&config);
         let proof = <Terminal as TerminalScheme<F, EF, MyChallenger>>::prove(
-            &config, &mut prove_chal, &output,
+            &config,
+            &mut prove_chal,
+            &output,
         )
         .expect("TerminalScheme::prove failed");
 
         // Verify via the trait.
         let mut verify_chal = seed_challenger(&config);
         <Terminal as TerminalScheme<F, EF, MyChallenger>>::verify(
-            &config, &mut verify_chal, &output.public_instance, &proof,
+            &config,
+            &mut verify_chal,
+            &output.public_instance,
+            &proof,
         )
         .expect("TerminalScheme::verify failed");
     }
@@ -501,11 +506,9 @@ mod tests {
         let (_, instance1) = make_shape_and_instance(16);
         let spartan = R1CSProver::new();
 
-        let mut chal0 =
-            MyChallenger::new(Perm::new_from_rng_128(&mut SmallRng::seed_from_u64(1)));
+        let mut chal0 = MyChallenger::new(Perm::new_from_rng_128(&mut SmallRng::seed_from_u64(1)));
         let proof0 = spartan.prove::<EF, _>(&instance0, &mut chal0);
-        let mut chal1 =
-            MyChallenger::new(Perm::new_from_rng_128(&mut SmallRng::seed_from_u64(2)));
+        let mut chal1 = MyChallenger::new(Perm::new_from_rng_128(&mut SmallRng::seed_from_u64(2)));
         let proof1 = spartan.prove::<EF, _>(&instance1, &mut chal1);
 
         let acc0 = initialize_accumulator_from_spartan::<F, EF, F, 8>(
@@ -540,11 +543,7 @@ mod tests {
         let decider = AccumulationDecider::new(&config);
         let mut prove_challenger = seed_challenger(&config);
         let decider_proof = decider
-            .prove::<_, F, <F as Field>::Packing, _, 8>(
-                &dft,
-                &mut prove_challenger,
-                &output,
-            )
+            .prove::<_, F, <F as Field>::Packing, _, 8>(&dft, &mut prove_challenger, &output)
             .unwrap();
 
         // Tamper with the public instance's commitment_root. With the
@@ -552,13 +551,10 @@ mod tests {
         output.public_instance.commitment_root[0] += F::ONE;
 
         let mut verify_challenger = seed_challenger(&config);
-        let result = decider.verify::<
-            <F as Field>::Packing,
-            F,
-            <F as Field>::Packing,
-            8,
-        >(
-            &mut verify_challenger, &output.public_instance, &decider_proof
+        let result = decider.verify::<<F as Field>::Packing, F, <F as Field>::Packing, 8>(
+            &mut verify_challenger,
+            &output.public_instance,
+            &decider_proof,
         );
 
         assert!(result.is_err(), "decider accepted tampered commitment_root");
@@ -605,20 +601,32 @@ mod tests {
         let proof_b1 = spartan.prove::<EF, _>(&instance_b1, &mut chal_b1);
 
         let acc_a0 = initialize_accumulator_from_spartan::<F, EF, F, 8>(
-            &shape, &proof_a0, spartan.prepare_witness(&instance_a0),
-            [F::ZERO; 8], EF::from_u64(3),
+            &shape,
+            &proof_a0,
+            spartan.prepare_witness(&instance_a0),
+            [F::ZERO; 8],
+            EF::from_u64(3),
         );
         let acc_a1 = initialize_accumulator_from_spartan::<F, EF, F, 8>(
-            &shape, &proof_a1, spartan.prepare_witness(&instance_a1),
-            [F::ONE; 8], EF::from_u64(3),
+            &shape,
+            &proof_a1,
+            spartan.prepare_witness(&instance_a1),
+            [F::ONE; 8],
+            EF::from_u64(3),
         );
         let acc_b0 = initialize_accumulator_from_spartan::<F, EF, F, 8>(
-            &shape, &proof_b0, spartan.prepare_witness(&instance_b0),
-            [F::ZERO; 8], EF::from_u64(5),
+            &shape,
+            &proof_b0,
+            spartan.prepare_witness(&instance_b0),
+            [F::ZERO; 8],
+            EF::from_u64(5),
         );
         let acc_b1 = initialize_accumulator_from_spartan::<F, EF, F, 8>(
-            &shape, &proof_b1, spartan.prepare_witness(&instance_b1),
-            [F::ONE; 8], EF::from_u64(5),
+            &shape,
+            &proof_b1,
+            spartan.prepare_witness(&instance_b1),
+            [F::ONE; 8],
+            EF::from_u64(5),
         );
 
         let config = make_whir_config();
@@ -626,16 +634,12 @@ mod tests {
 
         let mut chal = seed_challenger(&config);
         let (output_a, _) = LinearizedAccumulationProver::new(&config)
-            .accumulate::<_, F, <F as Field>::Packing, _, 8>(
-                &dft, &mut chal, &[acc_a0, acc_a1], 2,
-            )
+            .accumulate::<_, F, <F as Field>::Packing, _, 8>(&dft, &mut chal, &[acc_a0, acc_a1], 2)
             .unwrap();
 
         let mut chal = seed_challenger(&config);
         let (output_b, _) = LinearizedAccumulationProver::new(&config)
-            .accumulate::<_, F, <F as Field>::Packing, _, 8>(
-                &dft, &mut chal, &[acc_b0, acc_b1], 2,
-            )
+            .accumulate::<_, F, <F as Field>::Packing, _, 8>(&dft, &mut chal, &[acc_b0, acc_b1], 2)
             .unwrap();
 
         // Cheating prover: generate a valid WHIR decider proof for B...
@@ -647,12 +651,11 @@ mod tests {
 
         // ...then present it against A's public instance (C_B ≠ C_A).
         let mut verify_chal = seed_challenger(&config);
-        let result = decider.verify::<
-            <F as Field>::Packing,
-            F,
-            <F as Field>::Packing,
-            8,
-        >(&mut verify_chal, &output_a.public_instance, &proof_b);
+        let result = decider.verify::<<F as Field>::Packing, F, <F as Field>::Packing, 8>(
+            &mut verify_chal,
+            &output_a.public_instance,
+            &proof_b,
+        );
 
         match result {
             Err(VerifierError::StirChallengeFailed { details, .. }) => {
@@ -661,9 +664,7 @@ mod tests {
                     "binding check fired but with unexpected details: {details}"
                 );
             }
-            Err(e) => panic!(
-                "wrong error variant — commitment binding check may be absent: {e:?}"
-            ),
+            Err(e) => panic!("wrong error variant — commitment binding check may be absent: {e:?}"),
             Ok(()) => panic!("decider accepted a WHIR proof for a different polynomial"),
         }
     }
@@ -672,8 +673,7 @@ mod tests {
     fn algebraic_decider_accepts_valid() {
         let (shape, instance) = make_shape_and_instance(9);
         let spartan = R1CSProver::new();
-        let mut chal =
-            MyChallenger::new(Perm::new_from_rng_128(&mut SmallRng::seed_from_u64(1)));
+        let mut chal = MyChallenger::new(Perm::new_from_rng_128(&mut SmallRng::seed_from_u64(1)));
         let proof = spartan.prove::<EF, _>(&instance, &mut chal);
 
         let acc = initialize_accumulator_from_spartan::<F, EF, F, 8>(
@@ -684,8 +684,8 @@ mod tests {
             EF::from_u64(3),
         );
 
-        assert!(AccumulationDecider::<EF, F, MyHash, MyCompress, MyChallenger>::decide_algebraic(
-            &acc
-        ));
+        assert!(
+            AccumulationDecider::<EF, F, MyHash, MyCompress, MyChallenger>::decide_algebraic(&acc)
+        );
     }
 }

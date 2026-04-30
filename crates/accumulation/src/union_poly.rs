@@ -67,15 +67,14 @@ mod tests {
     use alloc::vec;
 
     use super::*;
-    use p3_koala_bear::KoalaBear;
     use p3_field::PrimeCharacteristicRing;
+    use p3_koala_bear::KoalaBear;
 
     type F = KoalaBear;
 
     #[test]
     fn build_union_concatenates_evaluations() {
-        let p1 =
-            EvaluationsList::new(vec![F::ONE, F::from_u64(2), F::from_u64(3), F::from_u64(4)]);
+        let p1 = EvaluationsList::new(vec![F::ONE, F::from_u64(2), F::from_u64(3), F::from_u64(4)]);
         let p2 = EvaluationsList::new(vec![
             F::from_u64(5),
             F::from_u64(6),
@@ -105,8 +104,7 @@ mod tests {
 
     #[test]
     fn build_union_from_refs_matches_owned() {
-        let p1 =
-            EvaluationsList::new(vec![F::ONE, F::from_u64(2), F::from_u64(3), F::from_u64(4)]);
+        let p1 = EvaluationsList::new(vec![F::ONE, F::from_u64(2), F::from_u64(3), F::from_u64(4)]);
         let p2 = EvaluationsList::new(vec![
             F::from_u64(5),
             F::from_u64(6),
@@ -157,8 +155,7 @@ mod tests {
     #[should_panic(expected = "All polynomials must have the same number of variables")]
     fn build_union_mismatched_sizes_panics() {
         let p1 = EvaluationsList::new(vec![F::ONE, F::from_u64(2)]);
-        let p2 =
-            EvaluationsList::new(vec![F::ONE, F::from_u64(2), F::from_u64(3), F::from_u64(4)]);
+        let p2 = EvaluationsList::new(vec![F::ONE, F::from_u64(2), F::from_u64(3), F::from_u64(4)]);
         let _ = build_union_polynomial(&[p1, p2]);
     }
 
@@ -166,8 +163,7 @@ mod tests {
     #[should_panic(expected = "All polynomials must have the same number of variables")]
     fn build_union_from_refs_mismatched_sizes_panics() {
         let p1 = EvaluationsList::new(vec![F::ONE, F::from_u64(2)]);
-        let p2 =
-            EvaluationsList::new(vec![F::ONE, F::from_u64(2), F::from_u64(3), F::from_u64(4)]);
+        let p2 = EvaluationsList::new(vec![F::ONE, F::from_u64(2), F::from_u64(3), F::from_u64(4)]);
         let _ = build_union_polynomial_from_refs(&[&p1, &p2]);
     }
 }

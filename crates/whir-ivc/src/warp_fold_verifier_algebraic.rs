@@ -41,10 +41,7 @@ pub struct AlgebraicFoldVerifierWitness<F: Field> {
 
 impl<F: Field> AlgebraicFoldVerifierWitness<F> {
     /// Build from a fold result's sumcheck data.
-    pub fn from_fold_data(
-        sumcheck_round_polys: &[Vec<F>],
-        sumcheck_challenges: &[F],
-    ) -> Self {
+    pub fn from_fold_data(sumcheck_round_polys: &[Vec<F>], sumcheck_challenges: &[F]) -> Self {
         let sumcheck_evals = sumcheck_round_polys
             .iter()
             .map(|evals| {
@@ -138,8 +135,7 @@ pub fn synthesize_algebraic_fold_verifier<F: Field>(
         builder.enforce(
             LinearCombination::from_constant(F::TWO),
             LinearCombination::from_var(c2_var),
-            LinearCombination::from_var(e2_var)
-                - LinearCombination::from_scaled(e1_var, F::TWO)
+            LinearCombination::from_var(e2_var) - LinearCombination::from_scaled(e1_var, F::TWO)
                 + LinearCombination::from_var(e0_var),
         );
 
@@ -261,8 +257,8 @@ where
 mod tests {
     use alloc::vec;
 
-    use p3_koala_bear::KoalaBear;
     use p3_field::PrimeCharacteristicRing;
+    use p3_koala_bear::KoalaBear;
 
     use super::*;
     use crate::ivc::step::TrivialStepCircuit;
@@ -296,8 +292,7 @@ mod tests {
         let step = TrivialStepCircuit::new(1);
 
         // CP-SNARK mode: algebraic verifier
-        let (_cp_witness, cp_constraints, _) =
-            compute_cp_circuit_size(&step, &[F::ZERO]);
+        let (_cp_witness, cp_constraints, _) = compute_cp_circuit_size(&step, &[F::ZERO]);
 
         // For comparison: algebraic-only (no step, no padding)
         let witness = AlgebraicFoldVerifierWitness {
@@ -333,8 +328,10 @@ mod tests {
                 "\n=== CP-SNARK Circuit Size ===\n\
                  Algebraic verifier only:  {:>4} witness, {:>4} constraints\n\
                  Unified (step + verifier): {:>4} witness, {:>4} constraints\n",
-                alg_witness, alg_constraints,
-                cp_witness, cp_constraints,
+                alg_witness,
+                alg_constraints,
+                cp_witness,
+                cp_constraints,
             );
         }
     }
@@ -375,24 +372,14 @@ mod tests {
             sumcheck_challenges: vec![F::ZERO],
         };
         let mut b_with = CircuitBuilder::<F>::new();
-        let _ = synthesize_warp_ivc_circuit_cp(
-            &mut b_with,
-            &step,
-            &[F::ZERO],
-            Some(&witness),
-            None,
-        );
+        let _ =
+            synthesize_warp_ivc_circuit_cp(&mut b_with, &step, &[F::ZERO], Some(&witness), None);
         let target = b_with.num_witness_vars();
 
         // WITHOUT verifier, padded to same size
         let mut b_without = CircuitBuilder::<F>::new();
-        let _ = synthesize_warp_ivc_circuit_cp(
-            &mut b_without,
-            &step,
-            &[F::ZERO],
-            None,
-            Some(target),
-        );
+        let _ =
+            synthesize_warp_ivc_circuit_cp(&mut b_without, &step, &[F::ZERO], None, Some(target));
 
         let (shape_with, _) = b_with.build();
         let (shape_without, inst_without) = b_without.build();

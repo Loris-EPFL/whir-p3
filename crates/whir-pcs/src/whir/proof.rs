@@ -304,14 +304,14 @@ impl<F: Clone, EF, W, const DIGEST_ELEMS: usize> WhirProof<F, EF, W, DIGEST_ELEM
 mod tests {
     use alloc::vec;
 
-    use p3_koala_bear::{KoalaBear, Poseidon2KoalaBear};
     use p3_challenger::DuplexChallenger;
-    use p3_field::{extension::BinomialExtensionField, PrimeCharacteristicRing};
+    use p3_field::{PrimeCharacteristicRing, extension::BinomialExtensionField};
+    use p3_koala_bear::{KoalaBear, Poseidon2KoalaBear};
     use p3_symmetric::{PaddingFreeSponge, TruncatedPermutation};
     use rand::SeedableRng;
 
     use super::*;
-    use crate::parameters::{errors::SecurityAssumption, FoldingFactor};
+    use crate::parameters::{FoldingFactor, errors::SecurityAssumption};
 
     /// Type alias for the base field used in tests
     type F = KoalaBear;

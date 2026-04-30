@@ -16,8 +16,8 @@ use alloc::{vec, vec::Vec};
 use p3_commit::Mmcs;
 use p3_dft::TwoAdicSubgroupDft;
 use p3_field::TwoAdicField;
-use p3_matrix::dense::RowMajorMatrix;
 use p3_matrix::Matrix;
+use p3_matrix::dense::RowMajorMatrix;
 use p3_merkle_tree::MerkleTreeMmcs;
 
 use crate::poly::evals::EvaluationsList;
@@ -62,8 +62,8 @@ where
     // Width before transpose: 2^(num_variables - folding_factor)
     // After transpose: width = 2^folding_factor, height = 2^(num_variables - folding_factor)
     let width_before = 1usize << (num_variables - folding_factor);
-    let mat = p3_matrix::dense::RowMajorMatrixView::new(witness.as_slice(), width_before)
-        .transpose();
+    let mat =
+        p3_matrix::dense::RowMajorMatrixView::new(witness.as_slice(), width_before).transpose();
 
     // Step 2: Pad height for rate blowup
     // Padded height: 2^(num_variables + log_inv_rate - folding_factor)
@@ -190,9 +190,12 @@ where
     let total = union_codeword.len();
     let height = total / width;
     assert_eq!(
-        height * width, total,
+        height * width,
+        total,
         "union codeword length {} not divisible by 2^{} = {}",
-        total, ff, width,
+        total,
+        ff,
+        width,
     );
 
     let matrix = RowMajorMatrix::new(union_codeword.to_vec(), width);
@@ -312,11 +315,15 @@ where
     use p3_matrix::Dimensions;
 
     let mmcs = MerkleTreeMmcs::<P, PW, H, C, DIGEST_ELEMS>::new(merkle_hash, merkle_compress);
-    let dimensions = [Dimensions { width: row_width, height: tree_height }];
+    let dimensions = [Dimensions {
+        width: row_width,
+        height: tree_height,
+    }];
     let opened_values = [row_values.to_vec()];
     let opening_ref = p3_commit::BatchOpeningRef::new(&opened_values, proof);
     let hash_root: p3_symmetric::Hash<F, W, DIGEST_ELEMS> = (*root).into();
-    mmcs.verify_batch(&hash_root, &dimensions, position, opening_ref).is_ok()
+    mmcs.verify_batch(&hash_root, &dimensions, position, opening_ref)
+        .is_ok()
 }
 
 #[cfg(test)]
@@ -324,9 +331,9 @@ mod tests {
     use alloc::vec;
 
     use super::*;
-    use p3_koala_bear::KoalaBear;
     use p3_dft::Radix2DFTSmallBatch;
     use p3_field::PrimeCharacteristicRing;
+    use p3_koala_bear::KoalaBear;
 
     type F = KoalaBear;
 
@@ -372,14 +379,17 @@ mod tests {
         let log_inv_rate = 1;
         let folding_factor = 2;
 
-        let witness = EvaluationsList::new(
-            (0..1u64 << num_vars).map(|i| F::from_u64(i + 1)).collect(),
-        );
+        let witness =
+            EvaluationsList::new((0..1u64 << num_vars).map(|i| F::from_u64(i + 1)).collect());
 
         let cw1 = rs_encode(&witness, folding_factor, log_inv_rate, &dft);
         let cw2 = rs_encode(&witness, folding_factor, log_inv_rate, &dft);
 
-        assert_eq!(cw1.as_slice(), cw2.as_slice(), "encoding should be deterministic");
+        assert_eq!(
+            cw1.as_slice(),
+            cw2.as_slice(),
+            "encoding should be deterministic"
+        );
     }
 
     #[test]
@@ -395,7 +405,11 @@ mod tests {
         let cw1 = rs_encode(&w1, folding_factor, log_inv_rate, &dft);
         let cw2 = rs_encode(&w2, folding_factor, log_inv_rate, &dft);
 
-        assert_ne!(cw1.as_slice(), cw2.as_slice(), "different witnesses should produce different codewords");
+        assert_ne!(
+            cw1.as_slice(),
+            cw2.as_slice(),
+            "different witnesses should produce different codewords"
+        );
     }
 
     #[test]
@@ -405,12 +419,17 @@ mod tests {
         let log_inv_rate = 1;
         let folding_factor = 2;
 
-        let witness = EvaluationsList::new(
-            (0..1u64 << num_vars).map(|i| F::from_u64(i + 1)).collect(),
-        );
+        let witness =
+            EvaluationsList::new((0..1u64 << num_vars).map(|i| F::from_u64(i + 1)).collect());
         let codeword = rs_encode(&witness, folding_factor, log_inv_rate, &dft);
 
-        assert!(verify_rs_encoding(&witness, &codeword, folding_factor, log_inv_rate, &dft));
+        assert!(verify_rs_encoding(
+            &witness,
+            &codeword,
+            folding_factor,
+            log_inv_rate,
+            &dft
+        ));
     }
 
     #[test]
@@ -420,9 +439,8 @@ mod tests {
         let log_inv_rate = 1;
         let folding_factor = 2;
 
-        let witness = EvaluationsList::new(
-            (0..1u64 << num_vars).map(|i| F::from_u64(i + 1)).collect(),
-        );
+        let witness =
+            EvaluationsList::new((0..1u64 << num_vars).map(|i| F::from_u64(i + 1)).collect());
         let mut codeword = rs_encode(&witness, folding_factor, log_inv_rate, &dft);
 
         // Tamper with one position
@@ -438,12 +456,14 @@ mod tests {
     #[test]
     fn rs_fold_integration_fixed_size() {
         // Full integration: RS-encode → WARP fold → verify codeword stays fixed size
-        use crate::{
-            accumulator::{FreshInstance, WarpAccumulator, WarpAccumulatorInstance, WarpAccumulatorWitness},
-            fold::{warp_fold_prove_rs, RSEncodingConfig},
-        };
-        use crate::spartan::r1cs::{R1CSShape, SparseMatEntry};
         use crate::poly::multilinear::MultilinearPoint;
+        use crate::spartan::r1cs::{R1CSShape, SparseMatEntry};
+        use crate::{
+            accumulator::{
+                FreshInstance, WarpAccumulator, WarpAccumulatorInstance, WarpAccumulatorWitness,
+            },
+            fold::{RSEncodingConfig, warp_fold_prove_rs},
+        };
 
         let dft = Radix2DFTSmallBatch::<F>::default();
         let folding_factor = 2;
@@ -451,7 +471,9 @@ mod tests {
 
         // Simple squaring R1CS: 4 constraints, 8 vars, 2 inputs
         let shape = R1CSShape::new(
-            4, 8, 2,
+            4,
+            8,
+            2,
             vec![SparseMatEntry::new(0, 2, F::ONE)],
             vec![SparseMatEntry::new(0, 2, F::ONE)],
             vec![SparseMatEntry::new(0, 3, F::ONE)],
@@ -500,8 +522,18 @@ mod tests {
             let tau = vec![F::from_u64(step + 42)];
             let mut ctr = step * 100;
             let result = warp_fold_prove_rs(
-                &shape, &[fresh], &acc, F::from_u64(7), &tau, &[], &rs_config, &dft,
-                |_| { ctr += 1; F::from_u64(ctr + 500) },
+                &shape,
+                &[fresh],
+                &acc,
+                F::from_u64(7),
+                &tau,
+                &[],
+                &rs_config,
+                &dft,
+                |_| {
+                    ctr += 1;
+                    F::from_u64(ctr + 500)
+                },
             );
 
             // CRITICAL: codeword size stays fixed
@@ -509,12 +541,17 @@ mod tests {
                 result.witness.codeword.as_slice().len(),
                 initial_cw_len,
                 "RS codeword grew at step {step}! {} vs {}",
-                result.witness.codeword.as_slice().len(), initial_cw_len,
+                result.witness.codeword.as_slice().len(),
+                initial_cw_len,
             );
 
-            let eval_claim = result.witness.codeword.evaluate_hypercube_base(
-                &MultilinearPoint::new(result.instance.eval_point.clone()),
-            );
+            let eval_claim =
+                result
+                    .witness
+                    .codeword
+                    .evaluate_hypercube_base(&MultilinearPoint::new(
+                        result.instance.eval_point.clone(),
+                    ));
 
             acc = WarpAccumulator::new(
                 WarpAccumulatorInstance {
@@ -549,23 +586,34 @@ mod tests {
         let folding_factor = 2;
         let log_inv_rate = 1;
 
-        let witness = EvaluationsList::new(
-            (0..1u64 << 6).map(|i| F::from_u64(i + 1)).collect(),
-        );
+        let witness = EvaluationsList::new((0..1u64 << 6).map(|i| F::from_u64(i + 1)).collect());
         let codeword = rs_encode(&witness, folding_factor, log_inv_rate, &dft);
 
         let (root, _tree) = merkle_commit_codeword::<
-            F, F, <F as p3_field::Field>::Packing, <F as p3_field::Field>::Packing,
-            MyHash, MyCompress, DIGEST,
+            F,
+            F,
+            <F as p3_field::Field>::Packing,
+            <F as p3_field::Field>::Packing,
+            MyHash,
+            MyCompress,
+            DIGEST,
         >(&codeword, folding_factor, hash.clone(), compress.clone());
 
         // Root should be non-trivial
-        assert!(root.iter().any(|&x| x != F::ZERO), "Merkle root should be non-zero");
+        assert!(
+            root.iter().any(|&x| x != F::ZERO),
+            "Merkle root should be non-zero"
+        );
 
         // Same codeword → same root (deterministic)
         let (root2, _) = merkle_commit_codeword::<
-            F, F, <F as p3_field::Field>::Packing, <F as p3_field::Field>::Packing,
-            MyHash, MyCompress, DIGEST,
+            F,
+            F,
+            <F as p3_field::Field>::Packing,
+            <F as p3_field::Field>::Packing,
+            MyHash,
+            MyCompress,
+            DIGEST,
         >(&codeword, folding_factor, hash.clone(), compress.clone());
         assert_eq!(root, root2, "Merkle commit should be deterministic");
 
@@ -573,10 +621,18 @@ mod tests {
         let witness2 = EvaluationsList::new(vec![F::from_u64(99); 1 << 6]);
         let codeword2 = rs_encode(&witness2, folding_factor, log_inv_rate, &dft);
         let (root3, _) = merkle_commit_codeword::<
-            F, F, <F as p3_field::Field>::Packing, <F as p3_field::Field>::Packing,
-            MyHash, MyCompress, DIGEST,
+            F,
+            F,
+            <F as p3_field::Field>::Packing,
+            <F as p3_field::Field>::Packing,
+            MyHash,
+            MyCompress,
+            DIGEST,
         >(&codeword2, folding_factor, hash, compress);
-        assert_ne!(root, root3, "Different codewords should have different roots");
+        assert_ne!(
+            root, root3,
+            "Different codewords should have different roots"
+        );
     }
 
     #[test]
@@ -630,7 +686,7 @@ mod tests {
     fn union_merkle_commit_deterministic() {
         use p3_koala_bear::Poseidon2KoalaBear;
         use p3_symmetric::{PaddingFreeSponge, TruncatedPermutation};
-        use rand::{rngs::SmallRng, SeedableRng};
+        use rand::{SeedableRng, rngs::SmallRng};
 
         type Perm = Poseidon2KoalaBear<16>;
         type MyHash = PaddingFreeSponge<Perm, 16, 8, 8>;
@@ -661,13 +717,23 @@ mod tests {
         let union = build_union_codeword(&codewords);
 
         let (root1, _) = merkle_commit_union_codeword::<
-            F, F, <F as p3_field::Field>::Packing, <F as p3_field::Field>::Packing,
-            MyHash, MyCompress, DIGEST,
+            F,
+            F,
+            <F as p3_field::Field>::Packing,
+            <F as p3_field::Field>::Packing,
+            MyHash,
+            MyCompress,
+            DIGEST,
         >(&union, l, base_ff, hash.clone(), compress.clone());
 
         let (root2, _) = merkle_commit_union_codeword::<
-            F, F, <F as p3_field::Field>::Packing, <F as p3_field::Field>::Packing,
-            MyHash, MyCompress, DIGEST,
+            F,
+            F,
+            <F as p3_field::Field>::Packing,
+            <F as p3_field::Field>::Packing,
+            MyHash,
+            MyCompress,
+            DIGEST,
         >(&union, l, base_ff, hash, compress);
 
         assert_eq!(root1, root2, "union Merkle commit should be deterministic");
@@ -682,7 +748,11 @@ mod tests {
         let n = 16usize;
 
         let codewords: Vec<Vec<F>> = (0..l)
-            .map(|i| (0..n).map(|j| F::from_u64(i as u64 * 100 + j as u64)).collect())
+            .map(|i| {
+                (0..n)
+                    .map(|j| F::from_u64(i as u64 * 100 + j as u64))
+                    .collect()
+            })
             .collect();
 
         let union = build_union_codeword(&codewords);
@@ -690,18 +760,12 @@ mod tests {
         // Simulate sumcheck challenges → eq weights
         let challenges = vec![F::from_u64(7), F::from_u64(13)]; // log_l = 2 challenges
         let eq_weights: Vec<F> = (0..l)
-            .map(|idx| {
-                crate::spartan::encoding::eq_poly_at_index::<F, F>(idx, &challenges)
-            })
+            .map(|idx| crate::spartan::encoding::eq_poly_at_index::<F, F>(idx, &challenges))
             .collect();
 
         // Compute folded codeword: f[p] = Σ eq(γ,i) * cw_i[p]
         let folded: Vec<F> = (0..n)
-            .map(|p| {
-                (0..l)
-                    .map(|i| eq_weights[i] * codewords[i][p])
-                    .sum()
-            })
+            .map(|p| (0..l).map(|i| eq_weights[i] * codewords[i][p]).sum())
             .collect();
 
         // Verify: at each position, the union column gives the same result

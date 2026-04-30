@@ -202,9 +202,11 @@ mod tests {
     fn test_folding_factor_check_validity() {
         // Valid cases
         assert!(FoldingFactor::Constant(2).check_validity(4).is_ok());
-        assert!(FoldingFactor::ConstantFromSecondRound(2, 3)
-            .check_validity(5)
-            .is_ok());
+        assert!(
+            FoldingFactor::ConstantFromSecondRound(2, 3)
+                .check_validity(5)
+                .is_ok()
+        );
 
         // ❌ Invalid cases
         // Factor too large

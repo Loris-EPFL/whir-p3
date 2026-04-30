@@ -5,13 +5,13 @@ use p3_field::{ExtensionField, Field};
 
 use crate::{
     accumulator::{Accumulator, AccumulatorInstance, AccumulatorWitness},
-    union_poly::build_union_polynomial,
     poly::evals::EvaluationsList,
     spartan::{
         encoding::eq_poly_at_index,
         r1cs::R1CSShape,
         r1cs_prover::{R1CSProof, R1CSProver},
     },
+    union_poly::build_union_polynomial,
     whir::constraints::statement::LinearStatement,
 };
 
@@ -239,17 +239,17 @@ pub fn witness_polynomial_from_instance<F: Field>(
 mod tests {
     use alloc::vec;
 
-    use p3_koala_bear::{KoalaBear, Poseidon2KoalaBear};
     use p3_challenger::DuplexChallenger;
     use p3_dft::Radix2DFTSmallBatch;
-    use p3_field::{extension::BinomialExtensionField, PrimeCharacteristicRing};
+    use p3_field::{PrimeCharacteristicRing, extension::BinomialExtensionField};
+    use p3_koala_bear::{KoalaBear, Poseidon2KoalaBear};
     use p3_symmetric::{PaddingFreeSponge, TruncatedPermutation};
-    use rand::{rngs::SmallRng, SeedableRng};
+    use rand::{SeedableRng, rngs::SmallRng};
 
     use super::*;
     use crate::{
         fiat_shamir::domain_separator::DomainSeparator,
-        parameters::{errors::SecurityAssumption, FoldingFactor, ProtocolParameters},
+        parameters::{FoldingFactor, ProtocolParameters, errors::SecurityAssumption},
         spartan::r1cs::{R1CSInstance, SparseMatEntry},
         whir::{
             committer::{reader::CommitmentReader, writer::CommitmentWriter},

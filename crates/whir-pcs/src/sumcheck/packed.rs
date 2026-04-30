@@ -80,10 +80,7 @@ pub fn lagrange_basis_integer_set<F: Field>(n: usize, r: F) -> Vec<F> {
 /// has the property that for degree < n polynomials, Δ^{n-1} f(j) is constant.
 ///
 /// Cost: O(n^2) additions to initialize + O(n*m) additions to extrapolate.
-pub fn forward_difference_extrapolate<F: Field>(
-    known_evals: &[F],
-    num_extra: usize,
-) -> Vec<F> {
+pub fn forward_difference_extrapolate<F: Field>(known_evals: &[F], num_extra: usize) -> Vec<F> {
     let n = known_evals.len();
     if num_extra == 0 {
         return vec![];
@@ -275,10 +272,7 @@ pub fn fold_and_slice_tables<F: Field>(
 /// split into 2k groups by partitioning the first log2(2k) bits of the index.
 ///
 /// sub_tables[j][s][x] = tables[s][j * (N / 2k) + x]
-pub fn decompose_into_subtables<F: Field>(
-    tables: &[Vec<F>],
-    k: usize,
-) -> Vec<Vec<Vec<F>>> {
+pub fn decompose_into_subtables<F: Field>(tables: &[Vec<F>], k: usize) -> Vec<Vec<Vec<F>>> {
     let d = tables.len();
     let n = tables[0].len();
     let two_k = 2 * k;
@@ -312,8 +306,8 @@ pub fn evaluate_poly_from_evals<F: Field>(evals: &[F], r: F) -> F {
 mod tests {
     use alloc::vec;
 
-    use p3_koala_bear::KoalaBear;
     use p3_field::PrimeCharacteristicRing;
+    use p3_koala_bear::KoalaBear;
 
     use super::*;
 
@@ -329,7 +323,8 @@ mod tests {
                 for j in 0..n {
                     let expected = if i == j { F::ONE } else { F::ZERO };
                     assert_eq!(
-                        basis[j], expected,
+                        basis[j],
+                        expected,
                         "L_{j}({i}) should be {}, got {:?} for n={n}",
                         if i == j { 1 } else { 0 },
                         basis[j],
@@ -346,7 +341,11 @@ mod tests {
                 let r = F::from_u64(r_val);
                 let basis = lagrange_basis_integer_set(n, r);
                 let sum: F = basis.iter().copied().sum();
-                assert_eq!(sum, F::ONE, "partition of unity failed for n={n}, r={r_val}");
+                assert_eq!(
+                    sum,
+                    F::ONE,
+                    "partition of unity failed for n={n}, r={r_val}"
+                );
             }
         }
     }
@@ -378,7 +377,10 @@ mod tests {
     fn forward_difference_cubic() {
         // f(x) = x^3: f(0)=0, f(1)=1, f(2)=8, f(3)=27
         let known = vec![
-            F::from_u64(0), F::from_u64(1), F::from_u64(8), F::from_u64(27),
+            F::from_u64(0),
+            F::from_u64(1),
+            F::from_u64(8),
+            F::from_u64(27),
         ];
         let extra = forward_difference_extrapolate(&known, 3);
         // f(4)=64, f(5)=125, f(6)=216
@@ -507,8 +509,10 @@ mod tests {
         // Run packed sumcheck rounds
         let mut claimed_sum = true_sum;
         let challenge_vals = [
-            F::from_u64(13), F::from_u64(17),
-            F::from_u64(23), F::from_u64(29),
+            F::from_u64(13),
+            F::from_u64(17),
+            F::from_u64(23),
+            F::from_u64(29),
         ];
         let mut challenge_idx = 0;
 

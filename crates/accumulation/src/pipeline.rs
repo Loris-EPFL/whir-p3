@@ -23,36 +23,35 @@
 mod tests {
     use alloc::{vec, vec::Vec};
 
-    use p3_koala_bear::{KoalaBear, Poseidon2KoalaBear};
     use p3_challenger::DuplexChallenger;
     use p3_dft::Radix2DFTSmallBatch;
-    use p3_field::{extension::BinomialExtensionField, Field, PrimeCharacteristicRing};
+    use p3_field::{Field, PrimeCharacteristicRing, extension::BinomialExtensionField};
+    use p3_koala_bear::{KoalaBear, Poseidon2KoalaBear};
     use p3_symmetric::{PaddingFreeSponge, TruncatedPermutation};
-    use rand::{rngs::SmallRng, SeedableRng};
+    use rand::{SeedableRng, rngs::SmallRng};
 
     use crate::{
         constraint_batch::constraint_batch_prove,
-        linearized::linearized_statement_from_spartan_proof,
-        random_lc::random_linear_combination,
+        linearized::linearized_statement_from_spartan_proof, random_lc::random_linear_combination,
     };
     use quasar::fresh::FreshLinearInstance;
     use warp::{
         encoding::rs_encode,
         eval_fold::{
-            eval_fold_prove, initial_eval_accumulator, EvalAccumulator,
-            EvalAccumulatorInstance, EvalAccumulatorWitness, EvalDecider,
+            EvalAccumulator, EvalAccumulatorInstance, EvalAccumulatorWitness, EvalDecider,
+            eval_fold_prove, initial_eval_accumulator,
         },
         fold::RSEncodingConfig,
     };
 
-    use whir_pcs::fiat_shamir::domain_separator::DomainSeparator;
     use whir_core::{
-        parameters::{errors::SecurityAssumption, FoldingFactor, ProtocolParameters},
+        parameters::{FoldingFactor, ProtocolParameters, errors::SecurityAssumption},
         poly::evals::EvaluationsList,
     };
+    use whir_pcs::fiat_shamir::domain_separator::DomainSeparator;
+    use whir_pcs::whir::parameters::WhirConfig;
     use whir_spartan::r1cs::{R1CSInstance, R1CSShape, SparseMatEntry};
     use whir_spartan::r1cs_prover::R1CSProver;
-    use whir_pcs::whir::parameters::WhirConfig;
 
     type F = KoalaBear;
     type EF = BinomialExtensionField<F, 4>;
@@ -63,7 +62,9 @@ mod tests {
 
     fn make_square_shape() -> R1CSShape<F> {
         R1CSShape::new(
-            4, 4, 1,
+            4,
+            4,
+            1,
             vec![SparseMatEntry::new(0, 0, F::ONE)],
             vec![SparseMatEntry::new(0, 0, F::ONE)],
             vec![SparseMatEntry::new(0, 1, F::ONE)],
@@ -90,12 +91,11 @@ mod tests {
         let proof = prover.prove::<EF, _>(instance, &mut challenger);
         let witness = prover.prepare_witness(instance);
 
-        let linear_claim = linearized_statement_from_spartan_proof(
-            shape,
-            &proof,
-            EF::from_u64(3),
+        let linear_claim = linearized_statement_from_spartan_proof(shape, &proof, EF::from_u64(3));
+        assert!(
+            linear_claim.verify(&witness),
+            "Spartan linearization failed"
         );
-        assert!(linear_claim.verify(&witness), "Spartan linearization failed");
 
         (
             FreshLinearInstance::new(linear_claim, witness.clone()),
@@ -121,13 +121,8 @@ mod tests {
         let gamma = F::from_u64(42);
         let perm = Perm::new_from_rng_128(&mut SmallRng::seed_from_u64(77));
         let mut challenger = MyChallenger::new(perm);
-        let (batch_proof, reduction_point) = constraint_batch_prove(
-            gamma,
-            &weights,
-            &targets,
-            witnesses,
-            &mut challenger,
-        );
+        let (batch_proof, reduction_point) =
+            constraint_batch_prove(gamma, &weights, &targets, witnesses, &mut challenger);
 
         // Random LC: combine witnesses
         let eta = F::from_u64(13);
@@ -176,7 +171,12 @@ mod tests {
         let dft = Radix2DFTSmallBatch::<F>::default();
 
         // RS-encode combined witness
-        let codeword = rs_encode(&combined, rs_config.folding_factor, rs_config.log_inv_rate, &dft);
+        let codeword = rs_encode(
+            &combined,
+            rs_config.folding_factor,
+            rs_config.log_inv_rate,
+            &dft,
+        );
         let code_len = codeword.as_slice().len();
         let _log_n = code_len.trailing_zeros() as usize;
 
@@ -199,7 +199,8 @@ mod tests {
         };
 
         // Initial (zero) running accumulator — eval_point in witness domain
-        let running = initial_eval_accumulator::<F, 8>(code_len, 1 << witness_num_vars, witness_num_vars);
+        let running =
+            initial_eval_accumulator::<F, 8>(code_len, 1 << witness_num_vars, witness_num_vars);
 
         // Step 4: Eval fold
         let tau = vec![F::from_u64(7)]; // log_2(2) = 1 challenge
@@ -209,8 +210,12 @@ mod tests {
             &tau,
             &rs_config,
             &dft,
-            0, 0,
-            |_| { ctr += 1; F::from_u64(ctr + 300) },
+            0,
+            0,
+            |_| {
+                ctr += 1;
+                F::from_u64(ctr + 300)
+            },
             |_cw, _ff| [F::ZERO; 8],
         );
 
@@ -239,7 +244,8 @@ mod tests {
         // Initial accumulator — eval claims are on witness (3 vars), codewords are 2x (4 vars)
         let witness_num_vars = 3; // 2^3 = 8
         let code_len = 16; // 2^4 (8 witness * rate 2)
-        let mut running: EvalAccumulator<F, 8> = initial_eval_accumulator(code_len, 8, witness_num_vars);
+        let mut running: EvalAccumulator<F, 8> =
+            initial_eval_accumulator(code_len, 8, witness_num_vars);
 
         for step in 0u64..4 {
             let root = step + 2;
@@ -248,7 +254,12 @@ mod tests {
             assert!(fresh_linear.verify());
 
             // RS-encode the witness for the codeword
-            let codeword = rs_encode(&witness, rs_config.folding_factor, rs_config.log_inv_rate, &dft);
+            let codeword = rs_encode(
+                &witness,
+                rs_config.folding_factor,
+                rs_config.log_inv_rate,
+                &dft,
+            );
             assert_eq!(codeword.as_slice().len(), code_len);
 
             // Eval claim on WITNESS polynomial (not codeword)
@@ -274,17 +285,23 @@ mod tests {
                 &tau,
                 &rs_config,
                 &dft,
-                0, 0,
-                |_| { ctr += 1; F::from_u64(ctr + 500) },
+                0,
+                0,
+                |_| {
+                    ctr += 1;
+                    F::from_u64(ctr + 500)
+                },
                 |_cw, _ff| [F::ZERO; 8],
             );
 
             assert_eq!(
-                result.witness.codeword.as_slice().len(), code_len,
+                result.witness.codeword.as_slice().len(),
+                code_len,
                 "codeword size changed at step {step}"
             );
             assert_eq!(
-                result.witness.witness_poly.num_evals(), 8,
+                result.witness.witness_poly.num_evals(),
+                8,
                 "witness poly size changed at step {step}"
             );
 
@@ -363,7 +380,12 @@ mod tests {
         );
         let witness_num_vars = combined_01.num_variables(); // 3
 
-        let cw01 = rs_encode(&combined_01, rs_config.folding_factor, rs_config.log_inv_rate, &dft);
+        let cw01 = rs_encode(
+            &combined_01,
+            rs_config.folding_factor,
+            rs_config.log_inv_rate,
+            &dft,
+        );
         let code_len = cw01.as_slice().len();
         let code_log_n = code_len.trailing_zeros() as usize;
 
@@ -382,17 +404,28 @@ mod tests {
             },
         };
 
-        let mut running: EvalAccumulator<F, 8> = initial_eval_accumulator(code_len, 1 << witness_num_vars, witness_num_vars);
+        let mut running: EvalAccumulator<F, 8> =
+            initial_eval_accumulator(code_len, 1 << witness_num_vars, witness_num_vars);
 
         let tau1 = vec![F::from_u64(7)];
         let mut ctr = 0u64;
         let result1 = eval_fold_prove(
             &[running, fresh_acc_01],
-            &tau1, &rs_config, &dft, 0, 0,
-            |_| { ctr += 1; F::from_u64(ctr + 300) },
+            &tau1,
+            &rs_config,
+            &dft,
+            0,
+            0,
+            |_| {
+                ctr += 1;
+                F::from_u64(ctr + 300)
+            },
             |_cw, _ff| [F::ZERO; 8],
         );
-        running = EvalAccumulator { instance: result1.instance, witness: result1.witness };
+        running = EvalAccumulator {
+            instance: result1.instance,
+            witness: result1.witness,
+        };
 
         // ── Second fold step: multicast instances 2,3 → fold ──
         let (combined_23, _pt23, _evals23) = batch_reduce(
@@ -400,7 +433,12 @@ mod tests {
             &[linearized[2].1.clone(), linearized[3].1.clone()],
         );
 
-        let cw23 = rs_encode(&combined_23, rs_config.folding_factor, rs_config.log_inv_rate, &dft);
+        let cw23 = rs_encode(
+            &combined_23,
+            rs_config.folding_factor,
+            rs_config.log_inv_rate,
+            &dft,
+        );
         assert_eq!(cw23.as_slice().len(), code_len);
 
         let fresh_acc_23 = EvalAccumulator {
@@ -418,15 +456,28 @@ mod tests {
         let tau2 = vec![F::from_u64(11)];
         let result2 = eval_fold_prove(
             &[running, fresh_acc_23],
-            &tau2, &rs_config, &dft, 0, 0,
-            |_| { ctr += 1; F::from_u64(ctr + 600) },
+            &tau2,
+            &rs_config,
+            &dft,
+            0,
+            0,
+            |_| {
+                ctr += 1;
+                F::from_u64(ctr + 600)
+            },
             |_cw, _ff| [F::ZERO; 8],
         );
-        running = EvalAccumulator { instance: result2.instance, witness: result2.witness };
+        running = EvalAccumulator {
+            instance: result2.instance,
+            witness: result2.witness,
+        };
 
         // Verify witness size stayed fixed
         assert_eq!(running.witness.codeword.as_slice().len(), code_len);
-        assert_eq!(running.witness.witness_poly.num_evals(), 1 << witness_num_vars);
+        assert_eq!(
+            running.witness.witness_poly.num_evals(),
+            1 << witness_num_vars
+        );
 
         // ── Terminal WHIR proof ──
         // Post-bug_017 fix: WHIR now operates on the CODEWORD polynomial
@@ -438,21 +489,16 @@ mod tests {
         // Prove
         let mut prove_challenger = seed_whir_challenger(&whir_config, 999);
         let decider_proof = decider
-            .prove::<_, F, <F as Field>::Packing, _, 8>(
-                &dft,
-                &mut prove_challenger,
-                &running,
-            )
+            .prove::<_, F, <F as Field>::Packing, _, 8>(&dft, &mut prove_challenger, &running)
             .expect("terminal WHIR prove failed");
 
         // Verify
         let mut verify_challenger = seed_whir_challenger(&whir_config, 999);
-        let verify_result = decider
-            .verify::<<F as Field>::Packing, F, <F as Field>::Packing, 8>(
-                &mut verify_challenger,
-                &running,
-                &decider_proof,
-            );
+        let verify_result = decider.verify::<<F as Field>::Packing, F, <F as Field>::Packing, 8>(
+            &mut verify_challenger,
+            &running,
+            &decider_proof,
+        );
 
         assert!(
             verify_result.is_ok(),
@@ -460,4 +506,3 @@ mod tests {
         );
     }
 }
-

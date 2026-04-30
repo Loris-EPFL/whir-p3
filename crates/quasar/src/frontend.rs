@@ -13,15 +13,15 @@ use crate::{
         proof::{AccumulationProof, AccumulationTranscript},
         random_lc::random_linear_combination,
     },
-    fresh::{FreshLinearInstance, FreshLinearInstancePublic},
     fiat_shamir::errors::FiatShamirError,
+    fresh::{FreshLinearInstance, FreshLinearInstancePublic},
     poly::{evals::EvaluationsList, multilinear::MultilinearPoint},
     whir::{
         committer::{reader::CommitmentReader, writer::CommitmentWriter},
         constraints::statement::{EqStatement, InitialClaim, LinearStatement},
         parameters::WhirConfig,
         prover::Prover as WhirProver,
-        verifier::{errors::VerifierError, Verifier as WhirVerifier},
+        verifier::{Verifier as WhirVerifier, errors::VerifierError},
     },
 };
 
@@ -412,8 +412,7 @@ where
             evaluation_claim_as_linear_statement(&reduction_point, combined_eval);
 
         let mut eq_statement = EqStatement::initialize(num_vars);
-        eq_statement
-            .add_evaluated_constraint(transcript.ood_point.clone(), transcript.ood_answer);
+        eq_statement.add_evaluated_constraint(transcript.ood_point.clone(), transcript.ood_answer);
         for (&idx, &eval) in transcript
             .shift_query_indices
             .iter()
@@ -449,12 +448,12 @@ where
 mod tests {
     use alloc::vec;
 
-    use p3_koala_bear::{KoalaBear, Poseidon2KoalaBear};
     use p3_challenger::DuplexChallenger;
     use p3_dft::Radix2DFTSmallBatch;
-    use p3_field::{extension::BinomialExtensionField, PrimeCharacteristicRing};
+    use p3_field::{PrimeCharacteristicRing, extension::BinomialExtensionField};
+    use p3_koala_bear::{KoalaBear, Poseidon2KoalaBear};
     use p3_symmetric::{PaddingFreeSponge, TruncatedPermutation};
-    use rand::{rngs::SmallRng, SeedableRng};
+    use rand::{SeedableRng, rngs::SmallRng};
 
     use super::*;
     use crate::{
@@ -463,7 +462,7 @@ mod tests {
             scheme::{LinearizedAccumulationProver, LinearizedAccumulationVerifier},
         },
         fiat_shamir::domain_separator::DomainSeparator,
-        parameters::{errors::SecurityAssumption, FoldingFactor, ProtocolParameters},
+        parameters::{FoldingFactor, ProtocolParameters, errors::SecurityAssumption},
         spartan::{
             r1cs::{R1CSInstance, R1CSShape, SparseMatEntry},
             r1cs_prover::{R1CSProof, R1CSProver},

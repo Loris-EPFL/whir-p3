@@ -186,12 +186,12 @@ impl<F: Field> SparkCommitment<F> {
 
         // Audit timestamps
         let zero_g2 = F::ZERO; // 0 * γ² = 0
-        let one_g = gamma;     // 1 * γ
+        let one_g = gamma; // 1 * γ
         for &ts in &self.audit_ts_row {
             product *= (zero_g2 + one_g + ts) - gamma; // = ts
         }
-        let one_g2 = gamma2;   // 1 * γ²
-        let zero_g = F::ZERO;  // 0 * γ
+        let one_g2 = gamma2; // 1 * γ²
+        let zero_g = F::ZERO; // 0 * γ
         for &ts in &self.audit_ts_col {
             product *= (one_g2 + zero_g + ts) - gamma; // = γ² + ts - γ
         }
@@ -437,8 +437,8 @@ fn multiset_hash<F: Field>(multiset: &[F], gamma: F) -> F {
 mod tests {
     use super::*;
     use alloc::vec;
-    use p3_koala_bear::KoalaBear;
     use p3_field::PrimeCharacteristicRing;
+    use p3_koala_bear::KoalaBear;
 
     #[test]
     fn test_memory_in_the_head() {

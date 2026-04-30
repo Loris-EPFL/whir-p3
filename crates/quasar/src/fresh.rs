@@ -159,8 +159,8 @@ mod tests {
     use alloc::vec;
 
     use super::*;
+    use p3_field::{PrimeCharacteristicRing, extension::BinomialExtensionField};
     use p3_koala_bear::KoalaBear;
-    use p3_field::{extension::BinomialExtensionField, PrimeCharacteristicRing};
 
     type F = KoalaBear;
     type EF = BinomialExtensionField<F, 4>;
@@ -173,7 +173,9 @@ mod tests {
         let a_entries = vec![SparseMatEntry::new(0, 0, F::ONE)];
         let b_entries = vec![SparseMatEntry::new(0, 0, F::ONE)];
         let c_entries = vec![SparseMatEntry::new(0, 1, F::ONE)];
-        let shape = R1CSShape::new(num_cons, num_vars, num_inputs, a_entries, b_entries, c_entries);
+        let shape = R1CSShape::new(
+            num_cons, num_vars, num_inputs, a_entries, b_entries, c_entries,
+        );
         let mut witness = vec![F::ZERO; num_vars];
         witness[0] = F::from_u64(3);
         witness[1] = F::from_u64(9);
@@ -182,7 +184,8 @@ mod tests {
     }
 
     fn make_fresh_via_manual_linear_claim() -> FreshLinearInstance<F, EF> {
-        let poly = EvaluationsList::new(vec![F::ONE, F::from_u64(2), F::from_u64(3), F::from_u64(4)]);
+        let poly =
+            EvaluationsList::new(vec![F::ONE, F::from_u64(2), F::from_u64(3), F::from_u64(4)]);
         let mut linear_claim = LinearStatement::<F, EF>::initialize(2);
         let weights = EvaluationsList::new(vec![EF::ONE, EF::from_u64(2), EF::ZERO, EF::ONE]);
         let expected = EF::ONE + EF::from_u64(4) + EF::from_u64(4);
@@ -199,7 +202,8 @@ mod tests {
     #[test]
     #[should_panic]
     fn fresh_new_rejects_invalid() {
-        let poly = EvaluationsList::new(vec![F::ONE, F::from_u64(2), F::from_u64(3), F::from_u64(4)]);
+        let poly =
+            EvaluationsList::new(vec![F::ONE, F::from_u64(2), F::from_u64(3), F::from_u64(4)]);
         let mut linear_claim = LinearStatement::<F, EF>::initialize(2);
         let weights = EvaluationsList::new(vec![EF::ONE; 4]);
         linear_claim.add_constraint(weights, EF::from_u64(999));
@@ -221,8 +225,7 @@ mod tests {
         let mut z = vec![F::ZERO; size_z];
         z[..shape.num_vars()].copy_from_slice(&witness);
         z[shape.num_vars()] = F::ONE;
-        z[shape.num_vars() + 1..shape.num_vars() + 1 + shape.num_inputs()]
-            .copy_from_slice(&input);
+        z[shape.num_vars() + 1..shape.num_vars() + 1 + shape.num_inputs()].copy_from_slice(&input);
 
         let witness_poly = EvaluationsList::new(z.clone());
 
@@ -252,8 +255,7 @@ mod tests {
         let mut z = vec![F::ZERO; size_z];
         z[..shape.num_vars()].copy_from_slice(&witness);
         z[shape.num_vars()] = F::ONE;
-        z[shape.num_vars() + 1..shape.num_vars() + 1 + shape.num_inputs()]
-            .copy_from_slice(&input);
+        z[shape.num_vars() + 1..shape.num_vars() + 1 + shape.num_inputs()].copy_from_slice(&input);
         let witness_poly = EvaluationsList::new(z);
 
         let rx = vec![F::from_u64(11); shape.num_poly_vars_x()];

@@ -2,11 +2,11 @@ use alloc::vec::Vec;
 
 use itertools::Itertools;
 use p3_field::{
-    dot_product, ExtensionField, Field, PackedFieldExtension, PackedValue, PrimeCharacteristicRing,
+    ExtensionField, Field, PackedFieldExtension, PackedValue, PrimeCharacteristicRing, dot_product,
 };
 use p3_matrix::{
-    dense::{RowMajorMatrix, RowMajorMatrixView},
     Matrix,
+    dense::{RowMajorMatrix, RowMajorMatrixView},
 };
 use p3_maybe_rayon::prelude::*;
 use p3_util::log2_strict_usize;
@@ -527,12 +527,12 @@ impl<F: Field, EF: ExtensionField<F>> SelectStatement<F, EF> {
 mod tests {
     use alloc::vec;
 
-    use p3_koala_bear::KoalaBear;
     use p3_field::{
-        extension::BinomialExtensionField, PackedFieldExtension, PrimeCharacteristicRing,
+        PackedFieldExtension, PrimeCharacteristicRing, extension::BinomialExtensionField,
     };
+    use p3_koala_bear::KoalaBear;
     use proptest::prelude::*;
-    use rand::{rngs::SmallRng, RngExt, SeedableRng};
+    use rand::{RngExt, SeedableRng, rngs::SmallRng};
 
     use super::*;
 

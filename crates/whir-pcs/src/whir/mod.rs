@@ -12,16 +12,16 @@ mod test {
 
     use alloc::vec;
 
-    use p3_koala_bear::{KoalaBear, Poseidon2KoalaBear};
     use p3_challenger::{DuplexChallenger, FieldChallenger};
     use p3_dft::Radix2DFTSmallBatch;
-    use p3_field::{extension::BinomialExtensionField, Field};
+    use p3_field::{Field, extension::BinomialExtensionField};
+    use p3_koala_bear::{KoalaBear, Poseidon2KoalaBear};
     use p3_symmetric::{PaddingFreeSponge, TruncatedPermutation};
-    use rand::{rngs::SmallRng, RngExt, SeedableRng};
+    use rand::{RngExt, SeedableRng, rngs::SmallRng};
 
     use crate::{
         fiat_shamir::domain_separator::DomainSeparator,
-        parameters::{errors::SecurityAssumption, FoldingFactor, ProtocolParameters},
+        parameters::{FoldingFactor, ProtocolParameters, errors::SecurityAssumption},
         poly::{evals::EvaluationsList, multilinear::MultilinearPoint},
         whir::{
             committer::{reader::CommitmentReader, writer::CommitmentWriter},
@@ -246,7 +246,7 @@ mod test {
         use p3_keccak::{Keccak256Hash, KeccakF};
         use p3_koala_bear::KoalaBear;
         use p3_symmetric::{CompressionFunctionFromHasher, PaddingFreeSponge, SerializingHasher};
-        use rand::{rngs::SmallRng, RngExt, SeedableRng};
+        use rand::{RngExt, SeedableRng, rngs::SmallRng};
 
         use super::*;
         use crate::whir::parameters::WhirConfig;

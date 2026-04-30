@@ -76,18 +76,13 @@ fn compute_mu<F: Field>(codeword: &[F], alpha: &[F]) -> F {
 }
 
 /// Precompute the PESAT target η_i = Σ_row eq(β_i, row) · (Az·Bz - Cz)(row).
-fn compute_eta<F: Field>(
-    constraints: &[SparseR1CSConstraint<F>],
-    beta: &[F],
-    z: &[F],
-) -> F {
+fn compute_eta<F: Field>(constraints: &[SparseR1CSConstraint<F>], beta: &[F], z: &[F]) -> F {
     let num_cons = constraints.len();
     let log_m = num_cons.next_power_of_two().trailing_zeros() as usize;
     assert_eq!(beta.len(), log_m);
 
-    let eval_lc = |lc: &[(F, usize)], z: &[F]| -> F {
-        lc.iter().map(|&(coeff, idx)| coeff * z[idx]).sum()
-    };
+    let eval_lc =
+        |lc: &[(F, usize)], z: &[F]| -> F { lc.iter().map(|&(coeff, idx)| coeff * z[idx]).sum() };
 
     let eq_table = compute_eq_table(beta);
     if num_cons >= PARALLEL_THRESHOLD {
@@ -270,8 +265,7 @@ pub fn twin_constraint_sumcheck<F: Field>(
             target_table = folded_target;
         } else {
             for i in 0..half {
-                tau_evals[i] =
-                    tau_evals[2 * i] + r * (tau_evals[2 * i + 1] - tau_evals[2 * i]);
+                tau_evals[i] = tau_evals[2 * i] + r * (tau_evals[2 * i + 1] - tau_evals[2 * i]);
                 target_table[i] =
                     target_table[2 * i] + r * (target_table[2 * i + 1] - target_table[2 * i]);
             }
@@ -337,20 +331,14 @@ mod tests {
     use alloc::vec;
 
     use super::*;
-    use p3_koala_bear::KoalaBear;
     use p3_field::PrimeCharacteristicRing;
+    use p3_koala_bear::KoalaBear;
 
     type F = KoalaBear;
 
     fn make_r1cs_constraints() -> Vec<SparseR1CSConstraint<F>> {
         (0..4)
-            .map(|i| {
-                (
-                    vec![(F::ONE, i)],
-                    vec![(F::ONE, i)],
-                    vec![(F::ONE, i + 4)],
-                )
-            })
+            .map(|i| (vec![(F::ONE, i)], vec![(F::ONE, i)], vec![(F::ONE, i + 4)]))
             .collect()
     }
 
@@ -506,7 +494,12 @@ mod tests {
 
     #[test]
     fn reduce_pairwise_halves_length() {
-        let mut table = vec![F::from_u64(10), F::from_u64(20), F::from_u64(30), F::from_u64(40)];
+        let mut table = vec![
+            F::from_u64(10),
+            F::from_u64(20),
+            F::from_u64(30),
+            F::from_u64(40),
+        ];
         let challenge = F::from_u64(3);
         reduce_pairwise(&mut table, challenge);
 

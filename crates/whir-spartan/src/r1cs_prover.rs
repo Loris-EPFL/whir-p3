@@ -344,8 +344,7 @@ impl<F: Field> R1CSProver<F> {
                     let a_y = eval_sparse_at_point(instance.shape().a(), &rx, &y);
                     let b_y = eval_sparse_at_point(instance.shape().b(), &rx, &y);
                     let c_y = eval_sparse_at_point(instance.shape().c(), &rx, &y);
-                    let lin =
-                        phase2_coeffs.a * a_y + phase2_coeffs.b * b_y + phase2_coeffs.c * c_y;
+                    let lin = phase2_coeffs.a * a_y + phase2_coeffs.b * b_y + phase2_coeffs.c * c_y;
                     sum += z_y * lin;
                 }
                 sum
@@ -822,10 +821,7 @@ where
         } else {
             let mut evals = [F::ZERO; 3];
             for i in 0..half {
-                let e = compute_pair(
-                    &z_table[2 * i..2 * i + 2],
-                    &lin_table[2 * i..2 * i + 2],
-                );
+                let e = compute_pair(&z_table[2 * i..2 * i + 2], &lin_table[2 * i..2 * i + 2]);
                 evals[0] += e[0];
                 evals[1] += e[1];
                 evals[2] += e[2];
@@ -1029,9 +1025,9 @@ mod tests {
     use super::super::r1cs::{R1CSInstance, R1CSShape};
     use alloc::vec;
     use alloc::vec::Vec;
-    use p3_koala_bear::{KoalaBear, Poseidon2KoalaBear};
     use p3_challenger::DuplexChallenger;
     use p3_field::PrimeCharacteristicRing;
+    use p3_koala_bear::{KoalaBear, Poseidon2KoalaBear};
     use rand::SeedableRng;
 
     type F = KoalaBear;
@@ -1588,17 +1584,14 @@ mod tests {
 
         // Table-based proof
         let mut ch1 = Challenger::new(perm.clone());
-        let proof_table = prover.prove::<p3_field::extension::BinomialExtensionField<F, 4>, _>(
-            &instance,
-            &mut ch1,
-        );
+        let proof_table = prover
+            .prove::<p3_field::extension::BinomialExtensionField<F, 4>, _>(&instance, &mut ch1);
 
         // Oracle-based proof (same seed → same challenger state)
         let mut ch2 = Challenger::new(perm);
-        let proof_oracle =
-            prover.prove_oracle::<p3_field::extension::BinomialExtensionField<F, 4>, _>(
-                &instance,
-                &mut ch2,
+        let proof_oracle = prover
+            .prove_oracle::<p3_field::extension::BinomialExtensionField<F, 4>, _>(
+                &instance, &mut ch2,
             );
 
         // Both must produce bit-identical proofs
@@ -1638,5 +1631,4 @@ mod tests {
             proof_oracle.eval_claims.a_matrix_eval,
         );
     }
-
 }

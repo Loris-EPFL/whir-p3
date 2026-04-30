@@ -71,10 +71,10 @@ impl ConstraintPolyEvaluator {
 mod tests {
     use alloc::{vec, vec::Vec};
 
+    use p3_field::{PrimeCharacteristicRing, extension::BinomialExtensionField};
     use p3_koala_bear::KoalaBear;
-    use p3_field::{extension::BinomialExtensionField, PrimeCharacteristicRing};
     use proptest::prelude::*;
-    use rand::{rngs::SmallRng, RngExt, SeedableRng};
+    use rand::{RngExt, SeedableRng, rngs::SmallRng};
 
     use super::*;
     use crate::{

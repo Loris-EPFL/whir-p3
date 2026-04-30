@@ -6,8 +6,8 @@ use p3_commit::{ExtensionMmcs, Mmcs};
 use p3_dft::TwoAdicSubgroupDft;
 use p3_field::{ExtensionField, Field, PackedValue, TwoAdicField};
 use p3_matrix::{
-    dense::{DenseMatrix, RowMajorMatrixView},
     Matrix,
+    dense::{DenseMatrix, RowMajorMatrixView},
 };
 use p3_merkle_tree::{MerkleTree, MerkleTreeMmcs};
 use p3_symmetric::{CryptographicHasher, Hash, PseudoCompressionFunction};
@@ -21,8 +21,8 @@ use crate::{
     poly::{evals::EvaluationsList, multilinear::MultilinearPoint},
     whir::{
         constraints::{
-            statement::{initial::InitialStatement, LinearStatement, SelectStatement},
             Constraint,
+            statement::{LinearStatement, SelectStatement, initial::InitialStatement},
         },
         parameters::SumcheckStrategy,
         proof::{QueryOpening, SumcheckData, WhirProof},

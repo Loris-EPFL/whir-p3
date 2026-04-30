@@ -2,7 +2,7 @@
 # the full pipeline finishes in ~10 seconds.
 
 schemes = [
-    "independent_whir", "pure_warp", "warp_batch", "warp_union",
+    "independent_whir", "pure_warp", "warp_union",
     "quasar_warp", "symphony", "quasar_symphony",
 ]
 microbenches = [

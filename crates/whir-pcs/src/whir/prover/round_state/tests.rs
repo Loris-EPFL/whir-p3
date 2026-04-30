@@ -1,17 +1,17 @@
 use alloc::vec;
 
-use p3_koala_bear::{KoalaBear, Poseidon2KoalaBear};
 use p3_challenger::DuplexChallenger;
 use p3_dft::Radix2DFTSmallBatch;
-use p3_field::{extension::BinomialExtensionField, PrimeCharacteristicRing};
+use p3_field::{PrimeCharacteristicRing, extension::BinomialExtensionField};
+use p3_koala_bear::{KoalaBear, Poseidon2KoalaBear};
 use p3_matrix::dense::DenseMatrix;
 use p3_merkle_tree::MerkleTree;
 use p3_symmetric::{PaddingFreeSponge, TruncatedPermutation};
-use rand::{rngs::SmallRng, SeedableRng};
+use rand::{SeedableRng, rngs::SmallRng};
 
 use crate::{
     fiat_shamir::domain_separator::DomainSeparator,
-    parameters::{errors::SecurityAssumption, FoldingFactor, ProtocolParameters},
+    parameters::{FoldingFactor, ProtocolParameters, errors::SecurityAssumption},
     poly::{evals::EvaluationsList, multilinear::MultilinearPoint},
     whir::{
         committer::writer::CommitmentWriter,

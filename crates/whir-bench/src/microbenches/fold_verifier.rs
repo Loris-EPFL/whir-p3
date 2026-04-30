@@ -6,10 +6,8 @@
 //! bug that let LLVM dead-code-eliminate the whole loop).
 
 use p3_field::{Field, PrimeCharacteristicRing};
-use rand::{rngs::SmallRng, SeedableRng};
-use warp::fold::{
-    derive_fold_challenges, derive_fold_challenges_union, warp_fold_verify_sumcheck,
-};
+use rand::{SeedableRng, rngs::SmallRng};
+use warp::fold::{derive_fold_challenges, derive_fold_challenges_union, warp_fold_verify_sumcheck};
 
 use crate::{
     fixtures::{DIGEST, F, MyChallenger, Perm},
@@ -78,8 +76,9 @@ impl Microbench for FoldVerifier {
                         }
                         initial_target += eq * (mu_vals[idx] + omega * eta_vals[idx]);
                     }
-                    let chals: Vec<F> =
-                        (0..log_l).map(|i| F::from_u64(i as u64 + 1 + iter as u64)).collect();
+                    let chals: Vec<F> = (0..log_l)
+                        .map(|i| F::from_u64(i as u64 + 1 + iter as u64))
+                        .collect();
                     let polys = build_trace(initial_target, &chals);
                     let final_eval = warp_fold_verify_sumcheck(initial_target, &polys, &chals)
                         .expect("sumcheck trace rejected");
@@ -112,8 +111,9 @@ impl Microbench for FoldVerifier {
                         }
                         initial_target += eq * (mu_vals[idx] + omega * eta_vals[idx]);
                     }
-                    let chals: Vec<F> =
-                        (0..log_l).map(|i| F::from_u64(i as u64 + 1 + iter as u64)).collect();
+                    let chals: Vec<F> = (0..log_l)
+                        .map(|i| F::from_u64(i as u64 + 1 + iter as u64))
+                        .collect();
                     let polys = build_trace(initial_target, &chals);
                     let final_eval = warp_fold_verify_sumcheck(initial_target, &polys, &chals)
                         .expect("sumcheck trace rejected");

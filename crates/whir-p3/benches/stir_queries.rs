@@ -1,9 +1,9 @@
 use core::hint::black_box;
 
 use criterion::{Criterion, criterion_group, criterion_main};
-use p3_koala_bear::{KoalaBear, Poseidon2KoalaBear};
 use p3_challenger::DuplexChallenger;
 use p3_field::extension::BinomialExtensionField;
+use p3_koala_bear::{KoalaBear, Poseidon2KoalaBear};
 use rand::{SeedableRng, rngs::SmallRng};
 use whir_p3::{
     fiat_shamir::domain_separator::DomainSeparator, whir::utils::get_challenge_stir_queries,

@@ -220,8 +220,8 @@ impl<F: Field> GPoly<F> {
 mod tests {
     use super::*;
     use alloc::vec;
+    use p3_field::{PrimeCharacteristicRing, extension::BinomialExtensionField};
     use p3_koala_bear::KoalaBear;
-    use p3_field::{extension::BinomialExtensionField, PrimeCharacteristicRing};
 
     type F = KoalaBear;
     type EF = BinomialExtensionField<F, 4>;
@@ -284,7 +284,11 @@ mod tests {
         let (shape, _, z) = make_square_instance();
         for x_idx in 0..shape.num_cons() {
             let f = compute_f_io(&shape, x_idx, &z);
-            assert_eq!(f, F::ZERO, "Satisfied R1CS should yield F_io=0 at row {x_idx}");
+            assert_eq!(
+                f,
+                F::ZERO,
+                "Satisfied R1CS should yield F_io=0 at row {x_idx}"
+            );
         }
     }
 
@@ -296,7 +300,9 @@ mod tests {
         let a_entries = vec![super::super::r1cs::SparseMatEntry::new(0, 0, F::ONE)];
         let b_entries = vec![super::super::r1cs::SparseMatEntry::new(0, 0, F::ONE)];
         let c_entries = vec![super::super::r1cs::SparseMatEntry::new(0, 1, F::ONE)];
-        let shape = R1CSShape::new(num_cons, num_vars, num_inputs, a_entries, b_entries, c_entries);
+        let shape = R1CSShape::new(
+            num_cons, num_vars, num_inputs, a_entries, b_entries, c_entries,
+        );
         let mut witness = vec![F::ZERO; num_vars];
         witness[0] = F::from_u64(3);
         witness[1] = F::from_u64(10); // 3*3 != 10
@@ -338,7 +344,9 @@ mod tests {
         let a_entries = vec![super::super::r1cs::SparseMatEntry::new(0, 0, F::ONE)];
         let b_entries = vec![super::super::r1cs::SparseMatEntry::new(0, 0, F::ONE)];
         let c_entries = vec![super::super::r1cs::SparseMatEntry::new(0, 1, F::ONE)];
-        let shape = R1CSShape::new(num_cons, num_vars, num_inputs, a_entries, b_entries, c_entries);
+        let shape = R1CSShape::new(
+            num_cons, num_vars, num_inputs, a_entries, b_entries, c_entries,
+        );
         let mut witness = vec![F::ZERO; num_vars];
         witness[0] = F::from_u64(3);
         witness[1] = F::from_u64(10);

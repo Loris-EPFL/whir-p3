@@ -58,13 +58,55 @@ pub struct MicrobenchAxes {
     /// Number of terminal-WHIR iterations averaged per log_size.
     #[serde(default = "default_terminal_repeats")]
     pub terminal_repeats: u32,
+    /// Instance counts to sweep for the `warp_vs_whir` microbench.
+    #[serde(default = "default_n_instances")]
+    pub n_instances: Vec<usize>,
+    /// Witness/constraint log sizes to sweep for the `warp_vs_whir`
+    /// microbench. Each value generates one set of rows (one per
+    /// `n_instances`), so the headline panel shows scaling in both axes.
+    #[serde(
+        default = "default_aggregate_log_n",
+        deserialize_with = "deser_log_n_axis"
+    )]
+    pub aggregate_log_n: Vec<usize>,
 }
 
-fn default_arities() -> Vec<usize> { vec![2, 4, 8, 16, 32, 64] }
-fn default_log_m() -> usize { 16 }
-fn default_log_n() -> usize { 17 }
-fn default_log_sizes() -> Vec<usize> { vec![14, 15, 16] }
-fn default_terminal_repeats() -> u32 { 3 }
+/// Accept either a scalar (legacy) or a list for `aggregate_log_n`.
+fn deser_log_n_axis<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<usize>, D::Error> {
+    use serde::Deserialize;
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Either {
+        Scalar(usize),
+        List(Vec<usize>),
+    }
+    Ok(match Either::deserialize(d)? {
+        Either::Scalar(v) => vec![v],
+        Either::List(v) => v,
+    })
+}
+
+fn default_arities() -> Vec<usize> {
+    vec![2, 4, 8, 16, 32, 64]
+}
+fn default_log_m() -> usize {
+    16
+}
+fn default_log_n() -> usize {
+    17
+}
+fn default_log_sizes() -> Vec<usize> {
+    vec![14, 15, 16]
+}
+fn default_terminal_repeats() -> u32 {
+    3
+}
+fn default_n_instances() -> Vec<usize> {
+    vec![1, 2, 4, 8, 16, 32]
+}
+fn default_aggregate_log_n() -> Vec<usize> {
+    vec![14]
+}
 
 /// A microbench runs a single measurement type against a shared axis config
 /// and emits one or more rows.

@@ -1,21 +1,21 @@
 use alloc::{vec, vec::Vec};
 
-use p3_koala_bear::{KoalaBear, Poseidon2KoalaBear};
 use p3_challenger::{DuplexChallenger, FieldChallenger, GrindingChallenger};
-use p3_field::{extension::BinomialExtensionField, PrimeCharacteristicRing, TwoAdicField};
+use p3_field::{PrimeCharacteristicRing, TwoAdicField, extension::BinomialExtensionField};
+use p3_koala_bear::{KoalaBear, Poseidon2KoalaBear};
 use p3_symmetric::{PaddingFreeSponge, TruncatedPermutation};
-use rand::{rngs::SmallRng, RngExt, SeedableRng};
+use rand::{RngExt, SeedableRng, rngs::SmallRng};
 
 use crate::{
     fiat_shamir::domain_separator::DomainSeparator,
-    parameters::{errors::SecurityAssumption, FoldingFactor, ProtocolParameters},
+    parameters::{FoldingFactor, ProtocolParameters, errors::SecurityAssumption},
     poly::{evals::EvaluationsList, multilinear::MultilinearPoint},
     sumcheck::sumcheck_prover::Sumcheck,
     whir::{
         constraints::{
-            evaluator::ConstraintPolyEvaluator,
-            statement::{initial::InitialStatement, EqStatement, LinearStatement, SelectStatement},
             Constraint,
+            evaluator::ConstraintPolyEvaluator,
+            statement::{EqStatement, LinearStatement, SelectStatement, initial::InitialStatement},
         },
         parameters::SumcheckStrategy,
         proof::{SumcheckData, WhirProof},

@@ -29,15 +29,13 @@ use crate::{
         scheme::{LinearizedAccumulationProver, LinearizedAccumulationVerifier},
     },
     circuit::{
-        builder::CircuitBuilder,
-        poseidon2::Poseidon2CircuitConfig,
-        sponge::CircuitChallenger,
+        builder::CircuitBuilder, poseidon2::Poseidon2CircuitConfig, sponge::CircuitChallenger,
     },
     fiat_shamir::errors::FiatShamirError,
     ivc::verifier_circuit::{AccumulationVerifierWitness, synthesize_unified_ivc_circuit},
     spartan::{
         r1cs::{R1CSInstance, R1CSShape},
-        r1cs_prover::{R1CSProver},
+        r1cs_prover::R1CSProver,
     },
     whir::parameters::WhirConfig,
 };
@@ -108,7 +106,9 @@ where
         W: PackedValue<Value = W> + Eq + Send + Sync + Copy + Default,
     {
         // Prove the first instance with Spartan
-        let spartan_proof = self.spartan_prover.prove::<EF, _>(instance, spartan_challenger);
+        let spartan_proof = self
+            .spartan_prover
+            .prove::<EF, _>(instance, spartan_challenger);
         let witness_poly = self.spartan_prover.prepare_witness(instance);
 
         // Initialize accumulator
@@ -179,8 +179,9 @@ where
             "unified init circuit does not satisfy R1CS",
         );
 
-        let unified_proof =
-            self.spartan_prover.prove::<EF, _>(&unified_instance, spartan_challenger);
+        let unified_proof = self
+            .spartan_prover
+            .prove::<EF, _>(&unified_instance, spartan_challenger);
         let unified_witness = self.spartan_prover.prepare_witness(&unified_instance);
 
         let accumulator = initialize_accumulator_from_spartan::<F, EF, W, DIGEST_ELEMS>(
@@ -231,7 +232,9 @@ where
         [W; DIGEST_ELEMS]: serde::Serialize + for<'de> serde::Deserialize<'de>,
     {
         // 1. Prove the new instance with Spartan
-        let spartan_proof = self.spartan_prover.prove::<EF, _>(instance, spartan_challenger);
+        let spartan_proof = self
+            .spartan_prover
+            .prove::<EF, _>(instance, spartan_challenger);
         let witness_poly = self.spartan_prover.prepare_witness(instance);
 
         // 2. Linearize into a fresh accumulator
@@ -367,8 +370,9 @@ where
         );
 
         // Step 3: Prove the unified circuit with Spartan
-        let unified_proof =
-            self.spartan_prover.prove::<EF, _>(&unified_instance, spartan_challenger);
+        let unified_proof = self
+            .spartan_prover
+            .prove::<EF, _>(&unified_instance, spartan_challenger);
         let unified_witness = self.spartan_prover.prepare_witness(&unified_instance);
 
         // Step 4: Linearize into an accumulator
@@ -388,14 +392,13 @@ where
             .map(|a| a.public_instance.clone())
             .collect();
 
-        let (folded, fold_proof) =
-            LinearizedAccumulationProver::new(recursive_whir_config)
-                .accumulate::<P, W, PW, Dft, DIGEST_ELEMS>(
-                    dft,
-                    accumulation_challenger,
-                    &accumulators,
-                    self.num_shift_queries,
-                )?;
+        let (folded, fold_proof) = LinearizedAccumulationProver::new(recursive_whir_config)
+            .accumulate::<P, W, PW, Dft, DIGEST_ELEMS>(
+            dft,
+            accumulation_challenger,
+            &accumulators,
+            self.num_shift_queries,
+        )?;
         debug_assert!(decide_linearized_accumulator(&folded));
 
         Ok(IVCState {
@@ -454,13 +457,12 @@ where
         if let (Some(proof), Some(prev_instances)) =
             (&state.last_accumulation_proof, &state.prev_instances)
         {
-            let _verified_instance =
-                LinearizedAccumulationVerifier::new(self.whir_config)
-                    .verify::<P, W, PW, DIGEST_ELEMS>(
-                        accumulation_challenger,
-                        prev_instances,
-                        proof,
-                    )?;
+            let _verified_instance = LinearizedAccumulationVerifier::new(self.whir_config)
+                .verify::<P, W, PW, DIGEST_ELEMS>(
+                accumulation_challenger,
+                prev_instances,
+                proof,
+            )?;
         }
 
         Ok(())
@@ -498,18 +500,18 @@ where
 mod tests {
     use alloc::vec;
 
-    use p3_koala_bear::{KoalaBear, Poseidon2KoalaBear};
     use p3_challenger::DuplexChallenger;
     use p3_dft::Radix2DFTSmallBatch;
-    use p3_field::{extension::BinomialExtensionField, PrimeCharacteristicRing};
+    use p3_field::{PrimeCharacteristicRing, extension::BinomialExtensionField};
+    use p3_koala_bear::{KoalaBear, Poseidon2KoalaBear};
     use p3_symmetric::{PaddingFreeSponge, TruncatedPermutation};
-    use rand::{rngs::SmallRng, SeedableRng};
+    use rand::{SeedableRng, rngs::SmallRng};
 
     use super::*;
     use crate::{
         fiat_shamir::domain_separator::DomainSeparator,
         ivc::verifier_circuit::synthesize_unified_ivc_circuit,
-        parameters::{errors::SecurityAssumption, FoldingFactor, ProtocolParameters},
+        parameters::{FoldingFactor, ProtocolParameters, errors::SecurityAssumption},
         spartan::r1cs::SparseMatEntry,
     };
 
@@ -522,7 +524,9 @@ mod tests {
 
     fn make_square_shape() -> R1CSShape<F> {
         R1CSShape::new(
-            4, 4, 1,
+            4,
+            4,
+            1,
             vec![SparseMatEntry::new(0, 0, F::ONE)],
             vec![SparseMatEntry::new(0, 0, F::ONE)],
             vec![SparseMatEntry::new(0, 1, F::ONE)],
@@ -571,22 +575,15 @@ mod tests {
         let config = make_whir_config();
         let dft = Radix2DFTSmallBatch::<F>::default();
 
-        let ivc_prover = IVCProver::<EF, F, MyHash, MyCompress, MyChallenger>::new(
-            &config,
-            EF::from_u64(3),
-            2,
-        );
+        let ivc_prover =
+            IVCProver::<EF, F, MyHash, MyCompress, MyChallenger>::new(&config, EF::from_u64(3), 2);
 
         // Step 0: Initialize with first instance (3^2 = 9)
         let instance0 = make_square_instance(&shape, 3);
         let mut spartan_chal0 =
             MyChallenger::new(Perm::new_from_rng_128(&mut SmallRng::seed_from_u64(1)));
-        let state0 = ivc_prover.init::<F, 8>(
-            &shape,
-            &instance0,
-            &mut spartan_chal0,
-            vec![F::from_u64(9)],
-        );
+        let state0 =
+            ivc_prover.init::<F, 8>(&shape, &instance0, &mut spartan_chal0, vec![F::from_u64(9)]);
         assert_eq!(state0.step, 1);
 
         // Step 1: Fold in second instance (5^2 = 25)
@@ -627,27 +624,17 @@ mod tests {
         let config = make_whir_config();
         let dft = Radix2DFTSmallBatch::<F>::default();
 
-        let ivc_prover = IVCProver::<EF, F, MyHash, MyCompress, MyChallenger>::new(
-            &config,
-            EF::from_u64(3),
-            2,
-        );
+        let ivc_prover =
+            IVCProver::<EF, F, MyHash, MyCompress, MyChallenger>::new(&config, EF::from_u64(3), 2);
 
         // Step 0: 3^2 = 9
         let instance0 = make_square_instance(&shape, 3);
-        let mut chal0 =
-            MyChallenger::new(Perm::new_from_rng_128(&mut SmallRng::seed_from_u64(10)));
-        let state0 = ivc_prover.init::<F, 8>(
-            &shape,
-            &instance0,
-            &mut chal0,
-            vec![F::from_u64(9)],
-        );
+        let mut chal0 = MyChallenger::new(Perm::new_from_rng_128(&mut SmallRng::seed_from_u64(10)));
+        let state0 = ivc_prover.init::<F, 8>(&shape, &instance0, &mut chal0, vec![F::from_u64(9)]);
 
         // Step 1: 5^2 = 25
         let instance1 = make_square_instance(&shape, 5);
-        let mut chal1 =
-            MyChallenger::new(Perm::new_from_rng_128(&mut SmallRng::seed_from_u64(20)));
+        let mut chal1 = MyChallenger::new(Perm::new_from_rng_128(&mut SmallRng::seed_from_u64(20)));
         let mut acc_chal1 = seed_challenger(&config);
         let state1 = ivc_prover
             .prove_step::<_, F, <F as Field>::Packing, _, 8>(
@@ -663,8 +650,7 @@ mod tests {
 
         // Step 2: 7^2 = 49
         let instance2 = make_square_instance(&shape, 7);
-        let mut chal2 =
-            MyChallenger::new(Perm::new_from_rng_128(&mut SmallRng::seed_from_u64(30)));
+        let mut chal2 = MyChallenger::new(Perm::new_from_rng_128(&mut SmallRng::seed_from_u64(30)));
         let mut acc_chal2 = seed_challenger(&config);
         let state2 = ivc_prover
             .prove_step::<_, F, <F as Field>::Packing, _, 8>(
@@ -693,12 +679,7 @@ mod tests {
             .unwrap();
 
         let mut decider_verify_chal = seed_challenger(&config);
-        let result = decider.verify::<
-            <F as Field>::Packing,
-            F,
-            <F as Field>::Packing,
-            8,
-        >(
+        let result = decider.verify::<<F as Field>::Packing, F, <F as Field>::Packing, 8>(
             &mut decider_verify_chal,
             &state2.accumulator.public_instance,
             &decider_proof,
@@ -732,16 +713,16 @@ mod tests {
             WhirConfig::<EF, F, MyHash, MyCompress, MyChallenger>::new(15, params)
         };
 
-        let ivc_prover = IVCProver::<EF, F, MyHash, MyCompress, MyChallenger>::new(
-            &config,
-            EF::from_u64(3),
-            2,
-        );
+        let ivc_prover =
+            IVCProver::<EF, F, MyHash, MyCompress, MyChallenger>::new(&config, EF::from_u64(3), 2);
 
         let acc_perm = Perm::new_from_rng_128(&mut SmallRng::seed_from_u64(99));
         let poseidon_perm = Perm::new_from_rng_128(&mut SmallRng::seed_from_u64(99));
         let poseidon_config = crate::circuit::poseidon2::Poseidon2CircuitConfig::<F, 16>::from_rng(
-            8, 20, 3, &mut SmallRng::seed_from_u64(99),
+            8,
+            20,
+            3,
+            &mut SmallRng::seed_from_u64(99),
         );
         let step = crate::ivc::step::TrivialStepCircuit::new(1);
 
@@ -763,7 +744,10 @@ mod tests {
             let poseidon_perm_probe = Perm::new_from_rng_128(&mut SmallRng::seed_from_u64(99));
             let poseidon_config_probe =
                 crate::circuit::poseidon2::Poseidon2CircuitConfig::<F, 16>::from_rng(
-                    8, 20, 3, &mut SmallRng::seed_from_u64(99),
+                    8,
+                    20,
+                    3,
+                    &mut SmallRng::seed_from_u64(99),
                 );
             let mut probe_builder = CircuitBuilder::<F>::new();
             let mut probe_challenger = CircuitChallenger::<F, 16, 8>::new(&mut probe_builder);
@@ -789,8 +773,7 @@ mod tests {
         };
 
         // Step 0: Initialize with unified circuit so accumulator has the right poly size
-        let mut chal0 =
-            MyChallenger::new(Perm::new_from_rng_128(&mut SmallRng::seed_from_u64(10)));
+        let mut chal0 = MyChallenger::new(Perm::new_from_rng_128(&mut SmallRng::seed_from_u64(10)));
         let state0 = ivc_prover
             .init_unified::<
                 <F as Field>::Packing,
@@ -839,17 +822,29 @@ mod tests {
             Some(target_witness),
         );
         let (shape1, instance1) = builder1.build();
-        let proof1 = ivc_prover.spartan_prover.prove::<EF, _>(&instance1, &mut spartan_chal1);
+        let proof1 = ivc_prover
+            .spartan_prover
+            .prove::<EF, _>(&instance1, &mut spartan_chal1);
         let witness1 = ivc_prover.spartan_prover.prepare_witness(&instance1);
         let acc1 = initialize_accumulator_from_spartan::<F, EF, F, 8>(
-            &shape1, &proof1, witness1, [F::ZERO; 8], EF::from_u64(3),
+            &shape1,
+            &proof1,
+            witness1,
+            [F::ZERO; 8],
+            EF::from_u64(3),
         );
 
         let accumulators1 = [state0.accumulator.clone(), acc1];
-        let instances1: Vec<_> = accumulators1.iter().map(|a| a.public_instance.clone()).collect();
+        let instances1: Vec<_> = accumulators1
+            .iter()
+            .map(|a| a.public_instance.clone())
+            .collect();
         let (folded1, fold_proof1) = LinearizedAccumulationProver::new(&recursive_config)
             .accumulate::<_, F, <F as Field>::Packing, _, 8>(
-                &dft, &mut acc_chal1, &accumulators1, 2,
+                &dft,
+                &mut acc_chal1,
+                &accumulators1,
+                2,
             )
             .unwrap();
         let state1 = IVCState {
@@ -910,7 +905,10 @@ mod tests {
             &state2.accumulator.public_instance,
             &decider_proof,
         );
-        assert!(result.is_ok(), "decider failed on recursive IVC: {result:?}");
+        assert!(
+            result.is_ok(),
+            "decider failed on recursive IVC: {result:?}"
+        );
     }
 
     /// Fast test: verifies unified circuit sizing without Spartan proving.
@@ -922,7 +920,10 @@ mod tests {
 
         let poseidon_perm = Perm::new_from_rng_128(&mut SmallRng::seed_from_u64(99));
         let poseidon_config = crate::circuit::poseidon2::Poseidon2CircuitConfig::<F, 16>::from_rng(
-            8, 20, 3, &mut SmallRng::seed_from_u64(99),
+            8,
+            20,
+            3,
+            &mut SmallRng::seed_from_u64(99),
         );
         let step = crate::ivc::step::TrivialStepCircuit::new(1);
 
@@ -942,10 +943,22 @@ mod tests {
         let mut builder_with = CircuitBuilder::<F>::new();
         let mut chal_with = CircuitChallenger::<F, 16, 8>::new(&mut builder_with);
         let _ = synthesize_unified_ivc_circuit::<
-            F, GenericPoseidon2LinearLayersKoalaBear, _, _, 16, 8,
+            F,
+            GenericPoseidon2LinearLayersKoalaBear,
+            _,
+            _,
+            16,
+            8,
         >(
-            &mut builder_with, &mut chal_with, &poseidon_config, &poseidon_perm,
-            &step, &[F::ZERO], Some(&dummy_witness), F::from_u64(3), None,
+            &mut builder_with,
+            &mut chal_with,
+            &poseidon_config,
+            &poseidon_perm,
+            &step,
+            &[F::ZERO],
+            Some(&dummy_witness),
+            F::from_u64(3),
+            None,
         );
         let target = builder_with.num_witness_vars();
 
@@ -953,10 +966,22 @@ mod tests {
         let mut builder_without = CircuitBuilder::<F>::new();
         let mut chal_without = CircuitChallenger::<F, 16, 8>::new(&mut builder_without);
         let _ = synthesize_unified_ivc_circuit::<
-            F, GenericPoseidon2LinearLayersKoalaBear, _, _, 16, 8,
+            F,
+            GenericPoseidon2LinearLayersKoalaBear,
+            _,
+            _,
+            16,
+            8,
         >(
-            &mut builder_without, &mut chal_without, &poseidon_config, &poseidon_perm,
-            &step, &[F::ZERO], None, F::from_u64(3), Some(target),
+            &mut builder_without,
+            &mut chal_without,
+            &poseidon_config,
+            &poseidon_perm,
+            &step,
+            &[F::ZERO],
+            None,
+            F::from_u64(3),
+            Some(target),
         );
 
         let (shape_with, _) = builder_with.build();
@@ -972,6 +997,9 @@ mod tests {
         );
 
         // The padded circuit should satisfy R1CS
-        assert!(instance_without.verify(), "padded circuit R1CS not satisfied");
+        assert!(
+            instance_without.verify(),
+            "padded circuit R1CS not satisfied"
+        );
     }
 }

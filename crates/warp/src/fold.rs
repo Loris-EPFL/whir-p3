@@ -33,7 +33,10 @@ pub struct RSEncodingConfig {
 
 impl RSEncodingConfig {
     pub fn new(folding_factor: usize, log_inv_rate: usize) -> Self {
-        Self { folding_factor, log_inv_rate }
+        Self {
+            folding_factor,
+            log_inv_rate,
+        }
     }
 }
 
@@ -111,8 +114,10 @@ pub fn materialize_shift_query_proofs<F, H, C, const DIGEST_ELEMS: usize>(
     F: p3_field::TwoAdicField,
     <F as p3_field::Field>::Packing: Eq + Send + Sync,
     H: p3_symmetric::CryptographicHasher<F, [F; DIGEST_ELEMS]>
-        + p3_symmetric::CryptographicHasher<<F as p3_field::Field>::Packing, [<F as p3_field::Field>::Packing; DIGEST_ELEMS]>
-        + Sync
+        + p3_symmetric::CryptographicHasher<
+            <F as p3_field::Field>::Packing,
+            [<F as p3_field::Field>::Packing; DIGEST_ELEMS],
+        > + Sync
         + Clone,
     C: p3_symmetric::PseudoCompressionFunction<[F; DIGEST_ELEMS], 2>
         + p3_symmetric::PseudoCompressionFunction<[<F as p3_field::Field>::Packing; DIGEST_ELEMS], 2>
@@ -130,8 +135,19 @@ pub fn materialize_shift_query_proofs<F, H, C, const DIGEST_ELEMS: usize>(
         .map(|cw| {
             let cw_evals = crate::poly::evals::EvaluationsList::new(cw.clone());
             let (_root, tree) = crate::encoding::merkle_commit_codeword::<
-                F, F, <F as p3_field::Field>::Packing, <F as p3_field::Field>::Packing, H, C, DIGEST_ELEMS,
-            >(&cw_evals, folding_factor, merkle_hash.clone(), merkle_compress.clone());
+                F,
+                F,
+                <F as p3_field::Field>::Packing,
+                <F as p3_field::Field>::Packing,
+                H,
+                C,
+                DIGEST_ELEMS,
+            >(
+                &cw_evals,
+                folding_factor,
+                merkle_hash.clone(),
+                merkle_compress.clone(),
+            );
             tree
         })
         .collect();
@@ -141,8 +157,19 @@ pub fn materialize_shift_query_proofs<F, H, C, const DIGEST_ELEMS: usize>(
         let mut paths = Vec::with_capacity(trees.len());
         for tree in &trees {
             let (_row_values, proof) = crate::encoding::merkle_open_at::<
-                F, F, <F as p3_field::Field>::Packing, <F as p3_field::Field>::Packing, H, C, DIGEST_ELEMS,
-            >(tree, sq.position, merkle_hash.clone(), merkle_compress.clone());
+                F,
+                F,
+                <F as p3_field::Field>::Packing,
+                <F as p3_field::Field>::Packing,
+                H,
+                C,
+                DIGEST_ELEMS,
+            >(
+                tree,
+                sq.position,
+                merkle_hash.clone(),
+                merkle_compress.clone(),
+            );
             // proof: Vec<[F; DIGEST_ELEMS]> — directly compatible with auth_paths
             paths.push(proof);
         }
@@ -169,8 +196,10 @@ pub fn open_shift_queries_from_trees<F, H, C, const DIGEST_ELEMS: usize>(
     F: p3_field::TwoAdicField,
     <F as p3_field::Field>::Packing: Eq + Send + Sync,
     H: p3_symmetric::CryptographicHasher<F, [F; DIGEST_ELEMS]>
-        + p3_symmetric::CryptographicHasher<<F as p3_field::Field>::Packing, [<F as p3_field::Field>::Packing; DIGEST_ELEMS]>
-        + Sync
+        + p3_symmetric::CryptographicHasher<
+            <F as p3_field::Field>::Packing,
+            [<F as p3_field::Field>::Packing; DIGEST_ELEMS],
+        > + Sync
         + Clone,
     C: p3_symmetric::PseudoCompressionFunction<[F; DIGEST_ELEMS], 2>
         + p3_symmetric::PseudoCompressionFunction<[<F as p3_field::Field>::Packing; DIGEST_ELEMS], 2>
@@ -182,8 +211,19 @@ pub fn open_shift_queries_from_trees<F, H, C, const DIGEST_ELEMS: usize>(
         let mut paths = Vec::with_capacity(trees.len());
         for tree in trees {
             let (_row_values, proof) = crate::encoding::merkle_open_at::<
-                F, F, <F as p3_field::Field>::Packing, <F as p3_field::Field>::Packing, H, C, DIGEST_ELEMS,
-            >(tree, sq.position, merkle_hash.clone(), merkle_compress.clone());
+                F,
+                F,
+                <F as p3_field::Field>::Packing,
+                <F as p3_field::Field>::Packing,
+                H,
+                C,
+                DIGEST_ELEMS,
+            >(
+                tree,
+                sq.position,
+                merkle_hash.clone(),
+                merkle_compress.clone(),
+            );
             paths.push(proof);
         }
         sq.auth_paths = paths;
@@ -204,15 +244,22 @@ pub fn open_shift_queries_from_trees<F, H, C, const DIGEST_ELEMS: usize>(
 /// row from the per-codeword `input_values` and verifies against the union root.
 pub fn open_shift_queries_from_union_tree<F, H, C, const DIGEST_ELEMS: usize>(
     shift_queries: &mut [ShiftQueryOpening<F, DIGEST_ELEMS>],
-    union_tree: &p3_merkle_tree::MerkleTree<F, F, p3_matrix::dense::RowMajorMatrix<F>, DIGEST_ELEMS>,
+    union_tree: &p3_merkle_tree::MerkleTree<
+        F,
+        F,
+        p3_matrix::dense::RowMajorMatrix<F>,
+        DIGEST_ELEMS,
+    >,
     merkle_hash: &H,
     merkle_compress: &C,
 ) where
     F: p3_field::TwoAdicField,
     <F as p3_field::Field>::Packing: Eq + Send + Sync,
     H: p3_symmetric::CryptographicHasher<F, [F; DIGEST_ELEMS]>
-        + p3_symmetric::CryptographicHasher<<F as p3_field::Field>::Packing, [<F as p3_field::Field>::Packing; DIGEST_ELEMS]>
-        + Sync
+        + p3_symmetric::CryptographicHasher<
+            <F as p3_field::Field>::Packing,
+            [<F as p3_field::Field>::Packing; DIGEST_ELEMS],
+        > + Sync
         + Clone,
     C: p3_symmetric::PseudoCompressionFunction<[F; DIGEST_ELEMS], 2>
         + p3_symmetric::PseudoCompressionFunction<[<F as p3_field::Field>::Packing; DIGEST_ELEMS], 2>
@@ -223,8 +270,19 @@ pub fn open_shift_queries_from_union_tree<F, H, C, const DIGEST_ELEMS: usize>(
     for sq in shift_queries.iter_mut() {
         // Open the union tree at the query position — one opening covers all ℓ inputs
         let (_union_row, union_proof) = crate::encoding::merkle_open_at::<
-            F, F, <F as p3_field::Field>::Packing, <F as p3_field::Field>::Packing, H, C, DIGEST_ELEMS,
-        >(union_tree, sq.position, merkle_hash.clone(), merkle_compress.clone());
+            F,
+            F,
+            <F as p3_field::Field>::Packing,
+            <F as p3_field::Field>::Packing,
+            H,
+            C,
+            DIGEST_ELEMS,
+        >(
+            union_tree,
+            sq.position,
+            merkle_hash.clone(),
+            merkle_compress.clone(),
+        );
         // Store as single entry: 1 auth path for the union tree
         sq.auth_paths = vec![union_proof];
     }
@@ -280,6 +338,25 @@ pub struct WarpFoldResult<F: Field, const DIGEST_ELEMS: usize = 8> {
     pub eval_batch_round_polys: Vec<Vec<F>>,
     /// Evaluation batching sumcheck challenges.
     pub eval_batch_challenges: Vec<F>,
+    /// Batching challenge ρ sampled from FS via
+    /// `transcript_round(&[F::from_usize(2000)])` — the random linear
+    /// combination of the eval_claims into the initial batched target.
+    ///
+    /// Stored so the CP-SNARK verifier can re-derive it (via FS replay)
+    /// and check consistency with the stored `eval_batch_round_polys[0]`.
+    pub rho: F,
+    /// Full Quasar multi-cast transcript — populated when the prover ran
+    /// with a union commitment function (i.e. [`warp_fold_prove_rs_union`])
+    /// AND the `enable_quasar_multicast` path in the config.
+    ///
+    /// Contains two eval-batching-sumcheck proofs (one on the union codeword,
+    /// one on the folded codeword) that jointly bind `w̃∪(τ, r_x) = f(r_x)`
+    /// at a random field point, discharging the τ-collapse in O(log ℓ + log n)
+    /// work on the verifier side (paper §4.2).
+    ///
+    /// `None` for non-union folds and for union folds that did not opt into
+    /// the multi-cast reduction (backward-compatible).
+    pub quasar_multicast: Option<crate::quasar_multicast::QuasarMulticastProof<F>>,
     /// Per-phase timing breakdown.
     pub timings: WarpFoldTimings,
 }
@@ -307,7 +384,10 @@ pub struct WarpFoldedInstance<F: Field> {
 ///
 /// This helper reverses the point so that fold-produced points (eval_point,
 /// pesat_tau) can be correctly evaluated via `evaluate_hypercube_base`.
-pub fn evaluate_mle_lsb<F: Field>(codeword: &crate::poly::evals::EvaluationsList<F>, lsb_point: &[F]) -> F {
+pub fn evaluate_mle_lsb<F: Field>(
+    codeword: &crate::poly::evals::EvaluationsList<F>,
+    lsb_point: &[F],
+) -> F {
     let reversed: Vec<F> = lsb_point.iter().rev().copied().collect();
     codeword.evaluate_hypercube_base(&crate::poly::multilinear::MultilinearPoint::new(reversed))
 }
@@ -316,18 +396,17 @@ pub fn evaluate_mle_lsb<F: Field>(codeword: &crate::poly::evals::EvaluationsList
 ///
 /// Computes η = Σ_i eq(tau, i) · (Az_i · Bz_i - Cz_i) where the sum is
 /// over constraint rows bundled by the eq polynomial at tau.
-pub fn evaluate_bundled_r1cs<F: Field>(
-    shape: &R1CSShape<F>,
-    tau: &[F],
-    z: &[F],
-) -> F {
+pub fn evaluate_bundled_r1cs<F: Field>(shape: &R1CSShape<F>, tau: &[F], z: &[F]) -> F {
     let num_cons = shape.num_cons();
     let num_rows = num_cons.next_power_of_two();
+    let num_cols = 1usize << shape.num_poly_vars_y();
+    let mut z_padded = z.to_vec();
+    z_padded.resize(num_cols, F::ZERO);
 
     // Compute Az, Bz, Cz
-    let az = shape.a().multiply_vec(num_rows, z.len(), z);
-    let bz = shape.b().multiply_vec(num_rows, z.len(), z);
-    let cz = shape.c().multiply_vec(num_rows, z.len(), z);
+    let az = shape.a().multiply_vec(num_rows, num_cols, &z_padded);
+    let bz = shape.b().multiply_vec(num_rows, num_cols, &z_padded);
+    let cz = shape.c().multiply_vec(num_rows, num_cols, &z_padded);
 
     // Bundle by eq(tau, i)
     let mut eta = F::ZERO;
@@ -629,14 +708,24 @@ pub fn warp_fold_prove<F: Field>(
     debug_assert_eq!(alphas.len(), 1);
     debug_assert_eq!(betas.len(), 1);
 
-    let folded_codeword = codewords.pop().expect("fold must produce exactly one codeword");
-    let folded_z = witnesses.pop().expect("fold must produce exactly one witness");
+    let folded_codeword = codewords
+        .pop()
+        .expect("fold must produce exactly one codeword");
+    let folded_z = witnesses
+        .pop()
+        .expect("fold must produce exactly one witness");
     let folded_alpha = alphas.pop().expect("fold must produce exactly one alpha");
     let folded_beta_tau = betas.pop().expect("fold must produce exactly one beta_tau");
 
     // Split z back into (x, w)
     let num_public = fresh_instances[0].public_input.len();
-    let (folded_x, folded_w) = folded_z.split_at(num_public);
+    let witness_len = acc
+        .witness
+        .witness
+        .len()
+        .min(folded_z.len().saturating_sub(num_public));
+    let folded_x = &folded_z[..num_public];
+    let folded_w = &folded_z[num_public..num_public + witness_len];
 
     // Evaluate bundled R1CS at the folded point
     let eta = evaluate_bundled_r1cs(shape, &folded_beta_tau, &folded_z);
@@ -704,6 +793,8 @@ pub fn warp_fold_prove<F: Field>(
         new_eval_claim: F::ZERO,
         eval_batch_round_polys: vec![],
         eval_batch_challenges: vec![],
+        rho: F::ZERO,
+        quasar_multicast: None,
         timings: WarpFoldTimings::default(),
     }
 }
@@ -731,8 +822,15 @@ where
     Dft: TwoAdicSubgroupDft<F>,
 {
     warp_fold_prove_rs_inner(
-        shape, fresh_instances, acc, omega, tau_challenges, fresh_betas,
-        rs_config, dft, &mut transcript_round,
+        shape,
+        fresh_instances,
+        acc,
+        omega,
+        tau_challenges,
+        fresh_betas,
+        rs_config,
+        dft,
+        &mut transcript_round,
         None::<fn(&crate::poly::evals::EvaluationsList<F>, usize) -> [F; 8]>,
         None::<fn(&[F], usize) -> [F; 8]>,
     )
@@ -760,8 +858,16 @@ where
     Dft: TwoAdicSubgroupDft<F>,
 {
     warp_fold_prove_rs_inner(
-        shape, fresh_instances, acc, omega, tau_challenges, fresh_betas,
-        rs_config, dft, &mut transcript_round, Some(commit_fn),
+        shape,
+        fresh_instances,
+        acc,
+        omega,
+        tau_challenges,
+        fresh_betas,
+        rs_config,
+        dft,
+        &mut transcript_round,
+        Some(commit_fn),
         None::<fn(&[F], usize) -> [F; 8]>,
     )
 }
@@ -801,7 +907,11 @@ fn compute_eq_table_generic<F: Field>(tau: &[F]) -> Vec<F> {
 /// where B(x) = Σ_k ρ^k · eq(p_k, x) and T = Σ_k ρ^k · v_k.
 ///
 /// After the sumcheck, `f̃(α) = μ` where α is the sumcheck challenge point.
-fn evaluation_batching_sumcheck<F: Field>(
+///
+/// Exposed publicly so callers (e.g. the Quasar multicast module) can reuse
+/// the same batched-sumcheck machinery against different codewords (e.g. a
+/// union codeword over `log ℓ + log n` variables).
+pub fn evaluation_batching_sumcheck<F: Field>(
     codeword: &[F],
     eval_claims: &[(Vec<F>, F)], // (point, value) pairs
     rho: F,
@@ -851,7 +961,10 @@ fn evaluation_batching_sumcheck<F: Field>(
     #[cfg(debug_assertions)]
     {
         let check: F = (0..n).map(|i| b_table[i] * codeword[i]).sum();
-        assert_eq!(check, initial_claim, "eval batching: initial claim mismatch");
+        assert_eq!(
+            check, initial_claim,
+            "eval batching: initial claim mismatch"
+        );
     }
 
     // Table-based degree-2 sumcheck: Σ_x B(x) · f(x) = T
@@ -884,7 +997,8 @@ fn evaluation_batching_sumcheck<F: Field>(
         }
 
         assert_eq!(
-            evals[0] + evals[1], current_claim,
+            evals[0] + evals[1],
+            current_claim,
             "eval batching sumcheck: round claim mismatch"
         );
 
@@ -947,8 +1061,17 @@ where
     Dft: TwoAdicSubgroupDft<F>,
 {
     warp_fold_prove_rs_inner(
-        shape, fresh_instances, acc, omega, tau_challenges, fresh_betas,
-        rs_config, dft, &mut transcript_round, Some(commit_fn), Some(union_commit_fn),
+        shape,
+        fresh_instances,
+        acc,
+        omega,
+        tau_challenges,
+        fresh_betas,
+        rs_config,
+        dft,
+        &mut transcript_round,
+        Some(commit_fn),
+        Some(union_commit_fn),
     )
 }
 
@@ -1013,7 +1136,12 @@ where
     let mut fresh_commitment_roots = Vec::new();
     for inst in fresh_instances {
         let witness_poly = crate::poly::evals::EvaluationsList::new(inst.witness.clone());
-        let cw = rs_encode(&witness_poly, rs_config.folding_factor, rs_config.log_inv_rate, dft);
+        let cw = rs_encode(
+            &witness_poly,
+            rs_config.folding_factor,
+            rs_config.log_inv_rate,
+            dft,
+        );
         // Commit fresh codeword individually only when NOT using union commitment
         if !use_union {
             if let Some(ref f) = commit_fn {
@@ -1029,12 +1157,19 @@ where
     // Build and commit the union codeword (Quasar multicast) when enabled.
     // Column-major interleaving: union[p*l + i] = codewords[i][p]
     // This replaces the ℓ individual roots with a single union root.
-    let union_commitment_root = if let Some(ref ucf) = union_commit_fn {
+    //
+    // When the caller opted into the union path we also keep the codeword
+    // itself so the Quasar multi-cast reduction can prove
+    //   w̃∪(γ, r_x) == f(r_x)
+    // at a random field point r_x after the twin-constraint sumcheck
+    // completes.  Dropped after use to free the memory.
+    let (union_commitment_root, union_codeword_saved) = if let Some(ref ucf) = union_commit_fn {
         let union_cw = crate::encoding::build_union_codeword(&codewords);
         let union_ff = crate::encoding::union_folding_factor(rs_config.folding_factor, l);
-        Some(ucf(&union_cw, union_ff))
+        let root = ucf(&union_cw, union_ff);
+        (Some(root), Some(union_cw))
     } else {
-        None
+        (None, None)
     };
 
     #[cfg(feature = "bench-timing")]
@@ -1102,9 +1237,7 @@ where
     // Capture fresh codeword[0] values BEFORE sumcheck consumes the tables.
     // With RS encoding, codeword[0] != witness[0], so we must use the actual codeword.
     // mu_i = hat{f_i}(alpha_i=0) = codeword_i[0] for alpha_i = 0.
-    let fresh_codeword_first_elems: Vec<F> = (0..l1)
-        .map(|i| codewords[1 + i][0])
-        .collect();
+    let fresh_codeword_first_elems: Vec<F> = (0..l1).map(|i| codewords[1 + i][0]).collect();
 
     // Tau eq-evals
     let mut tau_evals: Vec<F> = (0..l)
@@ -1120,8 +1253,16 @@ where
     let expected_num_coeffs = 2 + (log_n + 1).max(log_m + 2);
 
     let (round_polys, challenges) = twin_constraint::twin_constraint_sumcheck(
-        &mut codewords, &mut witnesses, &mut alphas, &mut betas, &mut tau_evals,
-        &constraints, omega, log_l, expected_num_coeffs, &mut *transcript_round,
+        &mut codewords,
+        &mut witnesses,
+        &mut alphas,
+        &mut betas,
+        &mut tau_evals,
+        &constraints,
+        omega,
+        log_l,
+        expected_num_coeffs,
+        &mut *transcript_round,
     );
 
     #[cfg(feature = "bench-timing")]
@@ -1132,13 +1273,23 @@ where
     // ========================================
     // Phase 3: Extract folded output
     // ========================================
-    let folded_codeword = codewords.pop().expect("fold must produce exactly one codeword");
-    let folded_z = witnesses.pop().expect("fold must produce exactly one witness");
+    let folded_codeword = codewords
+        .pop()
+        .expect("fold must produce exactly one codeword");
+    let folded_z = witnesses
+        .pop()
+        .expect("fold must produce exactly one witness");
     let folded_alpha = alphas.pop().expect("fold must produce exactly one alpha");
     let folded_beta_tau = betas.pop().expect("fold must produce exactly one beta_tau");
 
     let num_public = fresh_instances[0].public_input.len();
-    let (folded_x, folded_w) = folded_z.split_at(num_public);
+    let witness_len = acc
+        .witness
+        .witness
+        .len()
+        .min(folded_z.len().saturating_sub(num_public));
+    let folded_x = &folded_z[..num_public];
+    let folded_w = &folded_z[num_public..num_public + witness_len];
 
     let eta = evaluate_bundled_r1cs(shape, &folded_beta_tau, &folded_z);
 
@@ -1274,9 +1425,8 @@ where
         for k in 0..num_ood_samples {
             // Squeeze a univariate challenge from the transcript and expand to
             // a multilinear point (same pattern as WHIR's CommitmentWriter).
-            let univariate_challenge = transcript_round(
-                &[F::from_usize(k + num_shift_queries + 1000)],
-            );
+            let univariate_challenge =
+                transcript_round(&[F::from_usize(k + num_shift_queries + 1000)]);
             let point = crate::poly::multilinear::MultilinearPoint::expand_from_univariate(
                 univariate_challenge,
                 log_n,
@@ -1312,89 +1462,124 @@ where
     // first batched claim) and `new_eval_claim` (the sumcheck's final eval
     // at the new folded point) so that the verifier can reconstruct both
     // the initial batching target and the final-round check.
-    let (alpha_eval, new_eval_claim, eval_batch_round_polys, eval_batch_challenges) = if commit_fn.is_some()
-        && (!ood_points.is_empty() || !shift_queries.is_empty())
-    {
-        // Collect all evaluation claims on the folded codeword
-        let mut eval_claims: Vec<(Vec<F>, F)> = Vec::new();
+    let (alpha_eval, new_eval_claim, eval_batch_round_polys, eval_batch_challenges, rho_used) =
+        if commit_fn.is_some() && (!ood_points.is_empty() || !shift_queries.is_empty()) {
+            // Collect all evaluation claims on the folded codeword
+            let mut eval_claims: Vec<(Vec<F>, F)> = Vec::new();
 
-        // 1. The twin-constraint sumcheck's folded eval claim
-        // instance.eval_point is in eq_poly_at_index convention (LSB-first).
-        // evaluate_hypercube_base uses MultilinearPoint convention (MSB-first).
-        // We reverse for evaluate_hypercube_base, but keep LSB-first for eq_poly_at_index.
-        let alpha_msb: Vec<F> = instance.eval_point.iter().rev().cloned().collect();
-        let alpha_eval = witness.codeword.evaluate_hypercube_base::<F>(
-            &crate::poly::multilinear::MultilinearPoint::new(alpha_msb),
-        );
-        eval_claims.push((instance.eval_point.clone(), alpha_eval));
-
-        // 2. OOD claims
-        // OOD points were computed via MultilinearPoint (MSB-first convention) but
-        // eq_poly_at_index in the batching sumcheck uses LSB-first. Reverse to match.
-        for (point, &answer) in ood_points.iter().zip(ood_answers.iter()) {
-            let mut reversed = point.clone();
-            reversed.reverse();
-            eval_claims.push((reversed, answer));
-        }
-
-        // 3. Shift query claims (in-domain evaluation claims)
-        // Each shift query at position `pos` with row values `v` asserts:
-        // f̃(binary(pos * width + j)) = v[j] for each column j.
-        // For batching, we use a single point per query: the first column.
-        //
-        // NOTE: Shift query positions are included as boolean eval claims in the eval
-        // batching sumcheck to algebraically bind them to the codeword. The Merkle
-        // opening paths (see `ShiftQueryOpening::auth_paths`) provide the *commitment*
-        // binding; together the two checks implement WARP paper Construction 7.2's
-        // shift-query soundness.
-        let width = 1usize << rs_config.folding_factor;
-        for sq in &shift_queries {
-            // Convert row position to a multilinear point for the first column element
-            let flat_idx = sq.position * width;
-            let point: Vec<F> = (0..log_n)
-                .map(|bit| {
-                    if (flat_idx >> bit) & 1 == 1 {
-                        F::ONE
-                    } else {
-                        F::ZERO
-                    }
-                })
-                .collect();
-            let val = witness.codeword.as_slice()[flat_idx];
-            eval_claims.push((point, val));
-        }
-
-        // Sample batching challenge ρ from transcript
-        let rho = transcript_round(&[F::from_usize(2000)]);
-
-        // Run the evaluation batching sumcheck
-        let (new_eval_point, new_eval_claim, batch_round_polys, batch_challenges) =
-            evaluation_batching_sumcheck(
-                witness.codeword.as_slice(),
-                &eval_claims,
-                rho,
-                log_n,
-                transcript_round,
+            // 1. The twin-constraint sumcheck's folded eval claim
+            // instance.eval_point is in eq_poly_at_index convention (LSB-first).
+            // evaluate_hypercube_base uses MultilinearPoint convention (MSB-first).
+            // We reverse for evaluate_hypercube_base, but keep LSB-first for eq_poly_at_index.
+            let alpha_msb: Vec<F> = instance.eval_point.iter().rev().cloned().collect();
+            let alpha_eval = witness.codeword.evaluate_hypercube_base::<F>(
+                &crate::poly::multilinear::MultilinearPoint::new(alpha_msb),
             );
+            eval_claims.push((instance.eval_point.clone(), alpha_eval));
 
-        // Update the instance's eval point to the new (batched) point.
-        // The matching eval_claim is returned via `new_eval_claim` below.
-        instance.eval_point = new_eval_point;
+            // 2. OOD claims
+            // OOD points were computed via MultilinearPoint (MSB-first convention) but
+            // eq_poly_at_index in the batching sumcheck uses LSB-first. Reverse to match.
+            for (point, &answer) in ood_points.iter().zip(ood_answers.iter()) {
+                let mut reversed = point.clone();
+                reversed.reverse();
+                eval_claims.push((reversed, answer));
+            }
 
-        (alpha_eval, new_eval_claim, batch_round_polys, batch_challenges)
-    } else {
-        (F::ZERO, F::ZERO, vec![], vec![])
-    };
+            // 3. Shift query claims (in-domain evaluation claims)
+            // Each shift query at position `pos` with row values `v` asserts:
+            // f̃(binary(pos * width + j)) = v[j] for each column j.
+            // For batching, we use a single point per query: the first column.
+            //
+            // NOTE: Shift query positions are included as boolean eval claims in the eval
+            // batching sumcheck to algebraically bind them to the codeword. The Merkle
+            // opening paths (see `ShiftQueryOpening::auth_paths`) provide the *commitment*
+            // binding; together the two checks implement WARP paper Construction 7.2's
+            // shift-query soundness.
+            let width = 1usize << rs_config.folding_factor;
+            for sq in &shift_queries {
+                // Convert row position to a multilinear point for the first column element
+                let flat_idx = sq.position * width;
+                let point: Vec<F> = (0..log_n)
+                    .map(|bit| {
+                        if (flat_idx >> bit) & 1 == 1 {
+                            F::ONE
+                        } else {
+                            F::ZERO
+                        }
+                    })
+                    .collect();
+                let val = witness.codeword.as_slice()[flat_idx];
+                eval_claims.push((point, val));
+            }
+
+            // Sample batching challenge ρ from transcript
+            let rho = transcript_round(&[F::from_usize(2000)]);
+
+            // Run the evaluation batching sumcheck
+            let (new_eval_point, new_eval_claim, batch_round_polys, batch_challenges) =
+                evaluation_batching_sumcheck(
+                    witness.codeword.as_slice(),
+                    &eval_claims,
+                    rho,
+                    log_n,
+                    transcript_round,
+                );
+
+            // Update the instance's eval point to the new (batched) point.
+            // The matching eval_claim is returned via `new_eval_claim` below.
+            instance.eval_point = new_eval_point;
+
+            (
+                alpha_eval,
+                new_eval_claim,
+                batch_round_polys,
+                batch_challenges,
+                rho,
+            )
+        } else {
+            (F::ZERO, F::ZERO, vec![], vec![], F::ZERO)
+        };
     #[cfg(feature = "bench-timing")]
     {
         timings.eval_batch_us = _phase_start.elapsed().as_micros() as u64;
     }
 
+    // ========================================
+    // Phase 7 — Quasar multi-cast (paper §4.2)
+    // ========================================
+    //
+    // When the caller opted into union mode we run the paper's multi-cast
+    // reduction:
+    //
+    //   w̃∪(γ, r_x) == f(r_x)      for random r_x ∈ F^{log n_rs}
+    //
+    // where γ are the twin-constraint sumcheck challenges (the "τ" of the
+    // paper) and `f` is the folded codeword (the "C"-committed polynomial).
+    //
+    // Two eval-batching sumchecks reduce the two claims to single-point
+    // evaluations on the two committed codewords.  Those reduced claims are
+    // deferred to the terminal WHIR decider (Step C).
+    //
+    // This runs AFTER the legacy shift-query + eval-batching path so that
+    // existing callers see no behavioural change — the multi-cast is
+    // additive.  Step E will drop the legacy path on the union side.
+    let quasar_multicast = union_codeword_saved.as_ref().map(|union_cw| {
+        let (proof, _claims) = crate::quasar_multicast::quasar_multicast_prove(
+            union_cw,
+            witness.codeword.as_slice(),
+            &challenges, // γ = τ (paper notation)
+            transcript_round,
+        );
+        proof
+    });
+
     WarpFoldResult {
         commitment_root,
         fresh_commitment_roots,
         union_commitment_root,
-        instance, witness,
+        instance,
+        witness,
         sumcheck_round_polys: round_polys,
         sumcheck_challenges: challenges,
         fresh_eval_claims,
@@ -1406,6 +1591,8 @@ where
         new_eval_claim,
         eval_batch_round_polys,
         eval_batch_challenges,
+        rho: rho_used,
+        quasar_multicast,
         timings,
     }
 }
@@ -1460,7 +1647,10 @@ pub fn warp_fold_verify_sumcheck<F: Field>(
 
     // Return the final evaluation at the last challenge
     let last_idx = round_polys.len() - 1;
-    Ok(eval_poly_from_evals(&round_polys[last_idx], challenges[last_idx]))
+    Ok(eval_poly_from_evals(
+        &round_polys[last_idx],
+        challenges[last_idx],
+    ))
 }
 
 /// Public input data for the WARP fold verifier.
@@ -1478,10 +1668,7 @@ pub struct FreshInstancePublic<F: Field> {
 /// After the sumcheck, the folded alpha is the eq-weighted linear combination:
 ///   α_folded = Σ_i eq(γ, i) · α_i
 /// where γ are the sumcheck challenges and α_i are the input eval points.
-fn compute_folded_point<F: Field>(
-    input_points: &[Vec<F>],
-    sumcheck_challenges: &[F],
-) -> Vec<F> {
+fn compute_folded_point<F: Field>(input_points: &[Vec<F>], sumcheck_challenges: &[F]) -> Vec<F> {
     let l = input_points.len();
     let log_l = sumcheck_challenges.len();
     debug_assert_eq!(l, 1 << log_l);
@@ -1593,21 +1780,14 @@ pub fn warp_fold_verify<F: Field>(
     // ========================================
     // 2. Compute initial sumcheck target
     // ========================================
-    let initial_target = compute_initial_target(
-        tau_challenges,
-        &eval_claims,
-        &pesat_targets,
-        omega,
-    );
+    let initial_target =
+        compute_initial_target(tau_challenges, &eval_claims, &pesat_targets, omega);
 
     // ========================================
     // 3. Verify the twin-constraint sumcheck
     // ========================================
-    let final_eval = warp_fold_verify_sumcheck(
-        initial_target,
-        sumcheck_round_polys,
-        sumcheck_challenges,
-    )?;
+    let final_eval =
+        warp_fold_verify_sumcheck(initial_target, sumcheck_round_polys, sumcheck_challenges)?;
 
     // ========================================
     // 3b. Check final evaluation against expected folded target
@@ -1620,8 +1800,7 @@ pub fn warp_fold_verify<F: Field>(
     // Compute eq(τ, γ) = Π_j (τ_j · γ_j + (1 - τ_j) · (1 - γ_j))
     let mut eq_tau_gamma = F::ONE;
     for j in 0..log_l {
-        eq_tau_gamma *=
-            tau_challenges[j] * sumcheck_challenges[j]
+        eq_tau_gamma *= tau_challenges[j] * sumcheck_challenges[j]
             + (F::ONE - tau_challenges[j]) * (F::ONE - sumcheck_challenges[j]);
     }
 
@@ -1774,12 +1953,47 @@ pub fn verify_evaluation_batching_sumcheck<F: Field>(
         current_claim = eval_poly_from_evals(poly, challenges[round]);
     }
 
-    // Final claim should match prover's asserted final evaluation.
-    if current_claim != expected_final_eval {
+    // At this point `current_claim == B̃(α) · f̃(α)`, where
+    //   B̃(α) = Σ_k ρ^k · eq(p_k, α),  α = challenges.
+    // The prover's asserted final eval is `f̃(α) = expected_final_eval`.
+    // The verifier must compute B̃(α) itself and enforce the product.
+    let b_at_alpha = batched_eq_at_point(eval_claims, rho, challenges);
+    let expected_product = b_at_alpha * expected_final_eval;
+    if current_claim != expected_product {
         return Err("batching sumcheck: final evaluation mismatch");
     }
 
     Ok(challenges.to_vec())
+}
+
+/// Compute `B̃(α) = Σ_k ρ^k · eq(p_k, α)` — the verifier-side evaluation of
+/// the batched eq-polynomial at the sumcheck challenge point.
+///
+/// `eq(p, x)` here is in the LSB-first convention used throughout the
+/// evaluation batching sumcheck:
+///     `eq(p, x) = Π_i (p_i · x_i + (1 − p_i)(1 − x_i))`
+/// with `p_i` and `x_i` paired coordinate-by-coordinate in the same order.
+///
+/// When called with `x = α`, the challenge point from the sumcheck, this
+/// reduces to `Π_i (p_i · α_i + (1 − p_i)(1 − α_i))`.
+fn batched_eq_at_point<F: Field>(eval_claims: &[(Vec<F>, F)], rho: F, alpha: &[F]) -> F {
+    let mut b = F::ZERO;
+    let mut rho_pow = F::ONE;
+    for (point, _) in eval_claims {
+        debug_assert_eq!(
+            point.len(),
+            alpha.len(),
+            "eval_claim point dimension must match sumcheck challenge dimension",
+        );
+        // eq(point, alpha) = Π_i (point_i · alpha_i + (1 − point_i)(1 − alpha_i))
+        let mut eq = F::ONE;
+        for (p_i, a_i) in point.iter().zip(alpha.iter()) {
+            eq *= *p_i * *a_i + (F::ONE - *p_i) * (F::ONE - *a_i);
+        }
+        b += rho_pow * eq;
+        rho_pow *= rho;
+    }
+    b
 }
 
 /// Verify Merkle opening paths for every shift-query position in a
@@ -1812,8 +2026,10 @@ where
     F: TwoAdicField,
     <F as Field>::Packing: Eq + Send + Sync,
     H: p3_symmetric::CryptographicHasher<F, [F; DIGEST_ELEMS]>
-        + p3_symmetric::CryptographicHasher<<F as Field>::Packing, [<F as Field>::Packing; DIGEST_ELEMS]>
-        + Sync
+        + p3_symmetric::CryptographicHasher<
+            <F as Field>::Packing,
+            [<F as Field>::Packing; DIGEST_ELEMS],
+        > + Sync
         + Clone,
     C: p3_symmetric::PseudoCompressionFunction<[F; DIGEST_ELEMS], 2>
         + p3_symmetric::PseudoCompressionFunction<[<F as Field>::Packing; DIGEST_ELEMS], 2>
@@ -1842,14 +2058,17 @@ where
             ));
         }
         for (cw_idx, root) in input_codeword_roots.iter().enumerate() {
-            let row_values = sq
-                .input_values
-                .get(cw_idx)
-                .ok_or_else(|| alloc::format!(
-                    "shift query {sq_idx}: input_values missing for codeword {cw_idx}"
-                ))?;
+            let row_values = sq.input_values.get(cw_idx).ok_or_else(|| {
+                alloc::format!("shift query {sq_idx}: input_values missing for codeword {cw_idx}")
+            })?;
             let ok = crate::encoding::merkle_verify_opening::<
-                F, F, <F as Field>::Packing, <F as Field>::Packing, _, _, DIGEST_ELEMS,
+                F,
+                F,
+                <F as Field>::Packing,
+                <F as Field>::Packing,
+                _,
+                _,
+                DIGEST_ELEMS,
             >(
                 root,
                 sq.position,
@@ -1888,8 +2107,10 @@ where
     F: TwoAdicField,
     <F as Field>::Packing: Eq + Send + Sync,
     H: p3_symmetric::CryptographicHasher<F, [F; DIGEST_ELEMS]>
-        + p3_symmetric::CryptographicHasher<<F as Field>::Packing, [<F as Field>::Packing; DIGEST_ELEMS]>
-        + Sync
+        + p3_symmetric::CryptographicHasher<
+            <F as Field>::Packing,
+            [<F as Field>::Packing; DIGEST_ELEMS],
+        > + Sync
         + Clone,
     C: p3_symmetric::PseudoCompressionFunction<[F; DIGEST_ELEMS], 2>
         + p3_symmetric::PseudoCompressionFunction<[<F as Field>::Packing; DIGEST_ELEMS], 2>
@@ -1915,15 +2136,40 @@ where
         // The union-tree leaf row is the column-major concatenation of all
         // ℓ input codeword rows at this position. Reconstruct it from the
         // per-codeword input_values already in the proof.
+        if sq.input_values.is_empty() {
+            return Err(alloc::format!(
+                "shift query {sq_idx}: union mode requires at least one input row"
+            ));
+        }
+        if row_width % sq.input_values.len() != 0 {
+            return Err(alloc::format!(
+                "shift query {sq_idx}: union row width {row_width} is not divisible by {} input rows",
+                sq.input_values.len()
+            ));
+        }
         let mut union_row: Vec<F> = Vec::with_capacity(row_width);
-        let per_codeword_width = row_width / sq.input_values.len().max(1);
+        let per_codeword_width = row_width / sq.input_values.len();
+        for (cw_idx, codeword) in sq.input_values.iter().enumerate() {
+            if codeword.len() != per_codeword_width {
+                return Err(alloc::format!(
+                    "shift query {sq_idx}: codeword {cw_idx} row width {} does not match expected {per_codeword_width}",
+                    codeword.len()
+                ));
+            }
+        }
         for col in 0..per_codeword_width {
             for codeword in &sq.input_values {
                 union_row.push(codeword[col]);
             }
         }
         let ok = crate::encoding::merkle_verify_opening::<
-            F, F, <F as Field>::Packing, <F as Field>::Packing, _, _, DIGEST_ELEMS,
+            F,
+            F,
+            <F as Field>::Packing,
+            <F as Field>::Packing,
+            _,
+            _,
+            DIGEST_ELEMS,
         >(
             union_root,
             sq.position,
@@ -1949,14 +2195,12 @@ mod tests {
 
     use super::*;
     use crate::{
-        accumulator::{
-            WarpAccumulator, WarpAccumulatorInstance, WarpAccumulatorWitness,
-        },
+        accumulator::{WarpAccumulator, WarpAccumulatorInstance, WarpAccumulatorWitness},
         poly::evals::EvaluationsList,
         spartan::r1cs::{R1CSShape, SparseMatEntry},
     };
-    use p3_koala_bear::KoalaBear;
     use p3_field::PrimeCharacteristicRing;
+    use p3_koala_bear::KoalaBear;
 
     type F = KoalaBear;
 
@@ -1980,12 +2224,7 @@ mod tests {
         let square = root * root;
         FreshInstance {
             public_input: vec![F::ZERO; 2],
-            witness: vec![
-                F::from_u64(root),
-                F::from_u64(square),
-                F::ZERO,
-                F::ZERO,
-            ],
+            witness: vec![F::from_u64(root), F::from_u64(square), F::ZERO, F::ZERO],
         }
     }
 
@@ -2082,10 +2321,11 @@ mod tests {
 
         // Verify the sumcheck: consecutive rounds must be consistent
         for i in 1..result.sumcheck_round_polys.len() {
-            let prev_at_challenge =
-                eval_poly_from_evals(&result.sumcheck_round_polys[i - 1], result.sumcheck_challenges[i - 1]);
-            let curr_sum = result.sumcheck_round_polys[i][0]
-                + result.sumcheck_round_polys[i][1];
+            let prev_at_challenge = eval_poly_from_evals(
+                &result.sumcheck_round_polys[i - 1],
+                result.sumcheck_challenges[i - 1],
+            );
+            let curr_sum = result.sumcheck_round_polys[i][0] + result.sumcheck_round_polys[i][1];
             assert_eq!(
                 prev_at_challenge, curr_sum,
                 "sumcheck relation violated at round {i}"
@@ -2213,8 +2453,7 @@ mod tests {
         );
 
         // Compute initial target from the round 0 polynomial
-        let initial_target = result.sumcheck_round_polys[0][0]
-            + result.sumcheck_round_polys[0][1];
+        let initial_target = result.sumcheck_round_polys[0][0] + result.sumcheck_round_polys[0][1];
 
         // Verify using the dedicated function
         let final_eval = warp_fold_verify_sumcheck(
@@ -2334,7 +2573,10 @@ mod tests {
             &result.fresh_pesat_targets,
         );
 
-        assert!(verified.is_err(), "verifier should reject tampered eval_point");
+        assert!(
+            verified.is_err(),
+            "verifier should reject tampered eval_point"
+        );
     }
 
     #[test]
@@ -2383,7 +2625,10 @@ mod tests {
             &result.fresh_pesat_targets,
         );
 
-        assert!(verified.is_err(), "verifier should reject tampered sumcheck");
+        assert!(
+            verified.is_err(),
+            "verifier should reject tampered sumcheck"
+        );
     }
 
     #[test]
@@ -2432,7 +2677,10 @@ mod tests {
             &result.fresh_pesat_targets,
         );
 
-        assert!(verified.is_err(), "verifier should reject tampered pesat_tau");
+        assert!(
+            verified.is_err(),
+            "verifier should reject tampered pesat_tau"
+        );
     }
 
     #[test]
@@ -2485,7 +2733,10 @@ mod tests {
             &result.fresh_pesat_targets,
         );
 
-        assert!(verified.is_ok(), "verifier should accept multi-instance fold");
+        assert!(
+            verified.is_ok(),
+            "verifier should accept multi-instance fold"
+        );
     }
 
     #[test]
@@ -2528,9 +2779,9 @@ mod tests {
                 &[],
                 &result.sumcheck_round_polys,
                 &result.sumcheck_challenges,
-            &result.instance,
-            &result.fresh_eval_claims,
-            &result.fresh_pesat_targets,
+                &result.instance,
+                &result.fresh_eval_claims,
+                &result.fresh_pesat_targets,
             );
             assert!(
                 verified.is_ok(),
@@ -2540,14 +2791,11 @@ mod tests {
 
             // Rebuild accumulator for next step
             // Compute the actual eval_claim: f̂(α) where f̂ is the MLE of the codeword
-            let eval_claim = result
-                .witness
-                .codeword
-                .evaluate_hypercube_base(
-                    &crate::poly::multilinear::MultilinearPoint::new(
-                        result.instance.eval_point.iter().copied().collect(),
-                    ),
-                );
+            let eval_claim = result.witness.codeword.evaluate_hypercube_base(
+                &crate::poly::multilinear::MultilinearPoint::new(
+                    result.instance.eval_point.iter().copied().collect(),
+                ),
+            );
 
             acc = WarpAccumulator::new(
                 WarpAccumulatorInstance {
@@ -2569,7 +2817,7 @@ mod tests {
     fn warp_fold_union_produces_union_root() {
         use p3_koala_bear::Poseidon2KoalaBear;
         use p3_symmetric::{PaddingFreeSponge, TruncatedPermutation};
-        use rand::{rngs::SmallRng, SeedableRng};
+        use rand::{SeedableRng, rngs::SmallRng};
 
         type Perm = Poseidon2KoalaBear<16>;
         type MyHash = PaddingFreeSponge<Perm, 16, 8, 8>;
@@ -2594,14 +2842,28 @@ mod tests {
         // so that RS encoding produces codewords of size code_len.
         let nvy = num_vars_y;
         let make_witness = |root: u64| {
-            let mut w = vec![F::from_u64(root), F::from_u64(root * root), F::ZERO, F::ZERO];
+            let mut w = vec![
+                F::from_u64(root),
+                F::from_u64(root * root),
+                F::ZERO,
+                F::ZERO,
+            ];
             w.resize(nvy, F::ZERO);
             w
         };
         let fresh = vec![
-            FreshInstance { public_input: vec![F::ZERO; 2], witness: make_witness(2) },
-            FreshInstance { public_input: vec![F::ZERO; 2], witness: make_witness(3) },
-            FreshInstance { public_input: vec![F::ZERO; 2], witness: make_witness(5) },
+            FreshInstance {
+                public_input: vec![F::ZERO; 2],
+                witness: make_witness(2),
+            },
+            FreshInstance {
+                public_input: vec![F::ZERO; 2],
+                witness: make_witness(3),
+            },
+            FreshInstance {
+                public_input: vec![F::ZERO; 2],
+                witness: make_witness(5),
+            },
         ];
 
         let l = (1 + fresh.len()).next_power_of_two();
@@ -2634,9 +2896,13 @@ mod tests {
             // commit_fn for the folded codeword
             |cw, ff| {
                 let (root, _) = crate::encoding::merkle_commit_codeword::<
-                    F, F,
-                    <F as p3_field::Field>::Packing, <F as p3_field::Field>::Packing,
-                    MyHash, MyCompress, DIGEST,
+                    F,
+                    F,
+                    <F as p3_field::Field>::Packing,
+                    <F as p3_field::Field>::Packing,
+                    MyHash,
+                    MyCompress,
+                    DIGEST,
                 >(cw, ff, h.clone(), c.clone());
                 root
             },
@@ -2644,9 +2910,13 @@ mod tests {
             |union_cw, union_ff| {
                 let union_ev = crate::poly::evals::EvaluationsList::new(union_cw.to_vec());
                 let (root, _) = crate::encoding::merkle_commit_codeword::<
-                    F, F,
-                    <F as p3_field::Field>::Packing, <F as p3_field::Field>::Packing,
-                    MyHash, MyCompress, DIGEST,
+                    F,
+                    F,
+                    <F as p3_field::Field>::Packing,
+                    <F as p3_field::Field>::Packing,
+                    MyHash,
+                    MyCompress,
+                    DIGEST,
                 >(&union_ev, union_ff, h2.clone(), c2.clone());
                 root
             },
@@ -2658,7 +2928,11 @@ mod tests {
             "union path should produce a union root"
         );
         let union_root = result.union_commitment_root.unwrap();
-        assert_ne!(union_root, [F::ZERO; DIGEST], "union root should be nonzero");
+        assert_ne!(
+            union_root,
+            [F::ZERO; DIGEST],
+            "union root should be nonzero"
+        );
 
         // Individual fresh roots should be empty (replaced by union)
         assert!(
@@ -2677,11 +2951,28 @@ mod tests {
         assert_eq!(result.sumcheck_round_polys.len(), log_l);
         assert_eq!(result.sumcheck_challenges.len(), log_l);
 
-        // Decider should accept the folded accumulator
-        let eval_claim = evaluate_mle_lsb(
-            &result.witness.codeword,
-            &result.instance.eval_point,
+        // Quasar multi-cast proof must now be attached on the union path
+        // (Step B).  The two sumchecks must have the expected sizes:
+        //   - union side: log ℓ + log n_rs rounds
+        //   - folded side: log n_rs rounds
+        let qm = result
+            .quasar_multicast
+            .as_ref()
+            .expect("union fold must produce a Quasar multi-cast proof");
+        let log_n_rs = result.witness.codeword.as_slice().len().trailing_zeros() as usize;
+        assert_eq!(
+            qm.union_round_polys.len(),
+            log_l + log_n_rs,
+            "union sumcheck must have log ℓ + log n_rs rounds",
         );
+        assert_eq!(
+            qm.folded_round_polys.len(),
+            log_n_rs,
+            "folded sumcheck must have log n_rs rounds",
+        );
+
+        // Decider should accept the folded accumulator
+        let eval_claim = evaluate_mle_lsb(&result.witness.codeword, &result.instance.eval_point);
         let final_acc = WarpAccumulator::new(
             WarpAccumulatorInstance {
                 commitment_root: result.commitment_root,
@@ -2695,7 +2986,10 @@ mod tests {
         );
         // Use the RS decider (skips codeword validity check, deferred to WHIR)
         let decide = crate::decider::warp_decide_algebraic_rs(&shape, &final_acc);
-        assert!(decide.is_ok(), "decider should accept union fold: {decide:?}");
+        assert!(
+            decide.is_ok(),
+            "decider should accept union fold: {decide:?}"
+        );
     }
 
     /// Test that union fold and non-union fold produce identical algebraic
@@ -2705,7 +2999,7 @@ mod tests {
     fn warp_fold_union_matches_non_union_algebra() {
         use p3_koala_bear::Poseidon2KoalaBear;
         use p3_symmetric::{PaddingFreeSponge, TruncatedPermutation};
-        use rand::{rngs::SmallRng, SeedableRng};
+        use rand::{SeedableRng, rngs::SmallRng};
 
         type Perm = Poseidon2KoalaBear<16>;
         type MyHash = PaddingFreeSponge<Perm, 16, 8, 8>;
@@ -2727,14 +3021,28 @@ mod tests {
 
         let nvy = num_vars_y;
         let make_w = |root: u64| {
-            let mut w = vec![F::from_u64(root), F::from_u64(root * root), F::ZERO, F::ZERO];
+            let mut w = vec![
+                F::from_u64(root),
+                F::from_u64(root * root),
+                F::ZERO,
+                F::ZERO,
+            ];
             w.resize(nvy, F::ZERO);
             w
         };
         let fresh = vec![
-            FreshInstance { public_input: vec![F::ZERO; 2], witness: make_w(3) },
-            FreshInstance { public_input: vec![F::ZERO; 2], witness: make_w(7) },
-            FreshInstance { public_input: vec![F::ZERO; 2], witness: make_w(11) },
+            FreshInstance {
+                public_input: vec![F::ZERO; 2],
+                witness: make_w(3),
+            },
+            FreshInstance {
+                public_input: vec![F::ZERO; 2],
+                witness: make_w(7),
+            },
+            FreshInstance {
+                public_input: vec![F::ZERO; 2],
+                witness: make_w(11),
+            },
         ];
         let tau = vec![F::from_u64(17), F::from_u64(19)];
         let omega = F::from_u64(3);
@@ -2747,13 +3055,27 @@ mod tests {
         let h1 = hash.clone();
         let c1 = compress.clone();
         let result_non_union = warp_fold_prove_rs_committed(
-            &shape, &fresh, &acc, omega, &tau, &fresh_betas, &rs_config, &dft,
-            |_| { counter1 += 1; F::from_u64(counter1 + 500) },
+            &shape,
+            &fresh,
+            &acc,
+            omega,
+            &tau,
+            &fresh_betas,
+            &rs_config,
+            &dft,
+            |_| {
+                counter1 += 1;
+                F::from_u64(counter1 + 500)
+            },
             |cw, ff| {
                 let (root, _) = crate::encoding::merkle_commit_codeword::<
-                    F, F,
-                    <F as p3_field::Field>::Packing, <F as p3_field::Field>::Packing,
-                    MyHash, MyCompress, DIGEST,
+                    F,
+                    F,
+                    <F as p3_field::Field>::Packing,
+                    <F as p3_field::Field>::Packing,
+                    MyHash,
+                    MyCompress,
+                    DIGEST,
                 >(cw, ff, h1.clone(), c1.clone());
                 root
             },
@@ -2766,22 +3088,40 @@ mod tests {
         let h3 = hash.clone();
         let c3 = compress.clone();
         let result_union = warp_fold_prove_rs_union(
-            &shape, &fresh, &acc, omega, &tau, &fresh_betas, &rs_config, &dft,
-            |_| { counter2 += 1; F::from_u64(counter2 + 500) },
+            &shape,
+            &fresh,
+            &acc,
+            omega,
+            &tau,
+            &fresh_betas,
+            &rs_config,
+            &dft,
+            |_| {
+                counter2 += 1;
+                F::from_u64(counter2 + 500)
+            },
             |cw, ff| {
                 let (root, _) = crate::encoding::merkle_commit_codeword::<
-                    F, F,
-                    <F as p3_field::Field>::Packing, <F as p3_field::Field>::Packing,
-                    MyHash, MyCompress, DIGEST,
+                    F,
+                    F,
+                    <F as p3_field::Field>::Packing,
+                    <F as p3_field::Field>::Packing,
+                    MyHash,
+                    MyCompress,
+                    DIGEST,
                 >(cw, ff, h2.clone(), c2.clone());
                 root
             },
             |union_cw, union_ff| {
                 let union_ev = crate::poly::evals::EvaluationsList::new(union_cw.to_vec());
                 let (root, _) = crate::encoding::merkle_commit_codeword::<
-                    F, F,
-                    <F as p3_field::Field>::Packing, <F as p3_field::Field>::Packing,
-                    MyHash, MyCompress, DIGEST,
+                    F,
+                    F,
+                    <F as p3_field::Field>::Packing,
+                    <F as p3_field::Field>::Packing,
+                    MyHash,
+                    MyCompress,
+                    DIGEST,
                 >(&union_ev, union_ff, h3.clone(), c3.clone());
                 root
             },
@@ -2789,23 +3129,19 @@ mod tests {
 
         // Algebraic outputs must be identical
         assert_eq!(
-            result_non_union.instance.eval_point,
-            result_union.instance.eval_point,
+            result_non_union.instance.eval_point, result_union.instance.eval_point,
             "eval_point mismatch"
         );
         assert_eq!(
-            result_non_union.instance.pesat_tau,
-            result_union.instance.pesat_tau,
+            result_non_union.instance.pesat_tau, result_union.instance.pesat_tau,
             "pesat_tau mismatch"
         );
         assert_eq!(
-            result_non_union.instance.pesat_x,
-            result_union.instance.pesat_x,
+            result_non_union.instance.pesat_x, result_union.instance.pesat_x,
             "pesat_x mismatch"
         );
         assert_eq!(
-            result_non_union.instance.pesat_target,
-            result_union.instance.pesat_target,
+            result_non_union.instance.pesat_target, result_union.instance.pesat_target,
             "pesat_target mismatch"
         );
         assert_eq!(
@@ -2814,25 +3150,21 @@ mod tests {
             "folded codeword mismatch"
         );
         assert_eq!(
-            result_non_union.witness.witness,
-            result_union.witness.witness,
+            result_non_union.witness.witness, result_union.witness.witness,
             "folded witness mismatch"
         );
         assert_eq!(
-            result_non_union.sumcheck_round_polys,
-            result_union.sumcheck_round_polys,
+            result_non_union.sumcheck_round_polys, result_union.sumcheck_round_polys,
             "sumcheck round polys mismatch"
         );
         assert_eq!(
-            result_non_union.sumcheck_challenges,
-            result_union.sumcheck_challenges,
+            result_non_union.sumcheck_challenges, result_union.sumcheck_challenges,
             "sumcheck challenges mismatch"
         );
 
         // Folded codeword commitment should be identical (same folded codeword)
         assert_eq!(
-            result_non_union.commitment_root,
-            result_union.commitment_root,
+            result_non_union.commitment_root, result_union.commitment_root,
             "folded commitment root should match"
         );
 
@@ -2856,22 +3188,14 @@ mod tests {
         let tau0 = vec![F::from_u64(42)];
         let omega0 = F::from_u64(7);
         let mut rc0 = 0u64;
-        let result0 = warp_fold_prove(
-            &shape,
-            &[fresh0],
-            &initial_acc,
-            omega0,
-            &tau0,
-            &[],
-            |_| { rc0 += 1; F::from_u64(rc0 + 200) },
-        );
+        let result0 = warp_fold_prove(&shape, &[fresh0], &initial_acc, omega0, &tau0, &[], |_| {
+            rc0 += 1;
+            F::from_u64(rc0 + 200)
+        });
 
         // Build accumulator from first fold, deliberately set a non-zero pesat_target
         // so that omega is meaningful in the target formula.
-        let eval_claim = evaluate_mle_lsb(
-            &result0.witness.codeword,
-            &result0.instance.eval_point,
-        );
+        let eval_claim = evaluate_mle_lsb(&result0.witness.codeword, &result0.instance.eval_point);
         let acc = WarpAccumulator::new(
             WarpAccumulatorInstance {
                 commitment_root: [F::ZERO; 8],
@@ -2973,7 +3297,10 @@ mod tests {
             &result.fresh_pesat_targets,
         );
 
-        assert!(verified.is_err(), "verifier should reject tampered fresh_eval_claim");
+        assert!(
+            verified.is_err(),
+            "verifier should reject tampered fresh_eval_claim"
+        );
     }
 
     #[test]
@@ -3022,7 +3349,10 @@ mod tests {
             &tampered_pesat_targets,
         );
 
-        assert!(verified.is_err(), "verifier should reject tampered fresh_pesat_target");
+        assert!(
+            verified.is_err(),
+            "verifier should reject tampered fresh_pesat_target"
+        );
     }
 
     // ══════════════════════════════════════════════════════════════════════
@@ -3043,8 +3373,8 @@ mod tests {
         R1CSShape<F>,
         crate::accumulator::WarpAccumulator<F, F, F, 8>,
         Vec<FreshInstance<F>>,
-        F, // omega
-        Vec<F>, // tau
+        F,           // omega
+        Vec<F>,      // tau
         Vec<Vec<F>>, // fresh_betas
         WarpFoldResult<F, 8>,
         // Merkle infra handles (closed-over)
@@ -3052,7 +3382,7 @@ mod tests {
     ) {
         use p3_koala_bear::Poseidon2KoalaBear;
         use p3_symmetric::{PaddingFreeSponge, TruncatedPermutation};
-        use rand::{rngs::SmallRng, SeedableRng};
+        use rand::{SeedableRng, rngs::SmallRng};
 
         type Perm = Poseidon2KoalaBear<16>;
         type MyHash = PaddingFreeSponge<Perm, 16, 8, 8>;
@@ -3073,17 +3403,24 @@ mod tests {
         let acc = make_initial_accumulator(code_len, log_m);
 
         let make_w = |root: u64| {
-            let mut w = vec![F::from_u64(root), F::from_u64(root * root), F::ZERO, F::ZERO];
+            let mut w = vec![
+                F::from_u64(root),
+                F::from_u64(root * root),
+                F::ZERO,
+                F::ZERO,
+            ];
             w.resize(num_vars_y, F::ZERO);
             w
         };
-        let fresh = vec![
-            FreshInstance { public_input: vec![F::ZERO; 2], witness: make_w(3) },
-        ];
+        let fresh = vec![FreshInstance {
+            public_input: vec![F::ZERO; 2],
+            witness: make_w(3),
+        }];
         let tau = vec![F::from_u64(17)];
         let omega = F::from_u64(3);
-        let fresh_betas: Vec<Vec<F>> =
-            (0..fresh.len()).map(|i| vec![F::from_u64(200 + i as u64); log_m]).collect();
+        let fresh_betas: Vec<Vec<F>> = (0..fresh.len())
+            .map(|i| vec![F::from_u64(200 + i as u64); log_m])
+            .collect();
 
         let mut counter = 0u64;
         let h_commit = hash.clone();
@@ -3097,12 +3434,19 @@ mod tests {
             &fresh_betas,
             &rs_config,
             &dft,
-            |_| { counter += 1; F::from_u64(counter + 500) },
+            |_| {
+                counter += 1;
+                F::from_u64(counter + 500)
+            },
             |cw, ff| {
                 let (root, _tree) = crate::encoding::merkle_commit_codeword::<
-                    F, F,
-                    <F as p3_field::Field>::Packing, <F as p3_field::Field>::Packing,
-                    MyHash, MyCompress, DIGEST,
+                    F,
+                    F,
+                    <F as p3_field::Field>::Packing,
+                    <F as p3_field::Field>::Packing,
+                    MyHash,
+                    MyCompress,
+                    DIGEST,
                 >(cw, ff, h_commit.clone(), c_commit.clone());
                 root
             },
@@ -3128,7 +3472,16 @@ mod tests {
             &compress,
         );
 
-        (shape, acc, fresh, omega, tau, fresh_betas, result, rs_config)
+        (
+            shape,
+            acc,
+            fresh,
+            omega,
+            tau,
+            fresh_betas,
+            result,
+            rs_config,
+        )
     }
 
     #[test]
@@ -3207,8 +3560,8 @@ mod tests {
             let prev_poly = &result.eval_batch_round_polys[r - 1];
             let prev_c = result.eval_batch_challenges[r - 1];
             let prev_at_chal = eval_poly_from_evals(prev_poly, prev_c);
-            let curr_sum = result.eval_batch_round_polys[r][0]
-                + result.eval_batch_round_polys[r][1];
+            let curr_sum =
+                result.eval_batch_round_polys[r][0] + result.eval_batch_round_polys[r][1];
             assert_eq!(
                 curr_sum, prev_at_chal,
                 "batching sumcheck round {r}: sum disagrees with previous round's eval at challenge"
@@ -3226,7 +3579,7 @@ mod tests {
     fn verify_shift_queries_merkle_accepts_honest_paths() {
         use p3_koala_bear::Poseidon2KoalaBear;
         use p3_symmetric::{PaddingFreeSponge, TruncatedPermutation};
-        use rand::{rngs::SmallRng, SeedableRng};
+        use rand::{SeedableRng, rngs::SmallRng};
 
         type Perm = Poseidon2KoalaBear<16>;
         type MyHash = PaddingFreeSponge<Perm, 16, 8, 8>;
@@ -3243,8 +3596,19 @@ mod tests {
         // `acc.instance.commitment_root` is a [0; 8] placeholder in the
         // initial accumulator (never committed), not the real Merkle root.
         let (acc_root, _) = crate::encoding::merkle_commit_codeword::<
-            F, F, <F as Field>::Packing, <F as Field>::Packing, MyHash, MyCompress, 8,
-        >(&acc.witness.codeword, rs_config.folding_factor, hash.clone(), compress.clone());
+            F,
+            F,
+            <F as Field>::Packing,
+            <F as Field>::Packing,
+            MyHash,
+            MyCompress,
+            8,
+        >(
+            &acc.witness.codeword,
+            rs_config.folding_factor,
+            hash.clone(),
+            compress.clone(),
+        );
 
         // Collect the input codeword roots in prover order:
         //   [running_acc_root, fresh_root_0, ..., fresh_root_{l-2}]
@@ -3267,7 +3631,7 @@ mod tests {
     fn verify_shift_queries_merkle_rejects_tampered_path() {
         use p3_koala_bear::Poseidon2KoalaBear;
         use p3_symmetric::{PaddingFreeSponge, TruncatedPermutation};
-        use rand::{rngs::SmallRng, SeedableRng};
+        use rand::{SeedableRng, rngs::SmallRng};
 
         type Perm = Poseidon2KoalaBear<16>;
         type MyHash = PaddingFreeSponge<Perm, 16, 8, 8>;
@@ -3277,9 +3641,18 @@ mod tests {
             run_rs_committed_fold_and_open_paths();
 
         // Tamper: flip a byte of the first auth path in the first shift query.
-        assert!(!result.shift_queries.is_empty(), "setup must produce shift queries");
-        assert!(!result.shift_queries[0].auth_paths.is_empty(), "auth paths must be populated");
-        assert!(!result.shift_queries[0].auth_paths[0].is_empty(), "path must be non-empty");
+        assert!(
+            !result.shift_queries.is_empty(),
+            "setup must produce shift queries"
+        );
+        assert!(
+            !result.shift_queries[0].auth_paths.is_empty(),
+            "auth paths must be populated"
+        );
+        assert!(
+            !result.shift_queries[0].auth_paths[0].is_empty(),
+            "path must be non-empty"
+        );
         result.shift_queries[0].auth_paths[0][0][0] += F::ONE;
 
         let perm = Perm::new_from_rng_128(&mut SmallRng::seed_from_u64(42));
@@ -3287,8 +3660,19 @@ mod tests {
         let compress = MyCompress::new(perm);
 
         let (acc_root, _) = crate::encoding::merkle_commit_codeword::<
-            F, F, <F as Field>::Packing, <F as Field>::Packing, MyHash, MyCompress, 8,
-        >(&acc.witness.codeword, rs_config.folding_factor, hash.clone(), compress.clone());
+            F,
+            F,
+            <F as Field>::Packing,
+            <F as Field>::Packing,
+            MyHash,
+            MyCompress,
+            8,
+        >(
+            &acc.witness.codeword,
+            rs_config.folding_factor,
+            hash.clone(),
+            compress.clone(),
+        );
         let mut roots = vec![acc_root];
         roots.extend(result.fresh_commitment_roots.iter().copied());
         let code_len = acc.witness.codeword.as_slice().len();
@@ -3308,7 +3692,7 @@ mod tests {
     fn verify_shift_queries_merkle_rejects_tampered_value() {
         use p3_koala_bear::Poseidon2KoalaBear;
         use p3_symmetric::{PaddingFreeSponge, TruncatedPermutation};
-        use rand::{rngs::SmallRng, SeedableRng};
+        use rand::{SeedableRng, rngs::SmallRng};
 
         type Perm = Poseidon2KoalaBear<16>;
         type MyHash = PaddingFreeSponge<Perm, 16, 8, 8>;
@@ -3329,8 +3713,19 @@ mod tests {
         let compress = MyCompress::new(perm);
 
         let (acc_root, _) = crate::encoding::merkle_commit_codeword::<
-            F, F, <F as Field>::Packing, <F as Field>::Packing, MyHash, MyCompress, 8,
-        >(&acc.witness.codeword, rs_config.folding_factor, hash.clone(), compress.clone());
+            F,
+            F,
+            <F as Field>::Packing,
+            <F as Field>::Packing,
+            MyHash,
+            MyCompress,
+            8,
+        >(
+            &acc.witness.codeword,
+            rs_config.folding_factor,
+            hash.clone(),
+            compress.clone(),
+        );
         let mut roots = vec![acc_root];
         roots.extend(result.fresh_commitment_roots.iter().copied());
         let code_len = acc.witness.codeword.as_slice().len();
@@ -3343,6 +3738,9 @@ mod tests {
             &hash,
             &compress,
         );
-        assert!(r.is_err(), "verifier must reject tampered shift-query value");
+        assert!(
+            r.is_err(),
+            "verifier must reject tampered shift-query value"
+        );
     }
 }

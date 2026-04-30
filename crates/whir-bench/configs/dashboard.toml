@@ -1,33 +1,14 @@
-# Unified benchmark config — single TOML for every measurement that used to
-# live in compare_bench. Produces one JSONL that plot.py renders into the full
-# dashboard.
+# Unified dashboard config with explicit apples-to-apples workloads.
 #
-# Two kinds of benches run from this config:
-#
-#   [schemes]       — FoldingScheme impls (setup / prove / verify pipelines).
-#                     Swept across the cartesian product of `axes` below.
-#                     Family A (no step circuit; accumulate N R1CS instances):
-#                       independent_whir, pure_warp, warp_batch, warp_union
-#                     Family B (recursive IVC; N step circuits):
-#                       quasar_warp, symphony, quasar_symphony
-#
-#   [microbenches]  — isolated measurements (no FoldingScheme shape).
-#                     Use their own [microbench_axes] section.
-#                     fs_scaling, fold_verify          : sweep arity
-#                     circuit_size_arity               : sweep arity, 2 variants
-#                     circuit_sizes_l2                 : single snapshot (l=2)
-#                     terminal_whir                    : sweep log_size
-#                     whir_in_circuit_estimate         : sweep log_size (formula)
+# By default, `bench` runs the explicit [[workloads.points]] below: same plotted
+# values, no unplotted Cartesian products. Use `--workload-mode cartesian` to
+# run the exhaustive [workloads.axes] products for the same workloads.
 
-schemes = [
-    "independent_whir",
-    "pure_warp",
-    "warp_batch",
-    "warp_union",
-    "quasar_warp",
-    "symphony",
-    "quasar_symphony",
-]
+warmup  = 0
+repeats = 1
+output  = "output/dashboard.jsonl"
+render_pdf = true
+pdf_output = "output/dashboard.pdf"
 
 microbenches = [
     "fs_scaling",
@@ -35,27 +16,228 @@ microbenches = [
     "circuit_size_arity",
     "circuit_sizes_l2",
     "terminal_whir",
+    "warp_vs_whir",
     "whir_in_circuit_estimate",
 ]
 
-warmup  = 1
-repeats = 3
-output  = "output/dashboard.jsonl"
+# ── Workload A: same N R1CS instances, large constraints ─────────────
+# This is the fair full-workload comparison for WHIR vs WARP:
+# every scheme proves the same number of Spartan-linearized R1CS instances.
+[[workloads]]
+name = "family_a_same_n"
+schemes = [
+    "independent_whir",
+    "pure_warp",
+    "pure_warp_succinct",
+    "warp_standard",
+    "warp_standard_succinct",
+    "warp_union",
+    "warp_union_succinct",
+]
 
-# ── Scheme sweep axes ────────────────────────────────────────────
-[axes]
-log_n     = [14, 16, 18, 20]
-arity     = [4]       # arity>=4 needed by union & quasar paths
-batch     = [8]       # batch-reduce fan-in for warp_batch
-ivc_steps = [4, 8, 16, 32]
-step_muls = [100]
-seed      = 42
+[workloads.axes]
+log_n           = [14, 16, 18, 20]
+total_instances = [48, 96, 192, 384]
+arity           = [4]
+batch           = [8]
+ivc_steps       = [1] # ignored by same-N schemes when total_instances is set
+step_muls       = [100]
+seed            = 42
 
-# ── Microbench axes ─────────────────────────────────────────────
-# Shared by all microbenches; each one picks the axes it needs.
+[[workloads.points]]
+log_n           = 14
+total_instances = 48
+arity           = 4
+batch           = 8
+ivc_steps       = 1
+step_muls       = 100
+seed            = 42
+
+[[workloads.points]]
+log_n           = 16
+total_instances = 96
+arity           = 4
+batch           = 8
+ivc_steps       = 1
+step_muls       = 100
+seed            = 42
+
+[[workloads.points]]
+log_n           = 18
+total_instances = 192
+arity           = 4
+batch           = 8
+ivc_steps       = 1
+step_muls       = 100
+seed            = 42
+
+[[workloads.points]]
+log_n           = 20
+total_instances = 384
+arity           = 4
+batch           = 8
+ivc_steps       = 1
+step_muls       = 100
+seed            = 42
+
+# ── Workload B: same N, varying arity ────────────────────────────────
+# This is the fair full-workload Quasar comparison: standard WARP absorbs
+# individual roots, Quasar/union absorbs one union root. Both process the same
+# total_instances at the same arity.
+[[workloads]]
+name = "quasar_arity"
+schemes = [
+    "warp_standard",
+    "warp_standard_succinct",
+    "warp_union",
+    "warp_union_succinct",
+]
+
+[workloads.axes]
+log_n           = [18, 20]
+total_instances = [192, 384]
+arity           = [4, 8, 16, 32, 64]
+batch           = [1]
+ivc_steps       = [1]
+step_muls       = [100]
+seed            = 42
+
+# Two log_n × five arity points = 10 cells. log_n=18 with 192 instances is
+# the cheap reference; log_n=20 with 384 instances is the headline Quasar
+# scaling sweep.
+[[workloads.points]]
+log_n           = 18
+total_instances = 192
+arity           = 4
+batch           = 1
+ivc_steps       = 1
+step_muls       = 100
+seed            = 42
+
+[[workloads.points]]
+log_n           = 18
+total_instances = 192
+arity           = 16
+batch           = 1
+ivc_steps       = 1
+step_muls       = 100
+seed            = 42
+
+[[workloads.points]]
+log_n           = 18
+total_instances = 192
+arity           = 64
+batch           = 1
+ivc_steps       = 1
+step_muls       = 100
+seed            = 42
+
+[[workloads.points]]
+log_n           = 20
+total_instances = 384
+arity           = 4
+batch           = 1
+ivc_steps       = 1
+step_muls       = 100
+seed            = 42
+
+[[workloads.points]]
+log_n           = 20
+total_instances = 384
+arity           = 8
+batch           = 1
+ivc_steps       = 1
+step_muls       = 100
+seed            = 42
+
+[[workloads.points]]
+log_n           = 20
+total_instances = 384
+arity           = 16
+batch           = 1
+ivc_steps       = 1
+step_muls       = 100
+seed            = 42
+
+[[workloads.points]]
+log_n           = 20
+total_instances = 384
+arity           = 32
+batch           = 1
+ivc_steps       = 1
+step_muls       = 100
+seed            = 42
+
+[[workloads.points]]
+log_n           = 20
+total_instances = 384
+arity           = 64
+batch           = 1
+ivc_steps       = 1
+step_muls       = 100
+seed            = 42
+
+# ── Workload C: same number of recursive step circuits ───────────────
+# This is the fair recursive-IVC comparison. total_step_circuits is the work
+# unit; arity changes how many fresh recursive circuits are folded per union
+# step. Non-divisible tails are padded and reported as padding_step_circuits.
+[[workloads]]
+name = "recursive_ivc"
+schemes = [
+    "warp_recursive_standard_arity",
+    "warp_recursive_standard_arity_succinct",
+    "quasar_warp",
+    "quasar_warp_succinct",
+    "symphony_standard_arity",
+    "symphony_standard_arity_succinct",
+    "quasar_symphony",
+    "quasar_symphony_succinct",
+]
+
+[workloads.axes]
+log_n               = [18, 20]
+total_step_circuits = [48, 192]
+arity               = [4, 8, 16]
+batch               = [1]
+ivc_steps           = [1]
+step_muls           = [100]    # step_muls=10000 dropped — that block is the killer
+seed                = 42
+
+[[workloads.points]]
+log_n               = 18
+total_step_circuits = 48
+arity               = 16
+batch               = 1
+ivc_steps           = 1
+step_muls           = 100
+seed                = 42
+
+[[workloads.points]]
+log_n               = 20
+total_step_circuits = 48
+arity               = 16
+batch               = 1
+ivc_steps           = 1
+step_muls           = 100
+seed                = 42
+
+[[workloads.points]]
+log_n               = 20
+total_step_circuits = 192
+arity               = 16
+batch               = 1
+ivc_steps           = 1
+step_muls           = 100
+seed                = 42
+
+# ── Microbench axes ──────────────────────────────────────────────────
+# These are supporting measurements, not substitutes for the full workload
+# rows above.
 [microbench_axes]
-arity            = [2, 4, 8, 16, 32, 64]   # fs_scaling, fold_verify, circuit_size_arity
-log_m            = 20                       # fs_scaling, fold_verify
-log_n            = 21                       # fs_scaling, fold_verify
-log_size         = [14, 16, 18, 20]        # terminal_whir, whir_in_circuit_estimate
-terminal_repeats = 3                        # median of N runs for terminal_whir
+arity            = [2, 4, 8, 16, 32, 64]
+log_m            = 20
+log_n            = 21
+log_size         = [14, 16, 18, 20]
+terminal_repeats = 3
+n_instances      = [4, 16, 64]    # 192 dropped to keep warp_vs_whir tractable at log_n=20
+aggregate_log_n  = [14, 16, 18, 20]

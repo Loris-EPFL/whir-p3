@@ -128,9 +128,7 @@ fn sbox_val<F: Field>(x: F, degree: u64) -> F {
 /// by probing with unit vectors.
 ///
 /// Returns `coeffs` where `f(x)[i] = Σ_j coeffs[i][j] * x[j]` for all linear `f`.
-fn extract_linear_coefficients<F, const W: usize>(
-    f: impl Fn(&mut [F; W]),
-) -> [[F; W]; W]
+fn extract_linear_coefficients<F, const W: usize>(f: impl Fn(&mut [F; W])) -> [[F; W]; W]
 where
     F: Field + PrimeCharacteristicRing,
 {
@@ -295,10 +293,10 @@ where
 
 #[cfg(test)]
 mod tests {
-    use p3_koala_bear::{KoalaBear, GenericPoseidon2LinearLayersKoalaBear, Poseidon2KoalaBear};
     use p3_field::PrimeCharacteristicRing;
+    use p3_koala_bear::{GenericPoseidon2LinearLayersKoalaBear, KoalaBear, Poseidon2KoalaBear};
     use p3_symmetric::Permutation;
-    use rand::{rngs::SmallRng, SeedableRng};
+    use rand::{SeedableRng, rngs::SmallRng};
 
     use super::*;
 
@@ -317,17 +315,16 @@ mod tests {
 
         let state_vals: [F; 16] = core::array::from_fn(|i| F::from_u64(i as u64 + 1));
         let mut builder = CircuitBuilder::<F>::new();
-        let state_vars: [Var; 16] =
-            core::array::from_fn(|i| builder.alloc_witness(state_vals[i]));
+        let state_vars: [Var; 16] = core::array::from_fn(|i| builder.alloc_witness(state_vals[i]));
 
-        let (_out_vars, out_vals) =
-            poseidon2_permute_circuit::<F, GenericPoseidon2LinearLayersKoalaBear, _, 16>(
-                &mut builder,
-                &config,
-                &perm,
-                &state_vars,
-                &state_vals,
-            );
+        let (_out_vars, out_vals) = poseidon2_permute_circuit::<
+            F,
+            GenericPoseidon2LinearLayersKoalaBear,
+            _,
+            16,
+        >(
+            &mut builder, &config, &perm, &state_vars, &state_vals
+        );
 
         // Verify against actual permutation
         let mut expected = state_vals;
@@ -356,8 +353,7 @@ mod tests {
 
         let state_vals: [F; 16] = core::array::from_fn(|i| F::from_u64(i as u64 + 1));
         let mut builder = CircuitBuilder::<F>::new();
-        let state_vars: [Var; 16] =
-            core::array::from_fn(|i| builder.alloc_witness(state_vals[i]));
+        let state_vars: [Var; 16] = core::array::from_fn(|i| builder.alloc_witness(state_vals[i]));
 
         let _ = poseidon2_permute_circuit::<F, GenericPoseidon2LinearLayersKoalaBear, _, 16>(
             &mut builder,

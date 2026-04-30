@@ -1,0 +1,23 @@
+schemes = []
+microbenches = ["warp_vs_whir"]
+
+warmup  = 0
+repeats = 1
+output  = "output/warp_vs_whir.jsonl"
+
+[axes]
+log_n     = [14]
+arity     = [4]
+batch     = [1]
+ivc_steps = [1]
+step_muls = [100]
+seed      = 42
+
+[microbench_axes]
+arity            = [4]
+log_m            = 16
+log_n            = 17
+log_size         = [14]
+terminal_repeats = 1
+n_instances      = [4, 16]
+aggregate_log_n  = [14, 16]

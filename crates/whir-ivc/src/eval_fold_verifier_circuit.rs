@@ -79,7 +79,8 @@ pub fn synthesize_eval_fold_verifier<F, L, P, const WIDTH: usize, const RATE: us
     poseidon_config: &Poseidon2CircuitConfig<F, WIDTH>,
     perm: &P,
     witness: &EvalFoldVerifierWitness<F>,
-) -> (Vec<Var>, Var, F) // (challenge_vars, final_claimed_var, final_claimed_val)
+) -> (Vec<Var>, Var, F)
+// (challenge_vars, final_claimed_var, final_claimed_val)
 where
     F: Field + PrimeCharacteristicRing + PrimeField64,
     L: GenericPoseidon2LinearLayers<WIDTH>,
@@ -97,15 +98,21 @@ where
             .map(|&val| builder.alloc_witness(val))
             .collect();
         challenger.observe_slice::<L, P>(
-            builder, poseidon_config, perm,
-            &root_vars, &witness.input_commitment_roots[i],
+            builder,
+            poseidon_config,
+            perm,
+            &root_vars,
+            &witness.input_commitment_roots[i],
         );
 
         // Observe eval claim (1 base field element)
         let claim_var = builder.alloc_witness(witness.input_eval_claims[i]);
         challenger.observe_slice::<L, P>(
-            builder, poseidon_config, perm,
-            &[claim_var], &[witness.input_eval_claims[i]],
+            builder,
+            poseidon_config,
+            perm,
+            &[claim_var],
+            &[witness.input_eval_claims[i]],
         );
 
         // Observe eval point
@@ -114,8 +121,11 @@ where
             .map(|&val| builder.alloc_witness(val))
             .collect();
         challenger.observe_slice::<L, P>(
-            builder, poseidon_config, perm,
-            &point_vars, &witness.input_eval_points[i],
+            builder,
+            poseidon_config,
+            perm,
+            &point_vars,
+            &witness.input_eval_points[i],
         );
     }
 
@@ -135,7 +145,9 @@ where
     // The verifier doesn't need to recompute eq(τ, i) · μ_i in-circuit
     // (that would require exponentiation). Instead, we verify the sumcheck
     // rounds are self-consistent: h_0(0) + h_0(1) = initial_claim.
-    let initial_claim_val = witness.sumcheck_evals.first()
+    let initial_claim_val = witness
+        .sumcheck_evals
+        .first()
         .map(|e| e[0] + e[1])
         .unwrap_or(F::ZERO);
     let initial_claim_var = builder.alloc_witness(initial_claim_val);
@@ -157,8 +169,11 @@ where
         let round_vals = [e0_val, e1_val, e2_val];
         let e1_var = builder.alloc_witness(e1_val);
         challenger.observe_slice::<L, P>(
-            builder, poseidon_config, perm,
-            &[e0_var, e1_var, e2_var], &round_vals,
+            builder,
+            poseidon_config,
+            perm,
+            &[e0_var, e1_var, e2_var],
+            &round_vals,
         );
 
         // Constrain: e0 + e1 = claimed
@@ -213,8 +228,7 @@ where
         builder.enforce(
             LinearCombination::from_constant(F::TWO),
             LinearCombination::from_var(c2_var),
-            LinearCombination::from_var(e2_var)
-                - LinearCombination::from_scaled(e1_var, F::TWO)
+            LinearCombination::from_var(e2_var) - LinearCombination::from_scaled(e1_var, F::TWO)
                 + LinearCombination::from_var(e0_var),
         );
 
@@ -284,7 +298,11 @@ where
     // Part 2: Eval-fold verifier (if previous accumulation exists)
     if let Some(witness) = verifier_witness {
         let _ = synthesize_eval_fold_verifier::<F, L, P, WIDTH, RATE>(
-            builder, challenger, poseidon_config, perm, witness,
+            builder,
+            challenger,
+            poseidon_config,
+            perm,
+            witness,
         );
     }
 
@@ -310,11 +328,11 @@ where
 mod tests {
     use alloc::vec;
 
-    use p3_koala_bear::{KoalaBear, GenericPoseidon2LinearLayersKoalaBear, Poseidon2KoalaBear};
     use p3_challenger::DuplexChallenger;
     use p3_field::PrimeCharacteristicRing;
-    
-    use rand::{rngs::SmallRng, SeedableRng};
+    use p3_koala_bear::{GenericPoseidon2LinearLayersKoalaBear, KoalaBear, Poseidon2KoalaBear};
+
+    use rand::{SeedableRng, rngs::SmallRng};
 
     use super::*;
     use crate::ivc::step::TrivialStepCircuit;
@@ -326,9 +344,8 @@ mod tests {
     #[test]
     fn eval_fold_verifier_circuit_builds() {
         let poseidon_perm = Perm::new_from_rng_128(&mut SmallRng::seed_from_u64(99));
-        let poseidon_config = Poseidon2CircuitConfig::<F, 16>::from_rng(
-            8, 20, 3, &mut SmallRng::seed_from_u64(99),
-        );
+        let poseidon_config =
+            Poseidon2CircuitConfig::<F, 16>::from_rng(8, 20, 3, &mut SmallRng::seed_from_u64(99));
 
         let witness = EvalFoldVerifierWitness {
             input_commitment_roots: vec![vec![F::ZERO; 8]; 2],
@@ -342,11 +359,12 @@ mod tests {
         let mut challenger = CircuitChallenger::<F, 16, 8>::new(&mut builder);
 
         let (challenges, _final_var, final_val) =
-            synthesize_eval_fold_verifier::<
-                F, GenericPoseidon2LinearLayersKoalaBear, _, 16, 8,
-            >(
-                &mut builder, &mut challenger,
-                &poseidon_config, &poseidon_perm, &witness,
+            synthesize_eval_fold_verifier::<F, GenericPoseidon2LinearLayersKoalaBear, _, 16, 8>(
+                &mut builder,
+                &mut challenger,
+                &poseidon_config,
+                &poseidon_perm,
+                &witness,
             );
 
         assert_eq!(challenges.len(), 1);
@@ -362,9 +380,8 @@ mod tests {
     #[test]
     fn eval_fold_ivc_circuit_builds_with_and_without_verifier() {
         let poseidon_perm = Perm::new_from_rng_128(&mut SmallRng::seed_from_u64(99));
-        let poseidon_config = Poseidon2CircuitConfig::<F, 16>::from_rng(
-            8, 20, 3, &mut SmallRng::seed_from_u64(99),
-        );
+        let poseidon_config =
+            Poseidon2CircuitConfig::<F, 16>::from_rng(8, 20, 3, &mut SmallRng::seed_from_u64(99));
         let step = TrivialStepCircuit::new(1);
 
         // WITH verifier
@@ -379,11 +396,21 @@ mod tests {
         let mut builder_with = CircuitBuilder::<F>::new();
         let mut chal_with = CircuitChallenger::<F, 16, 8>::new(&mut builder_with);
         let _ = synthesize_eval_fold_ivc_circuit::<
-            F, GenericPoseidon2LinearLayersKoalaBear, _, _, 16, 8,
+            F,
+            GenericPoseidon2LinearLayersKoalaBear,
+            _,
+            _,
+            16,
+            8,
         >(
-            &mut builder_with, &mut chal_with,
-            &poseidon_config, &poseidon_perm,
-            &step, &[F::ZERO], Some(&witness), None,
+            &mut builder_with,
+            &mut chal_with,
+            &poseidon_config,
+            &poseidon_perm,
+            &step,
+            &[F::ZERO],
+            Some(&witness),
+            None,
         );
         let target = builder_with.num_witness_vars();
 
@@ -391,11 +418,21 @@ mod tests {
         let mut builder_without = CircuitBuilder::<F>::new();
         let mut chal_without = CircuitChallenger::<F, 16, 8>::new(&mut builder_without);
         let _ = synthesize_eval_fold_ivc_circuit::<
-            F, GenericPoseidon2LinearLayersKoalaBear, _, _, 16, 8,
+            F,
+            GenericPoseidon2LinearLayersKoalaBear,
+            _,
+            _,
+            16,
+            8,
         >(
-            &mut builder_without, &mut chal_without,
-            &poseidon_config, &poseidon_perm,
-            &step, &[F::ZERO], None, Some(target),
+            &mut builder_without,
+            &mut chal_without,
+            &poseidon_config,
+            &poseidon_perm,
+            &step,
+            &[F::ZERO],
+            None,
+            Some(target),
         );
 
         let (shape_with, _) = builder_with.build();
@@ -406,16 +443,18 @@ mod tests {
             shape_without.num_poly_vars_y(),
             "padded circuit has different poly vars"
         );
-        assert!(instance_without.verify(), "padded circuit R1CS not satisfied");
+        assert!(
+            instance_without.verify(),
+            "padded circuit R1CS not satisfied"
+        );
     }
 
     /// Compare circuit sizes: eval-fold verifier vs v2 constraint-batch verifier
     #[test]
     fn compare_circuit_sizes_eval_fold_vs_constraint_batch() {
         let poseidon_perm = Perm::new_from_rng_128(&mut SmallRng::seed_from_u64(99));
-        let poseidon_config = Poseidon2CircuitConfig::<F, 16>::from_rng(
-            8, 20, 3, &mut SmallRng::seed_from_u64(99),
-        );
+        let poseidon_config =
+            Poseidon2CircuitConfig::<F, 16>::from_rng(8, 20, 3, &mut SmallRng::seed_from_u64(99));
 
         // Eval-fold verifier (base field sumcheck, 1 round)
         let eval_witness = EvalFoldVerifierWitness {
@@ -427,9 +466,13 @@ mod tests {
         };
         let mut eval_builder = CircuitBuilder::<F>::new();
         let mut eval_chal = CircuitChallenger::<F, 16, 8>::new(&mut eval_builder);
-        let _ = synthesize_eval_fold_verifier::<
-            F, GenericPoseidon2LinearLayersKoalaBear, _, 16, 8,
-        >(&mut eval_builder, &mut eval_chal, &poseidon_config, &poseidon_perm, &eval_witness);
+        let _ = synthesize_eval_fold_verifier::<F, GenericPoseidon2LinearLayersKoalaBear, _, 16, 8>(
+            &mut eval_builder,
+            &mut eval_chal,
+            &poseidon_config,
+            &poseidon_perm,
+            &eval_witness,
+        );
         let eval_constraints = eval_builder.num_constraints();
         let _eval_witness_vars = eval_builder.num_witness_vars();
 
@@ -448,8 +491,19 @@ mod tests {
         let mut v2_builder = CircuitBuilder::<F>::new();
         let mut v2_chal = CircuitChallenger::<F, 16, 8>::new(&mut v2_builder);
         let _ = crate::ivc::verifier_circuit::synthesize_accumulation_verifier::<
-            F, GenericPoseidon2LinearLayersKoalaBear, _, 16, 8,
-        >(&mut v2_builder, &mut v2_chal, &poseidon_config, &poseidon_perm, &v2_witness, F::from_u64(3));
+            F,
+            GenericPoseidon2LinearLayersKoalaBear,
+            _,
+            16,
+            8,
+        >(
+            &mut v2_builder,
+            &mut v2_chal,
+            &poseidon_config,
+            &poseidon_perm,
+            &v2_witness,
+            F::from_u64(3),
+        );
         let v2_constraints = v2_builder.num_constraints();
         let _v2_witness_vars = v2_builder.num_witness_vars();
 
@@ -461,7 +515,8 @@ mod tests {
         assert!(
             eval_constraints <= v2_constraints,
             "eval-fold verifier should have fewer constraints: {} vs {}",
-            eval_constraints, v2_constraints,
+            eval_constraints,
+            v2_constraints,
         );
     }
 }

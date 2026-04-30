@@ -319,13 +319,15 @@ macro_rules! bench_field_impl {
 
             /// Run the table-vs-oracle comparison for given log_m sizes.
             pub(crate) fn run_compare(log_ms: &[usize], repeats: usize) {
-                println!("Spartan Prover: Table vs Oracle — {} ({})", $field_name, stringify!($F));
+                println!(
+                    "Spartan Prover: Table vs Oracle — {} ({})",
+                    $field_name,
+                    stringify!($F)
+                );
                 println!("================================================================");
                 println!(
                     "{:>6} {:>6} {:>5} | {:>10} {:>10} {:>10} | {:>7}",
-                    "log_m", "shape", "nnz/r",
-                    "table_ms", "oracle_ms", "verify_ms",
-                    "speedup",
+                    "log_m", "shape", "nnz/r", "table_ms", "oracle_ms", "verify_ms", "speedup",
                 );
                 println!("{}", "-".repeat(72));
 
@@ -335,7 +337,11 @@ macro_rules! bench_field_impl {
                         let num_vars = shape.num_vars(num_cons);
                         let nnz_per_row = 4usize.min(num_vars.max(1));
 
-                        let scenario = Scenario { shape, log_m, nnz_per_row };
+                        let scenario = Scenario {
+                            shape,
+                            log_m,
+                            nnz_per_row,
+                        };
                         let material = build_scenario::<$F>(&scenario);
 
                         // Warm up
@@ -701,7 +707,9 @@ fn parse_csv_sizes(s: &str) -> Vec<usize> {
 
 fn print_compare_usage() {
     eprintln!("Usage:");
-    eprintln!("  spartan_spark_bench compare <log_m_sizes> <repeats> [--field koalabear|m31|goldilocks|all]");
+    eprintln!(
+        "  spartan_spark_bench compare <log_m_sizes> <repeats> [--field koalabear|m31|goldilocks|all]"
+    );
     eprintln!("  spartan_spark_bench [--quick]              (original CSV benchmark)");
     eprintln!();
     eprintln!("Examples:");
@@ -719,11 +727,10 @@ fn main() {
             print_compare_usage();
             std::process::exit(1);
         });
-        let repeats: usize = args
-            .get(3)
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(5);
-        let field_flag = args.iter().position(|a| a == "--field")
+        let repeats: usize = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(5);
+        let field_flag = args
+            .iter()
+            .position(|a| a == "--field")
             .and_then(|i| args.get(i + 1))
             .map(|s| s.to_lowercase());
         let field = field_flag.as_deref().unwrap_or("koalabear");
@@ -732,7 +739,10 @@ fn main() {
 
         println!("Table-based vs Oracle-based Spartan Prover");
         println!("==========================================");
-        println!("log_m sizes: {:?}  |  repeats: {}  |  field: {}", log_ms, repeats, field);
+        println!(
+            "log_m sizes: {:?}  |  repeats: {}  |  field: {}",
+            log_ms, repeats, field
+        );
         println!();
 
         match field {

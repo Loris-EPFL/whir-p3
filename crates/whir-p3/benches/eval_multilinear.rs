@@ -1,6 +1,6 @@
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use p3_koala_bear::KoalaBear;
 use p3_field::{ExtensionField, Field, extension::BinomialExtensionField};
+use p3_koala_bear::KoalaBear;
 use rand::{
     RngExt, SeedableRng,
     distr::{Distribution, StandardUniform},

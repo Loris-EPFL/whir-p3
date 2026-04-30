@@ -24,11 +24,7 @@ pub trait StepCircuit<F: Field> {
     ///
     /// Given the input state variables, produce the output state variables
     /// and add all necessary R1CS constraints to the builder.
-    fn synthesize(
-        &self,
-        builder: &mut CircuitBuilder<F>,
-        input_state: &[Var],
-    ) -> Vec<Var>;
+    fn synthesize(&self, builder: &mut CircuitBuilder<F>, input_state: &[Var]) -> Vec<Var>;
 }
 
 /// A trivial step circuit that just copies input to output (identity function).
@@ -50,11 +46,7 @@ impl<F: Field> StepCircuit<F> for TrivialStepCircuit {
         self.state_size
     }
 
-    fn synthesize(
-        &self,
-        _builder: &mut CircuitBuilder<F>,
-        input_state: &[Var],
-    ) -> Vec<Var> {
+    fn synthesize(&self, _builder: &mut CircuitBuilder<F>, input_state: &[Var]) -> Vec<Var> {
         // Identity: output = input (no constraints added)
         input_state.to_vec()
     }
@@ -82,11 +74,7 @@ impl<F: Field> StepCircuit<F> for WorkloadStepCircuit {
         1
     }
 
-    fn synthesize(
-        &self,
-        builder: &mut CircuitBuilder<F>,
-        input_state: &[Var],
-    ) -> Vec<Var> {
+    fn synthesize(&self, builder: &mut CircuitBuilder<F>, input_state: &[Var]) -> Vec<Var> {
         // Generate num_muls independent multiplication constraints.
         // Each constraint: a_i * a_i = b_i where a_i and b_i are fresh
         // witness variables with consistent values. This is independent
@@ -123,11 +111,7 @@ impl<F: Field> StepCircuit<F> for SquaringStepCircuit {
         self.state_size
     }
 
-    fn synthesize(
-        &self,
-        _builder: &mut CircuitBuilder<F>,
-        input_state: &[Var],
-    ) -> Vec<Var> {
+    fn synthesize(&self, _builder: &mut CircuitBuilder<F>, input_state: &[Var]) -> Vec<Var> {
         input_state
             .iter()
             .map(|&v| {
@@ -151,8 +135,8 @@ impl<F: Field> StepCircuit<F> for SquaringStepCircuit {
 mod tests {
     use alloc::vec;
 
-    use p3_koala_bear::KoalaBear;
     use p3_field::PrimeCharacteristicRing;
+    use p3_koala_bear::KoalaBear;
 
     use super::*;
 

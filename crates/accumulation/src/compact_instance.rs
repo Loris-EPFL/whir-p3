@@ -63,8 +63,7 @@ where
         use crate::whir::constraints::statement::LinearStatement;
 
         let num_variables = self.evaluation_point.num_variables();
-        let eq_weights =
-            EvaluationsList::new_from_point(self.evaluation_point.as_slice(), EF::ONE);
+        let eq_weights = EvaluationsList::new_from_point(self.evaluation_point.as_slice(), EF::ONE);
         let mut statement = LinearStatement::<F, EF>::initialize(num_variables);
         statement.add_constraint(eq_weights, self.evaluation_value);
 
@@ -128,8 +127,8 @@ where
 mod tests {
     use alloc::vec;
 
+    use p3_field::{PrimeCharacteristicRing, extension::BinomialExtensionField};
     use p3_koala_bear::KoalaBear;
-    use p3_field::{extension::BinomialExtensionField, PrimeCharacteristicRing};
 
     use super::*;
 
@@ -138,11 +137,7 @@ mod tests {
 
     #[test]
     fn compact_expand_round_trip() {
-        let point = MultilinearPoint::new(vec![
-            EF::from_u64(3),
-            EF::from_u64(7),
-            EF::from_u64(11),
-        ]);
+        let point = MultilinearPoint::new(vec![EF::from_u64(3), EF::from_u64(7), EF::from_u64(11)]);
         let value = EF::from_u64(42);
         let root = [F::ONE; 8];
 

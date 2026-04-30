@@ -2,21 +2,26 @@ use std::time::Instant;
 
 use p3_challenger::DuplexChallenger;
 use p3_dft::Radix2DFTSmallBatch;
-use p3_field::{extension::BinomialExtensionField, PrimeCharacteristicRing};
+use p3_field::{PrimeCharacteristicRing, extension::BinomialExtensionField};
 use p3_koala_bear::{KoalaBear, Poseidon2KoalaBear};
 use p3_poseidon2::poseidon2_round_numbers_128;
 use p3_symmetric::{PaddingFreeSponge, TruncatedPermutation};
-use rand::{rngs::SmallRng, SeedableRng};
+use rand::{SeedableRng, rngs::SmallRng};
 
 use whir_circuit::poseidon2::Poseidon2CircuitConfig;
 
 use accumulation::linearized::linearized_statement_from_spartan_proof;
+use p3_field::Field;
 use warp::{
     accumulator::{WarpAccumulator, WarpAccumulatorInstance, WarpAccumulatorWitness},
+    decider::warp_decide_full_rs,
+    encoding::merkle_commit_codeword,
     fold::WarpFoldResult,
 };
+use whir_core::parameters::{FoldingFactor, ProtocolParameters, errors::SecurityAssumption};
 use whir_core::poly::evals::EvaluationsList;
 use whir_core::poly::multilinear::MultilinearPoint;
+use whir_pcs::fiat_shamir::domain_separator::DomainSeparator;
 use whir_pcs::whir::{
     committer::{reader::CommitmentReader, writer::CommitmentWriter},
     constraints::statement::{EqStatement, InitialClaim, LinearStatement},
@@ -25,13 +30,12 @@ use whir_pcs::whir::{
     prover::Prover as WhirProver,
     verifier::Verifier as WhirVerifier,
 };
-use p3_field::Field;
-use whir_core::parameters::{errors::SecurityAssumption, FoldingFactor, ProtocolParameters};
-use whir_pcs::fiat_shamir::domain_separator::DomainSeparator;
 use whir_spartan::{
     r1cs::{R1CSInstance, R1CSShape},
     r1cs_prover::R1CSProver,
 };
+
+use crate::metrics::Metrics;
 
 pub type F = KoalaBear;
 pub type EF = BinomialExtensionField<F, 4>;
@@ -165,6 +169,49 @@ pub fn make_dft() -> Radix2DFTSmallBatch<F> {
     Radix2DFTSmallBatch::<F>::default()
 }
 
+pub fn verify_full_warp_terminal(
+    shape: &R1CSShape<F>,
+    acc: &WarpAccumulator<F, F, F, DIGEST>,
+    folding_factor: usize,
+    log_inv_rate: usize,
+) -> anyhow::Result<()> {
+    let dft = make_dft();
+    warp_decide_full_rs(shape, acc, folding_factor, log_inv_rate, &dft)
+        .map_err(|e| anyhow::anyhow!("full WARP decider failed: {e:?}"))?;
+
+    let (mh, mc) = make_hc();
+    let (root, _) = merkle_commit_codeword::<
+        F,
+        F,
+        <F as Field>::Packing,
+        <F as Field>::Packing,
+        MyHash,
+        MyCompress,
+        DIGEST,
+    >(&acc.witness.codeword, folding_factor, mh, mc);
+
+    if root != acc.instance.commitment_root {
+        anyhow::bail!("accumulator commitment root is not bound to the codeword");
+    }
+
+    Ok(())
+}
+
+pub fn verify_full_warp_terminal_measured(
+    m: &mut Metrics,
+    shape: &R1CSShape<F>,
+    acc: &WarpAccumulator<F, F, F, DIGEST>,
+    folding_factor: usize,
+    log_inv_rate: usize,
+) -> anyhow::Result<()> {
+    let start = Instant::now();
+    let result = verify_full_warp_terminal(shape, acc, folding_factor, log_inv_rate);
+    let ns = start.elapsed().as_nanos();
+    m.record("terminal_decider", ns);
+    m.record("verify_total", ns);
+    result
+}
+
 pub fn produce_synthetic_r1cs(
     log_size: usize,
 ) -> (R1CSShape<F>, R1CSInstance<F>, usize, usize, usize, usize) {
@@ -179,10 +226,7 @@ pub fn produce_synthetic_r1cs(
     let num_witness = (sample_w.num_evals() - num_inputs).next_power_of_two();
     let witness_num_vars = num_witness.trailing_zeros() as usize;
     let log_code = witness_num_vars + RS_LOG_INV_RATE;
-    let log_m = shape
-        .num_cons()
-        .next_power_of_two()
-        .trailing_zeros() as usize;
+    let log_m = shape.num_cons().next_power_of_two().trailing_zeros() as usize;
     (shape, instance, num_witness, num_inputs, log_code, log_m)
 }
 
@@ -217,6 +261,20 @@ pub fn terminal_whir_prove(
     proof
 }
 
+pub fn terminal_whir_prove_measured(
+    m: &mut Metrics,
+    config: &WhirConfig<EF, F, MyHash, MyCompress, MyChallenger>,
+    witness: &[F],
+    witness_num_vars: usize,
+) -> WhirProof<F, EF, F, DIGEST> {
+    let start = Instant::now();
+    let proof = terminal_whir_prove(config, witness, witness_num_vars);
+    let ns = start.elapsed().as_nanos();
+    m.record("terminal_whir_prove", ns);
+    m.record("prove_total", ns);
+    proof
+}
+
 /// Run a terminal WHIR verify (succinct — no witness needed).
 pub fn terminal_whir_verify(
     config: &WhirConfig<EF, F, MyHash, MyCompress, MyChallenger>,
@@ -232,10 +290,43 @@ pub fn terminal_whir_verify(
     let parsed = CommitmentReader::new(config).parse_commitment::<F, DIGEST>(proof, &mut ch);
     WhirVerifier::new(config)
         .verify_with_initial_claim::<<F as Field>::Packing, F, <F as Field>::Packing, DIGEST>(
-            proof, &mut ch, &parsed, initial_claim,
+            proof,
+            &mut ch,
+            &parsed,
+            initial_claim,
         )
         .map(|_| ())
         .map_err(|e| anyhow::anyhow!("terminal WHIR verify failed: {e:?}"))
+}
+
+/// Run terminal WHIR verification and require its committed root to match the
+/// WARP accumulator root that the terminal proof is supposed to discharge.
+pub fn terminal_whir_verify_bound(
+    config: &WhirConfig<EF, F, MyHash, MyCompress, MyChallenger>,
+    proof: &WhirProof<F, EF, F, DIGEST>,
+    witness_num_vars: usize,
+    expected_root: [F; DIGEST],
+) -> anyhow::Result<()> {
+    terminal_whir_verify(config, proof, witness_num_vars)?;
+    if proof.initial_commitment != expected_root {
+        anyhow::bail!("terminal WHIR commitment root does not match accumulator root");
+    }
+    Ok(())
+}
+
+pub fn terminal_whir_verify_bound_measured(
+    m: &mut Metrics,
+    config: &WhirConfig<EF, F, MyHash, MyCompress, MyChallenger>,
+    proof: &WhirProof<F, EF, F, DIGEST>,
+    witness_num_vars: usize,
+    expected_root: [F; DIGEST],
+) -> anyhow::Result<()> {
+    let start = Instant::now();
+    let result = terminal_whir_verify_bound(config, proof, witness_num_vars, expected_root);
+    let ns = start.elapsed().as_nanos();
+    m.record("terminal_whir_verify", ns);
+    m.record("verify_total", ns);
+    result
 }
 
 /// Estimate WHIR proof size in field elements.

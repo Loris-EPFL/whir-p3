@@ -2,30 +2,51 @@
 //!
 //! Each IVC iteration absorbs `batch` fresh R1CS instances. The batch is
 //! reduced to a single witness (constraint_batch sumcheck + random LC), then
-//! folded at l=2 into the running accumulator. Mirrors compare_bench's
-//! `batch_then_fold` path.
+//! folded at l=2 into the running accumulator.
 //!
 //! Total instances processed = `ivc_steps * batch`.
+//!
+//! Spartan runs OUTSIDE `prove_total` (see `spartan_linearize_all` below) so
+//! the timer measures fold-only work. This makes prover comparisons
+//! apples-to-apples post-Spartan against other Family A schemes.
 
-use p3_field::PrimeCharacteristicRing;
-use warp::decider::warp_decide_algebraic_rs;
-use whir_ivc::warp_ivc::{warp_ivc_init, warp_ivc_step_batch, WarpIVCConfig, WarpIVCState};
+use warp::accumulator::FreshInstance;
+use whir_ivc::warp_ivc::{
+    WarpIVCConfig, WarpIVCState, warp_ivc_init_fold, warp_ivc_step_batch_fold,
+};
 use whir_spartan::r1cs::{R1CSInstance, R1CSShape};
 
 use crate::{
     axes::Axes,
-    fixtures::{make_challenger, make_hc, produce_synthetic_r1cs, EF, F},
+    fixtures::{
+        F, make_hc, produce_synthetic_r1cs, spartan_linearize_all,
+        verify_full_warp_terminal_measured,
+    },
     metrics::{Metrics, StaticMetrics},
     scheme::FoldingScheme,
 };
+use p3_challenger::DuplexChallenger;
+use p3_field::PrimeCharacteristicRing;
+use p3_koala_bear::Poseidon2KoalaBear;
+use rand::{SeedableRng, rngs::SmallRng};
+
+type Perm = Poseidon2KoalaBear<16>;
+type MyChallenger = DuplexChallenger<F, Perm, 16, 8>;
+
+fn make_challenger(seed: u64) -> MyChallenger {
+    let p = Perm::new_from_rng_128(&mut SmallRng::seed_from_u64(seed));
+    MyChallenger::new(p)
+}
 
 #[derive(Debug)]
 pub struct WarpBatch {
     shape: R1CSShape<F>,
     instance: R1CSInstance<F>,
     ivc_config: WarpIVCConfig,
-    ivc_steps: usize,
     batch: usize,
+    num_inputs: usize,
+    num_witness: usize,
+    total_instances: usize,
 }
 
 impl FoldingScheme for WarpBatch {
@@ -33,13 +54,20 @@ impl FoldingScheme for WarpBatch {
     type Proof = WarpIVCState<F>;
 
     fn setup(axes: &Axes) -> Self {
-        let (shape, instance, _, _, _, _) = produce_synthetic_r1cs(axes.log_n);
+        let (shape, instance, num_witness, num_inputs, _, _) = produce_synthetic_r1cs(axes.log_n);
+        let batch = axes.batch.max(1);
+        let total_instances = axes
+            .total_instances
+            .unwrap_or_else(|| 1 + axes.ivc_steps * batch)
+            .max(1);
         Self {
             shape,
             instance,
             ivc_config: WarpIVCConfig::default(),
-            ivc_steps: axes.ivc_steps,
-            batch: axes.batch.max(1),
+            batch,
+            num_inputs,
+            num_witness,
+            total_instances,
         }
     }
 
@@ -49,12 +77,29 @@ impl FoldingScheme for WarpBatch {
         let make_fold_chal = || make_challenger(77);
         let batch = self.batch;
 
+        // ── Spartan phase: linearize (init + ivc_steps * batch) instances
+        //    externally so that `prove_total` measures ONLY fold work.
+        let total_fresh = self.total_instances;
+        let (linearized, spartan_us) =
+            spartan_linearize_all(&self.shape, &self.instance, total_fresh);
+        m.record("spartan", (spartan_us * 1000.0) as u128);
+
+        let to_fresh = |idx: usize| -> FreshInstance<F> {
+            let z = linearized[idx].witness.as_slice();
+            let public_input = Vec::new();
+            let mut witness = z.to_vec();
+            witness.resize(self.num_witness, F::ZERO);
+            FreshInstance {
+                public_input,
+                witness,
+            }
+        };
+
+        // ── Fold-only phase: post-Spartan.
         let state = m.time("prove_total", || {
-            let mut spartan_ch = make_challenger(1);
-            let mut state = warp_ivc_init::<F, EF, _, _, _, _, _>(
+            let mut state = warp_ivc_init_fold::<F, _, _, _, _>(
                 &self.shape,
-                &self.instance,
-                &mut spartan_ch,
+                to_fresh(0),
                 &self.ivc_config,
                 &dft,
                 mh.clone(),
@@ -63,17 +108,24 @@ impl FoldingScheme for WarpBatch {
                 make_fold_chal,
             );
 
-            for step in 0..self.ivc_steps {
-                let batch_instances: Vec<R1CSInstance<F>> =
-                    (0..batch).map(|_| self.instance.clone()).collect();
-                let mut spartan_chals: Vec<_> =
-                    (0..batch).map(|i| make_challenger(step as u64 * 1000 + i as u64 + 1)).collect();
+            let mut next = 1;
+            let mut step = 0usize;
+            while next < self.total_instances {
+                let end = (next + batch).min(self.total_instances);
+                let witnesses: Vec<_> = linearized[next..end]
+                    .iter()
+                    .map(|li| li.witness.clone())
+                    .collect();
+                let linears: Vec<_> = linearized[next..end]
+                    .iter()
+                    .map(|li| li.linear.clone())
+                    .collect();
                 let mut cb_chal = make_challenger(step as u64 + 77);
-                state = warp_ivc_step_batch::<F, EF, _, _, _, _, _>(
+                state = warp_ivc_step_batch_fold::<F, crate::fixtures::EF, _, _, _, _, _>(
                     &state,
-                    &batch_instances,
-                    &mut spartan_chals,
-                    <EF as PrimeCharacteristicRing>::from_u64(3),
+                    &witnesses,
+                    &linears,
+                    0,
                     &self.ivc_config,
                     &dft,
                     mh.clone(),
@@ -82,20 +134,31 @@ impl FoldingScheme for WarpBatch {
                     vec![],
                     make_fold_chal,
                 );
+                next = end;
+                step += 1;
             }
             state
         });
 
-        m.count("total_instances", (self.ivc_steps * batch) as u64);
+        m.count("total_instances", self.total_instances as u64);
+        m.count("target_total_instances", self.total_instances as u64);
+        m.count(
+            "folds",
+            self.total_instances.saturating_sub(1).div_ceil(batch) as u64,
+        );
+        m.count("fresh_per_full_fold", batch as u64);
         m.count("family_a", 1);
         state
     }
 
     fn verify(&self, proof: &Self::Proof, m: &mut Metrics) -> anyhow::Result<()> {
-        m.time("verify_total", || {
-            warp_decide_algebraic_rs(&proof.shape, &proof.accumulator)
-                .map_err(|e| anyhow::anyhow!("decider failed: {e:?}"))
-        })
+        verify_full_warp_terminal_measured(
+            m,
+            &proof.shape,
+            &proof.accumulator,
+            self.ivc_config.rs_folding_factor,
+            self.ivc_config.rs_log_inv_rate,
+        )
     }
 
     fn static_metrics(&self, _proof: &Self::Proof) -> StaticMetrics {
@@ -119,6 +182,8 @@ mod tests {
             ivc_steps: 2,
             step_muls: 100,
             seed: 42,
+            total_instances: None,
+            total_step_circuits: None,
         };
         let s = WarpBatch::setup(&axes);
         let mut m = Metrics::new();

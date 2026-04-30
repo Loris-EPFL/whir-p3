@@ -10,11 +10,15 @@
 //!   cargo run --release -p whir-bench --features symphony \
 //!       --bin compare_bench -- <log_sizes> <num_steps> <repeats> <batch>
 
-use std::{env, fs::File, io::{BufWriter, Write}, time::Instant};
+use std::{
+    env,
+    fs::File,
+    io::{BufWriter, Write},
+    time::Instant,
+};
 
 use accumulation::{
-    constraint_batch::constraint_batch_prove,
-    linearized::linearized_statement_from_spartan_proof,
+    constraint_batch::constraint_batch_prove, linearized::linearized_statement_from_spartan_proof,
     random_lc::random_linear_combination,
 };
 use p3_challenger::DuplexChallenger;
@@ -27,7 +31,7 @@ use warp::{
     accumulator::{
         FreshInstance, WarpAccumulator, WarpAccumulatorInstance, WarpAccumulatorWitness,
     },
-    decider::warp_decide_algebraic_rs,
+    decider::warp_decide_full_rs,
     encoding::merkle_commit_codeword,
     fold::{RSEncodingConfig, WarpFoldResult, warp_fold_prove_rs_committed},
 };
@@ -145,16 +149,48 @@ fn make_zero_acc(nw: usize, lc: usize, lm: usize, ni: usize) -> WarpAccumulator<
     )
 }
 
+fn assert_full_warp_terminal(
+    shape: &R1CSShape<F>,
+    acc: &WarpAccumulator<F, F, F, DIGEST>,
+    folding_factor: usize,
+    log_inv_rate: usize,
+    dft: &Radix2DFTSmallBatch<F>,
+) {
+    warp_decide_full_rs(shape, acc, folding_factor, log_inv_rate, dft)
+        .expect("full WARP terminal decider failed");
+
+    let (mh, mc) = make_hc();
+    let (root, _) = merkle_commit_codeword::<
+        F,
+        F,
+        <F as Field>::Packing,
+        <F as Field>::Packing,
+        MyHash,
+        MyCompress,
+        DIGEST,
+    >(&acc.witness.codeword, folding_factor, mh, mc);
+    assert_eq!(
+        root, acc.instance.commitment_root,
+        "accumulator commitment root is not bound to the codeword"
+    );
+}
+
+fn assert_terminal_whir_bound(
+    proof: &WhirProof<F, EF, F, DIGEST>,
+    acc: &WarpAccumulator<F, F, F, DIGEST>,
+) {
+    assert_eq!(
+        proof.initial_commitment, acc.instance.commitment_root,
+        "terminal WHIR commitment root does not match accumulator root"
+    );
+}
+
 /// Common preparation: Spartan-linearize N instances. Returns witnesses + timing.
 fn spartan_linearize_all(
     shape: &R1CSShape<F>,
     instance: &R1CSInstance<F>,
     total_n: usize,
-) -> (
-    Vec<EvaluationsList<F>>,
-    Vec<LinearStatement<F, EF>>,
-    f64,
-) {
+) -> (Vec<EvaluationsList<F>>, Vec<LinearStatement<F, EF>>, f64) {
     let spartan = R1CSProver::new();
     let start = Instant::now();
     let mut witnesses = Vec::with_capacity(total_n);
@@ -302,7 +338,8 @@ fn measure_fold_verifier_full(log_m: usize, log_n: usize, l: usize) -> (f64, f64
         let two = F::from_u64(2);
         let inv2 = two.inverse();
         // h(c) = h0 · (c-1)(c-2)/2  − h1 · c(c-2)  +  h2 · c(c-1)/2
-        h0 * ((c - F::ONE) * (c - two) * inv2) - h1 * (c * (c - two)) + h2 * (c * (c - F::ONE) * inv2)
+        h0 * ((c - F::ONE) * (c - two) * inv2) - h1 * (c * (c - two))
+            + h2 * (c * (c - F::ONE) * inv2)
     };
 
     // Build a *consistent* synthetic sumcheck trace given a starting target
@@ -349,12 +386,12 @@ fn measure_fold_verifier_full(log_m: usize, log_n: usize, l: usize) -> (f64, f64
             initial_target += eq * (mu_vals[idx] + omega * eta_vals[idx]);
         }
         // Sumcheck challenges — perturb per iteration so results can't be cached
-        let sumcheck_chals: Vec<F> =
-            (0..log_l).map(|i| F::from_u64(i as u64 + 1 + iter as u64)).collect();
+        let sumcheck_chals: Vec<F> = (0..log_l)
+            .map(|i| F::from_u64(i as u64 + 1 + iter as u64))
+            .collect();
         let (round_polys, _expected) = build_trace(initial_target, &sumcheck_chals);
-        let final_eval =
-            warp_fold_verify_sumcheck(initial_target, &round_polys, &sumcheck_chals)
-                .expect("sumcheck trace rejected");
+        let final_eval = warp_fold_verify_sumcheck(initial_target, &round_polys, &sumcheck_chals)
+            .expect("sumcheck trace rejected");
         std_accum += final_eval;
     }
     let std_us = start_std.elapsed().as_micros() as f64 / 100.0;
@@ -385,12 +422,12 @@ fn measure_fold_verifier_full(log_m: usize, log_n: usize, l: usize) -> (f64, f64
             }
             initial_target += eq * (mu_vals[idx] + omega * eta_vals[idx]);
         }
-        let sumcheck_chals: Vec<F> =
-            (0..log_l).map(|i| F::from_u64(i as u64 + 1 + iter as u64)).collect();
+        let sumcheck_chals: Vec<F> = (0..log_l)
+            .map(|i| F::from_u64(i as u64 + 1 + iter as u64))
+            .collect();
         let (round_polys, _expected) = build_trace(initial_target, &sumcheck_chals);
-        let final_eval =
-            warp_fold_verify_sumcheck(initial_target, &round_polys, &sumcheck_chals)
-                .expect("sumcheck trace rejected");
+        let final_eval = warp_fold_verify_sumcheck(initial_target, &round_polys, &sumcheck_chals)
+            .expect("sumcheck trace rejected");
         uni_accum += final_eval;
     }
     let uni_us = start_uni.elapsed().as_micros() as f64 / 100.0;
@@ -524,7 +561,9 @@ fn main() {
         let log_m = shape.num_cons().next_power_of_two().trailing_zeros() as usize;
         let config = make_whir_config(witness_num_vars);
 
-        println!("=== log2(constraints)={log_size}, witness=2^{witness_num_vars}, code=2^{log_code} ===");
+        println!(
+            "=== log2(constraints)={log_size}, witness=2^{witness_num_vars}, code=2^{log_code} ==="
+        );
         println!();
         println!(
             "{:>6} {:>5} {:>12} | {:>14} {:>14} {:>14} | {:>9} {:>9} {:>9}",
@@ -559,8 +598,8 @@ fn main() {
                 let fresh_instances: Vec<FreshInstance<F>> = z_slices
                     .iter()
                     .map(|z| {
-                        let pi = z[..num_inputs].to_vec();
-                        let mut w = z[num_inputs..].to_vec();
+                        let pi = Vec::new();
+                        let mut w = z.to_vec();
                         w.resize(num_witness, F::ZERO);
                         FreshInstance {
                             public_input: pi,
@@ -579,10 +618,7 @@ fn main() {
                     let mut ch = seed_ch(100 + i as u64, &ds);
                     let comm = CommitmentWriter::new(&config)
                         .commit::<_, <F as Field>::Packing, F, <F as Field>::Packing, DIGEST>(
-                            &dft,
-                            &mut proof,
-                            &mut ch,
-                            &mut stmt,
+                            &dft, &mut proof, &mut ch, &mut stmt,
                         )
                         .unwrap();
                     WhirProver(&config)
@@ -595,7 +631,7 @@ fn main() {
 
                 // Path 2: Direct fold (batch-arity per step) + 1 terminal WHIR
                 let start2 = Instant::now();
-                let mut acc2 = make_zero_acc(num_witness, log_code, log_m, num_inputs);
+                let mut acc2 = make_zero_acc(num_witness, log_code, log_m, 0);
                 for step in 0..num_steps {
                     let idx = step * batch;
                     let step_fresh: Vec<FreshInstance<F>> =
@@ -622,28 +658,31 @@ fn main() {
                             F::from_u64(ctr + 500)
                         },
                         |cw, ff| {
-                            let (r, _) = merkle_commit_codeword::<
-                                F,
-                                F,
-                                <F as Field>::Packing,
-                                <F as Field>::Packing,
-                                MyHash,
-                                MyCompress,
-                                DIGEST,
-                            >(cw, ff, mh2.clone(), mc2.clone());
+                            let (r, _) =
+                                merkle_commit_codeword::<
+                                    F,
+                                    F,
+                                    <F as Field>::Packing,
+                                    <F as Field>::Packing,
+                                    MyHash,
+                                    MyCompress,
+                                    DIGEST,
+                                >(cw, ff, mh2.clone(), mc2.clone());
                             r
                         },
                     );
                     acc2 = rebuild_acc(&r);
                 }
                 let fold2_us = start2.elapsed().as_micros() as f64;
-                let (whir2_us, _whir2_proof) =
+                assert_full_warp_terminal(&shape, &acc2, 2, RS_LOG_INV_RATE, &dft);
+                let (whir2_us, whir2_proof) =
                     terminal_whir_with_proof(&config, &acc2.witness.witness, witness_num_vars);
+                assert_terminal_whir_bound(&whir2_proof, &acc2);
                 direct_times.push(fold2_us + whir2_us);
 
                 // Path 3: Batch reduce + fold(l=2) + 1 terminal WHIR
                 let start3 = Instant::now();
-                let mut acc3 = make_zero_acc(num_witness, log_code, log_m, num_inputs);
+                let mut acc3 = make_zero_acc(num_witness, log_code, log_m, 0);
                 for step in 0..num_steps {
                     let idx = step * batch;
                     let step_wit = &witnesses[idx..idx + batch];
@@ -657,7 +696,8 @@ fn main() {
                         targets.push(t);
                     }
                     let gamma = F::from_u64(step as u64 + 42);
-                    let cbp = Perm::new_from_rng_128(&mut SmallRng::seed_from_u64(step as u64 + 300));
+                    let cbp =
+                        Perm::new_from_rng_128(&mut SmallRng::seed_from_u64(step as u64 + 300));
                     let mut cbc = MyChallenger::new(cbp);
                     let _ = constraint_batch_prove(
                         gamma,
@@ -671,8 +711,8 @@ fn main() {
                     let combined = random_linear_combination(&refs, eta);
 
                     let cs = combined.as_slice();
-                    let pi = cs[..num_inputs].to_vec();
-                    let mut w = cs[num_inputs..].to_vec();
+                    let pi = Vec::new();
+                    let mut w = cs.to_vec();
                     w.resize(num_witness, F::ZERO);
                     let fresh = vec![FreshInstance {
                         public_input: pi,
@@ -697,23 +737,26 @@ fn main() {
                             F::from_u64(ctr + 500)
                         },
                         |cw, ff| {
-                            let (r, _) = merkle_commit_codeword::<
-                                F,
-                                F,
-                                <F as Field>::Packing,
-                                <F as Field>::Packing,
-                                MyHash,
-                                MyCompress,
-                                DIGEST,
-                            >(cw, ff, mh3.clone(), mc3.clone());
+                            let (r, _) =
+                                merkle_commit_codeword::<
+                                    F,
+                                    F,
+                                    <F as Field>::Packing,
+                                    <F as Field>::Packing,
+                                    MyHash,
+                                    MyCompress,
+                                    DIGEST,
+                                >(cw, ff, mh3.clone(), mc3.clone());
                             r
                         },
                     );
                     acc3 = rebuild_acc(&r);
                 }
                 let fold3_us = start3.elapsed().as_micros() as f64;
-                let (whir3_us, _whir3_proof) =
+                assert_full_warp_terminal(&shape, &acc3, 2, RS_LOG_INV_RATE, &dft);
+                let (whir3_us, whir3_proof) =
                     terminal_whir_with_proof(&config, &acc3.witness.witness, witness_num_vars);
+                assert_terminal_whir_bound(&whir3_proof, &acc3);
                 batch_times.push(fold3_us + whir3_us);
             }
 
@@ -728,9 +771,15 @@ fn main() {
 
             println!(
                 "{:>6} {:>5} {:>10.1}ms | {:>12.0}us {:>12.0}us {:>12.0}us | {:>8.2}x {:>8.2}x {:>8.2}x",
-                num_steps, total_n, spartan_ms,
-                indep, direct, batch_f,
-                fold_vs_ind, batch_vs_ind, batch_vs_fold,
+                num_steps,
+                total_n,
+                spartan_ms,
+                indep,
+                direct,
+                batch_f,
+                fold_vs_ind,
+                batch_vs_ind,
+                batch_vs_fold,
             );
 
             sink.push(serde_json::json!({
@@ -751,10 +800,16 @@ fn main() {
         println!();
     }
 
-    println!("All times are POST-SPARTAN only (Spartan column is for reference, not included in comparisons).");
+    println!(
+        "All times are POST-SPARTAN only (Spartan column is for reference, not included in comparisons)."
+    );
     println!("  fold/ind    = independent / direct_fold (>1 means fold is faster than N×WHIR)");
-    println!("  batch/ind   = independent / batch+fold (>1 means batch+fold is faster than N×WHIR)");
-    println!("  batch/fold  = direct_fold / batch+fold (>1 means batch reduction helps over raw fold)");
+    println!(
+        "  batch/ind   = independent / batch+fold (>1 means batch+fold is faster than N×WHIR)"
+    );
+    println!(
+        "  batch/fold  = direct_fold / batch+fold (>1 means batch reduction helps over raw fold)"
+    );
 
     // Table 2: Recursive IVC Throughput
     println!();
@@ -850,9 +905,13 @@ fn main() {
                     make_p2_chal.clone(),
                 );
             }
-            let decide_a =
-                warp_decide_algebraic_rs(&state_iter_a.shape, &state_iter_a.accumulator);
-            assert!(decide_a.is_ok(), "Path A decider failed: {decide_a:?}");
+            assert_full_warp_terminal(
+                &state_iter_a.shape,
+                &state_iter_a.accumulator,
+                ivc_config_l2.rs_folding_factor,
+                ivc_config_l2.rs_log_inv_rate,
+                &dft_ivc,
+            );
             let us_a = t_a.elapsed().as_micros() as f64;
             let per_circuit_a = us_a / total_circuits as f64;
 
@@ -908,8 +967,9 @@ fn main() {
             );
             let mut state_iter_b = state_b;
             for s in 0..steps_l4 {
-                let step_inputs_b: Vec<Vec<F>> =
-                    (0..3).map(|i| vec![F::from_u64(s as u64 * 10 + i)]).collect();
+                let step_inputs_b: Vec<Vec<F>> = (0..3)
+                    .map(|i| vec![F::from_u64(s as u64 * 10 + i)])
+                    .collect();
                 let mut ch = make_challenger(s as u64 + 200);
                 state_iter_b = warp_ivc_step_recursive_union::<
                     F,
@@ -939,9 +999,13 @@ fn main() {
                     make_union_chal.clone(),
                 );
             }
-            let decide_b =
-                warp_decide_algebraic_rs(&state_iter_b.shape, &state_iter_b.accumulator);
-            assert!(decide_b.is_ok(), "Path B decider failed: {decide_b:?}");
+            assert_full_warp_terminal(
+                &state_iter_b.shape,
+                &state_iter_b.accumulator,
+                ivc_config_union.rs_folding_factor,
+                ivc_config_union.rs_log_inv_rate,
+                &dft_ivc,
+            );
             let us_b = t_b.elapsed().as_micros() as f64;
             let per_circuit_b = us_b / total_circuits as f64;
 
@@ -1023,7 +1087,7 @@ fn main() {
                     for s in 0..steps_l2 {
                         let mut ch = make_challenger(s as u64 + 310);
                         state_iter_c = warp_ivc_step_recursive_cp::<F, EF, _, _, _, _, _, _>(
-                            &state_iter_c,
+                            state_iter_c,
                             &step,
                             &step_input,
                             &mut ch,
@@ -1036,11 +1100,13 @@ fn main() {
                             make_p2_chal.clone(),
                         );
                     }
-                    let decide_c = warp_decide_algebraic_rs(
+                    assert_full_warp_terminal(
                         &state_iter_c.shape,
                         &state_iter_c.accumulator,
+                        ivc_config_l2.rs_folding_factor,
+                        ivc_config_l2.rs_log_inv_rate,
+                        &dft_ivc,
                     );
-                    assert!(decide_c.is_ok(), "Path C decider failed: {decide_c:?}");
                     t_c.elapsed().as_micros() as f64
                 }));
                 match symphony_ok {
@@ -1088,19 +1154,11 @@ fn main() {
                     );
                     let mut state_iter_d = state_d;
                     for s in 0..steps_l4 {
-                        let step_inputs_d: Vec<Vec<F>> =
-                            (0..3).map(|i| vec![F::from_u64(s as u64 * 10 + i)]).collect();
+                        let step_inputs_d: Vec<Vec<F>> = (0..3)
+                            .map(|i| vec![F::from_u64(s as u64 * 10 + i)])
+                            .collect();
                         let mut ch = make_challenger(s as u64 + 410);
-                        state_iter_d = warp_ivc_step_recursive_union_cp::<
-                            F,
-                            EF,
-                            _,
-                            _,
-                            _,
-                            _,
-                            _,
-                            _,
-                        >(
+                        state_iter_d = warp_ivc_step_recursive_union_cp::<F, EF, _, _, _, _, _, _>(
                             &state_iter_d,
                             &step,
                             &step_inputs_d,
@@ -1115,11 +1173,13 @@ fn main() {
                             make_p2_chal.clone(),
                         );
                     }
-                    let decide_d = warp_decide_algebraic_rs(
+                    assert_full_warp_terminal(
                         &state_iter_d.shape,
                         &state_iter_d.accumulator,
+                        ivc_config_union.rs_folding_factor,
+                        ivc_config_union.rs_log_inv_rate,
+                        &dft_ivc,
                     );
-                    assert!(decide_d.is_ok(), "Path D decider failed: {decide_d:?}");
                     t_d.elapsed().as_micros() as f64
                 }));
                 match symphony_d_ok {
@@ -1175,22 +1235,16 @@ fn main() {
         let perm_sz = Perm::new_from_rng_128(&mut SmallRng::seed_from_u64(99));
         let (rf, rp) = p3_poseidon2::poseidon2_round_numbers_128::<F>(16, 3)
             .expect("unsupported Poseidon2 parameters");
-        let config_sz = Poseidon2CircuitConfig::<F, 16>::from_rng(
-            rf,
-            rp,
-            3,
-            &mut SmallRng::seed_from_u64(99),
-        );
+        let config_sz =
+            Poseidon2CircuitConfig::<F, 16>::from_rng(rf, rp, 3, &mut SmallRng::seed_from_u64(99));
 
         let (w_poseidon, c_poseidon, _) =
-            compute_recursive_circuit_size::<F, p3_koala_bear::GenericPoseidon2LinearLayersKoalaBear, _, _>(
-                &step_dummy,
-                &step_input_dummy,
-                &config_sz,
-                &perm_sz,
-                5,
-                4,
-            );
+            compute_recursive_circuit_size::<
+                F,
+                p3_koala_bear::GenericPoseidon2LinearLayersKoalaBear,
+                _,
+                _,
+            >(&step_dummy, &step_input_dummy, &config_sz, &perm_sz, 5, 4);
 
         println!(
             "  Poseidon2 non-union (l=2): {w_poseidon} witness vars, {c_poseidon} constraints"
@@ -1307,7 +1361,9 @@ fn main() {
     println!();
     println!("Terminal WHIR Verify Time");
     println!("========================");
-    println!("This is the succinct verifier cost (constant per IVC chain, independent of num_steps).");
+    println!(
+        "This is the succinct verifier cost (constant per IVC chain, independent of num_steps)."
+    );
     println!();
     println!(
         "{:>10} {:>12} {:>12} {:>12} {:>10}",
@@ -1441,10 +1497,7 @@ fn main() {
     println!("{}", "-".repeat(50));
     {
         use p3_koala_bear::GenericPoseidon2LinearLayersKoalaBear;
-        use whir_ivc::{
-            step::WorkloadStepCircuit,
-            warp_ivc::compute_recursive_circuit_size_union,
-        };
+        use whir_ivc::{step::WorkloadStepCircuit, warp_ivc::compute_recursive_circuit_size_union};
 
         let step_dummy = WorkloadStepCircuit::new(100);
         let step_input_dummy = [F::ZERO];
@@ -1452,25 +1505,17 @@ fn main() {
         let perm = Perm::new_from_rng_128(&mut SmallRng::seed_from_u64(99));
         let (rf, rp) = p3_poseidon2::poseidon2_round_numbers_128::<F>(16, 3)
             .expect("unsupported Poseidon2 parameters");
-        let config = Poseidon2CircuitConfig::<F, 16>::from_rng(
-            rf, rp, 3, &mut SmallRng::seed_from_u64(99),
-        );
+        let config =
+            Poseidon2CircuitConfig::<F, 16>::from_rng(rf, rp, 3, &mut SmallRng::seed_from_u64(99));
 
         for &arity in &[2usize, 4, 8, 16] {
-            let (_w_p, c_p, _) = compute_recursive_circuit_size_union::<
-                F,
-                GenericPoseidon2LinearLayersKoalaBear,
-                _,
-                _,
-            >(
-                &step_dummy,
-                &step_input_dummy,
-                &config,
-                &perm,
-                5,
-                arity,
-                4,
-            );
+            let (_w_p, c_p, _) =
+                compute_recursive_circuit_size_union::<
+                    F,
+                    GenericPoseidon2LinearLayersKoalaBear,
+                    _,
+                    _,
+                >(&step_dummy, &step_input_dummy, &config, &perm, 5, arity, 4);
             sink.push(serde_json::json!({
                 "table": "circuit_size_arity",
                 "variant": "poseidon2_union",

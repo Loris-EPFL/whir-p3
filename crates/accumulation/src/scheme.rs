@@ -9,17 +9,17 @@ use p3_symmetric::{CryptographicHasher, Hash, PseudoCompressionFunction};
 use crate::{
     accumulator::{Accumulator, AccumulatorInstance, AccumulatorWitness},
     constraint_batch::{constraint_batch_prove, constraint_batch_verify},
+    fiat_shamir::errors::FiatShamirError,
     linearized::decide_linearized_accumulator,
+    poly::{evals::EvaluationsList, multilinear::MultilinearPoint},
     proof::{AccumulationProof, AccumulationTranscript},
     random_lc::random_linear_combination,
-    fiat_shamir::errors::FiatShamirError,
-    poly::{evals::EvaluationsList, multilinear::MultilinearPoint},
     whir::{
         committer::{reader::CommitmentReader, writer::CommitmentWriter},
         constraints::statement::{EqStatement, InitialClaim, LinearStatement},
         parameters::WhirConfig,
         prover::Prover as WhirProver,
-        verifier::{errors::VerifierError, Verifier as WhirVerifier},
+        verifier::{Verifier as WhirVerifier, errors::VerifierError},
     },
 };
 
@@ -470,18 +470,18 @@ where
 mod tests {
     use alloc::vec;
 
-    use p3_koala_bear::{KoalaBear, Poseidon2KoalaBear};
     use p3_challenger::DuplexChallenger;
     use p3_dft::Radix2DFTSmallBatch;
-    use p3_field::{extension::BinomialExtensionField, PrimeCharacteristicRing};
+    use p3_field::{PrimeCharacteristicRing, extension::BinomialExtensionField};
+    use p3_koala_bear::{KoalaBear, Poseidon2KoalaBear};
     use p3_symmetric::{PaddingFreeSponge, TruncatedPermutation};
-    use rand::{rngs::SmallRng, SeedableRng};
+    use rand::{SeedableRng, rngs::SmallRng};
 
     use super::*;
     use crate::{
-        linearized::initialize_accumulator_from_spartan,
         fiat_shamir::domain_separator::DomainSeparator,
-        parameters::{errors::SecurityAssumption, FoldingFactor, ProtocolParameters},
+        linearized::initialize_accumulator_from_spartan,
+        parameters::{FoldingFactor, ProtocolParameters, errors::SecurityAssumption},
         spartan::{
             r1cs::{R1CSInstance, R1CSShape, SparseMatEntry},
             r1cs_prover::R1CSProver,
@@ -609,11 +609,9 @@ mod tests {
         let (_, instance1) = make_shape_and_instance(16);
         let spartan = R1CSProver::new();
 
-        let mut chal0 =
-            MyChallenger::new(Perm::new_from_rng_128(&mut SmallRng::seed_from_u64(11)));
+        let mut chal0 = MyChallenger::new(Perm::new_from_rng_128(&mut SmallRng::seed_from_u64(11)));
         let proof0 = spartan.prove::<EF, _>(&instance0, &mut chal0);
-        let mut chal1 =
-            MyChallenger::new(Perm::new_from_rng_128(&mut SmallRng::seed_from_u64(12)));
+        let mut chal1 = MyChallenger::new(Perm::new_from_rng_128(&mut SmallRng::seed_from_u64(12)));
         let proof1 = spartan.prove::<EF, _>(&instance1, &mut chal1);
 
         let acc0 = initialize_accumulator_from_spartan::<F, EF, F, 8>(

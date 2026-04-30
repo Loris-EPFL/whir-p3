@@ -4,12 +4,12 @@
 //! times and report medians — fixes the single-run noise the old
 //! compare_bench suffered at this measurement.
 
-use rand::{rngs::SmallRng, SeedableRng};
+use rand::{SeedableRng, rngs::SmallRng};
 use whir_spartan::{r1cs::R1CSInstance, r1cs_prover::R1CSProver};
 
 use crate::{
     fixtures::{
-        make_whir_config, terminal_whir_prove, terminal_whir_verify, whir_proof_field_elements, F,
+        F, make_whir_config, terminal_whir_prove, terminal_whir_verify, whir_proof_field_elements,
     },
     microbench::{Microbench, MicrobenchAxes, MicrobenchRow},
 };
@@ -56,8 +56,7 @@ impl Microbench for TerminalWhir {
                     prove_times.push(t_p.elapsed().as_micros() as f64);
 
                     let t_v = std::time::Instant::now();
-                    terminal_whir_verify(&cfg, &proof, wnv)
-                        .expect("terminal WHIR verify failed");
+                    terminal_whir_verify(&cfg, &proof, wnv).expect("terminal WHIR verify failed");
                     verify_times.push(t_v.elapsed().as_micros() as f64);
 
                     proof_fe = whir_proof_field_elements(&proof);

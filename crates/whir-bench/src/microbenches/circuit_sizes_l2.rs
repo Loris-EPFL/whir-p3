@@ -6,7 +6,7 @@
 use p3_field::PrimeCharacteristicRing;
 use p3_koala_bear::GenericPoseidon2LinearLayersKoalaBear;
 use p3_poseidon2::poseidon2_round_numbers_128;
-use rand::{rngs::SmallRng, SeedableRng};
+use rand::{SeedableRng, rngs::SmallRng};
 use whir_circuit::poseidon2::Poseidon2CircuitConfig;
 use whir_ivc::{step::WorkloadStepCircuit, warp_ivc::compute_recursive_circuit_size};
 
@@ -26,11 +26,10 @@ impl Microbench for CircuitSizesL2 {
         let step_input_dummy = [F::ZERO];
 
         let perm = Perm::new_from_rng_128(&mut SmallRng::seed_from_u64(99));
-        let (rf, rp) = poseidon2_round_numbers_128::<F>(16, 3)
-            .expect("unsupported Poseidon2 parameters");
-        let config = Poseidon2CircuitConfig::<F, 16>::from_rng(
-            rf, rp, 3, &mut SmallRng::seed_from_u64(99),
-        );
+        let (rf, rp) =
+            poseidon2_round_numbers_128::<F>(16, 3).expect("unsupported Poseidon2 parameters");
+        let config =
+            Poseidon2CircuitConfig::<F, 16>::from_rng(rf, rp, 3, &mut SmallRng::seed_from_u64(99));
 
         let (w_p, c_p, _) = compute_recursive_circuit_size::<
             F,
@@ -39,10 +38,12 @@ impl Microbench for CircuitSizesL2 {
             _,
         >(&step_dummy, &step_input_dummy, &config, &perm, 5, 4);
 
-        let mut rows = vec![MicrobenchRow::new(Self::NAME)
-            .with_axis("variant", "poseidon2_non_union_l2")
-            .with_value("constraints", c_p)
-            .with_value("witness_vars", w_p)];
+        let mut rows = vec![
+            MicrobenchRow::new(Self::NAME)
+                .with_axis("variant", "poseidon2_non_union_l2")
+                .with_value("constraints", c_p)
+                .with_value("witness_vars", w_p),
+        ];
 
         #[cfg(feature = "symphony")]
         {

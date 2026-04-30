@@ -10,15 +10,12 @@
 
 use std::{env, hint::black_box, time::Instant};
 
-use p3_koala_bear::KoalaBear;
 use p3_challenger::DuplexChallenger;
 use p3_field::extension::BinomialExtensionField;
-use rand::{rngs::SmallRng, SeedableRng};
+use p3_koala_bear::KoalaBear;
+use rand::{SeedableRng, rngs::SmallRng};
 
-use whir_p3::spartan::{
-    r1cs::R1CSInstance,
-    r1cs_prover::R1CSProver,
-};
+use whir_p3::spartan::{r1cs::R1CSInstance, r1cs_prover::R1CSProver};
 
 type F = KoalaBear;
 type EF = BinomialExtensionField<F, 4>;
@@ -34,12 +31,20 @@ fn main() {
     let num_vars = 1usize << log_size;
     let num_inputs = 8;
 
-    println!("Profiling Spartan prover: log2={log_size} ({num_cons} constraints), {num_iters} iterations");
+    println!(
+        "Profiling Spartan prover: log2={log_size} ({num_cons} constraints), {num_iters} iterations"
+    );
 
     // Generate synthetic R1CS
     let mut rng = SmallRng::seed_from_u64(42);
-    let (shape, instance) = R1CSInstance::<F>::produce_synthetic_r1cs(num_cons, num_vars, num_inputs, &mut rng);
-    println!("  Shape: {} constraints, {} vars, {} inputs", shape.num_cons(), num_vars, num_inputs);
+    let (shape, instance) =
+        R1CSInstance::<F>::produce_synthetic_r1cs(num_cons, num_vars, num_inputs, &mut rng);
+    println!(
+        "  Shape: {} constraints, {} vars, {} inputs",
+        shape.num_cons(),
+        num_vars,
+        num_inputs
+    );
 
     let spartan = R1CSProver::new();
     let perm = Perm::new_from_rng_128(&mut SmallRng::seed_from_u64(99));
@@ -64,5 +69,8 @@ fn main() {
     }
 
     let total = t_start.elapsed().as_millis();
-    println!("\nTotal: {total} ms for {num_iters} iterations ({} ms/iter)", total / num_iters as u128);
+    println!(
+        "\nTotal: {total} ms for {num_iters} iterations ({} ms/iter)",
+        total / num_iters as u128
+    );
 }

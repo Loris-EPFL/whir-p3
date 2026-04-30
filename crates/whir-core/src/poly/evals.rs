@@ -442,10 +442,7 @@ where
     ///
     /// # Returns
     /// - A new `EvaluationsList<EF>` representing the folded function over the remaining `n - k` variables.
-    pub fn compress_multi<EF: ExtensionField<F>>(
-        &self,
-        point: &[EF],
-    ) -> EvaluationsList<EF> {
+    pub fn compress_multi<EF: ExtensionField<F>>(&self, point: &[EF]) -> EvaluationsList<EF> {
         assert!(point.len() <= self.num_variables());
         let eq = EvaluationsList::new_from_point(point, EF::ONE);
         let mut out = EF::zero_vec(1 << (self.num_variables() - point.len()));
@@ -799,12 +796,12 @@ mod tests {
 
     use alloc::vec;
 
-    use p3_koala_bear::KoalaBear;
     use p3_field::{
-        dot_product, extension::BinomialExtensionField, PrimeCharacteristicRing, PrimeField64,
+        PrimeCharacteristicRing, PrimeField64, dot_product, extension::BinomialExtensionField,
     };
+    use p3_koala_bear::KoalaBear;
     use proptest::prelude::*;
-    use rand::{rngs::SmallRng, RngExt, SeedableRng};
+    use rand::{RngExt, SeedableRng, rngs::SmallRng};
 
     use super::*;
 
@@ -1100,13 +1097,13 @@ mod tests {
         let e1 = F::from_u64(6); // increment when x_2 = 1
         let e2 = F::from_u64(7); // increment when x_1 = 1
         let e3 = F::from_u64(8); // increment when x_1 = x_2 = 1
-                                 //
-                                 // So concretely:
-                                 //
-                                 //   f(0, 0) = 5
-                                 //   f(0, 1) = 5 + 6 = 11
-                                 //   f(1, 0) = 5 + 7 = 12
-                                 //   f(1, 1) = 5 + 6 + 7 + 8 = 26
+        //
+        // So concretely:
+        //
+        //   f(0, 0) = 5
+        //   f(0, 1) = 5 + 6 = 11
+        //   f(1, 0) = 5 + 7 = 12
+        //   f(1, 1) = 5 + 6 + 7 + 8 = 26
         let evals = EvaluationsList::new(vec![e0, e0 + e1, e0 + e2, e0 + e1 + e2 + e3]);
 
         // Choose evaluation point:

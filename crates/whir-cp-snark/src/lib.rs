@@ -12,7 +12,9 @@ pub use whir_spartan as spartan;
 mod compiler;
 pub use compiler::{
     CommittedFoldTranscript, CpSnarkDeciderError, FoldTranscriptData, WarpFoldRelation,
+    commit_fold_transcript_full, commit_fold_transcript_full_with_output,
     commit_fold_transcript_with_shift_queries, cp_snark_terminal_verify,
-    cp_snark_terminal_verify_with_merkle, cp_snark_terminal_verify_with_whir,
-    serialize_fold_data, verify_committed_transcripts, verify_shift_query_merkle_proofs,
+    cp_snark_terminal_verify_with_merkle, cp_snark_terminal_verify_with_whir, re_commit_transcript,
+    serialize_fold_data, verify_committed_transcripts, verify_committed_transcripts_and_chain,
+    verify_shift_query_merkle_proofs,
 };

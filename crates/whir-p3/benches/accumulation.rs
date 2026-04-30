@@ -1,10 +1,10 @@
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
-use p3_koala_bear::{KoalaBear, Poseidon2KoalaBear};
+use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use p3_challenger::DuplexChallenger;
 use p3_dft::Radix2DFTSmallBatch;
-use p3_field::{extension::BinomialExtensionField, Field, PrimeCharacteristicRing};
+use p3_field::{Field, PrimeCharacteristicRing, extension::BinomialExtensionField};
+use p3_koala_bear::{KoalaBear, Poseidon2KoalaBear};
 use p3_symmetric::{PaddingFreeSponge, TruncatedPermutation};
-use rand::{rngs::SmallRng, SeedableRng};
+use rand::{SeedableRng, rngs::SmallRng};
 use whir_p3::{
     accumulation::{
         linearized::{
@@ -12,9 +12,9 @@ use whir_p3::{
         },
         scheme::{LinearizedAccumulationProver, LinearizedAccumulationVerifier},
     },
-    quasar::{FreshLinearInstance, QuasarFrontendProver, QuasarFrontendVerifier},
     fiat_shamir::domain_separator::DomainSeparator,
-    parameters::{errors::SecurityAssumption, FoldingFactor, ProtocolParameters},
+    parameters::{FoldingFactor, ProtocolParameters, errors::SecurityAssumption},
+    quasar::{FreshLinearInstance, QuasarFrontendProver, QuasarFrontendVerifier},
     spartan::{
         r1cs::R1CSInstance,
         r1cs_prover::{R1CSProver, R1CSVerifier},
@@ -208,7 +208,9 @@ fn build_fresh_instances(
 /// Compares no_fold vs raw_fold vs quasar_squash at small sizes.
 fn bench_accumulation(c: &mut Criterion) {
     let mut group = c.benchmark_group("accumulation");
-    group.sample_size(50).measurement_time(std::time::Duration::from_secs(15));
+    group
+        .sample_size(50)
+        .measurement_time(std::time::Duration::from_secs(15));
 
     for size_log2 in [8usize, 10usize] {
         let material = prepare_material(size_log2);
@@ -370,7 +372,9 @@ fn bench_accumulation(c: &mut Criterion) {
 /// Same comparison at larger polynomial sizes and higher k.
 fn bench_accumulation_scaling(c: &mut Criterion) {
     let mut group = c.benchmark_group("accumulation_scaling");
-    group.sample_size(20).measurement_time(std::time::Duration::from_secs(20));
+    group
+        .sample_size(20)
+        .measurement_time(std::time::Duration::from_secs(20));
 
     for size_log2 in [12usize, 14usize] {
         let material = prepare_material(size_log2);

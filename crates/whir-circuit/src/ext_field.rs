@@ -211,8 +211,8 @@ pub fn ext_from_base<F: Field, const D: usize>(
 
 #[cfg(test)]
 mod tests {
-    use p3_koala_bear::KoalaBear;
     use p3_field::{BasedVectorSpace, PrimeCharacteristicRing, extension::BinomialExtensionField};
+    use p3_koala_bear::KoalaBear;
 
     use super::*;
 

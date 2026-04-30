@@ -131,8 +131,8 @@ impl<F: Field, EF: ExtensionField<F>> LinearStatement<F, EF> {
 mod tests {
     use alloc::vec;
 
+    use p3_field::{PrimeCharacteristicRing, extension::BinomialExtensionField};
     use p3_koala_bear::KoalaBear;
-    use p3_field::{extension::BinomialExtensionField, PrimeCharacteristicRing};
 
     use super::*;
 

@@ -21,8 +21,8 @@ use whir_spartan::r1cs::{R1CSInstance, R1CSShape};
 use crate::{
     axes::Axes,
     fixtures::{
-        make_ds, make_whir_config, produce_synthetic_r1cs, seed_ch, spartan_linearize_all,
-        whir_proof_field_elements, DIGEST, EF, F, MyChallenger, MyCompress, MyHash,
+        DIGEST, EF, F, MyChallenger, MyCompress, MyHash, make_ds, make_whir_config,
+        produce_synthetic_r1cs, seed_ch, spartan_linearize_all, whir_proof_field_elements,
     },
     metrics::{Metrics, StaticMetrics},
     scheme::FoldingScheme,
@@ -51,7 +51,10 @@ impl FoldingScheme for IndependentWhir {
         let (shape, instance, num_witness, _, _, _) = produce_synthetic_r1cs(axes.log_n);
         let witness_num_vars = num_witness.trailing_zeros() as usize;
         let config = make_whir_config(witness_num_vars);
-        let total_n = axes.ivc_steps.saturating_mul(axes.batch.max(1));
+        let total_n = axes
+            .total_instances
+            .unwrap_or_else(|| axes.ivc_steps.saturating_mul(axes.batch.max(1)))
+            .max(1);
         Self {
             shape,
             instance,
@@ -97,6 +100,7 @@ impl FoldingScheme for IndependentWhir {
         });
 
         m.count("total_instances", self.total_n as u64);
+        m.count("target_total_instances", self.total_n as u64);
         m.count("family_a", 1);
 
         let linears = instances.into_iter().map(|li| li.linear).collect();
@@ -125,10 +129,7 @@ impl FoldingScheme for IndependentWhir {
     }
 
     fn static_metrics(&self, proof: &Self::Proof) -> StaticMetrics {
-        let per = proof
-            .proofs
-            .first()
-            .map_or(0, whir_proof_field_elements);
+        let per = proof.proofs.first().map_or(0, whir_proof_field_elements);
         StaticMetrics {
             proof_field_elems: per * self.total_n as u64,
             circuit_constraints: None,
@@ -149,6 +150,8 @@ mod tests {
             ivc_steps: 2,
             step_muls: 100,
             seed: 42,
+            total_instances: None,
+            total_step_circuits: None,
         };
         let s = IndependentWhir::setup(&axes);
         let mut m = Metrics::new();

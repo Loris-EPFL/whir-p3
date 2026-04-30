@@ -18,10 +18,7 @@ use alloc::vec::Vec;
 
 use p3_field::{ExtensionField, Field};
 
-use crate::{
-    accumulation::accumulator::Accumulator,
-    spartan::r1cs::R1CSShape,
-};
+use crate::{accumulation::accumulator::Accumulator, spartan::r1cs::R1CSShape};
 
 use crate::accumulator::FreshInstance;
 
@@ -38,7 +35,12 @@ use crate::accumulator::FreshInstance;
 ///
 /// # Returns
 /// A `FreshInstance` ready for the WARP fold.
-pub fn quasar_output_to_warp_fresh<F: Field, EF: ExtensionField<F>, W, const DIGEST_ELEMS: usize>(
+pub fn quasar_output_to_warp_fresh<
+    F: Field,
+    EF: ExtensionField<F>,
+    W,
+    const DIGEST_ELEMS: usize,
+>(
     accumulator: &Accumulator<F, EF, W, DIGEST_ELEMS>,
     public_inputs: Vec<F>,
 ) -> FreshInstance<F> {
@@ -129,24 +131,23 @@ mod tests {
         poly::{evals::EvaluationsList, multilinear::MultilinearPoint},
         spartan::r1cs::{R1CSShape, SparseMatEntry},
     };
-    use p3_koala_bear::KoalaBear;
     use p3_field::PrimeCharacteristicRing;
+    use p3_koala_bear::KoalaBear;
 
     type F = KoalaBear;
 
     fn make_square_shape() -> R1CSShape<F> {
         R1CSShape::new(
-            4, 4, 2,
+            4,
+            4,
+            2,
             vec![SparseMatEntry::new(0, 0, F::ONE)],
             vec![SparseMatEntry::new(0, 0, F::ONE)],
             vec![SparseMatEntry::new(0, 1, F::ONE)],
         )
     }
 
-    fn make_initial_accumulator(
-        code_len: usize,
-        log_m: usize,
-    ) -> WarpAccumulator<F, F, F, 8> {
+    fn make_initial_accumulator(code_len: usize, log_m: usize) -> WarpAccumulator<F, F, F, 8> {
         WarpAccumulator::new(
             WarpAccumulatorInstance {
                 commitment_root: [F::ZERO; 8],
@@ -200,18 +201,11 @@ mod tests {
         let omega = F::from_u64(7);
 
         let mut counter = 0u64;
-        let result = quasar_then_warp_fold(
-            &shape,
-            &fresh,
-            &acc,
-            omega,
-            &tau_challenges,
-            &[],
-            |_| {
+        let result =
+            quasar_then_warp_fold(&shape, &fresh, &acc, omega, &tau_challenges, &[], |_| {
                 counter += 1;
                 F::from_u64(counter + 400)
-            },
-        );
+            });
 
         // Fixed size
         assert_eq!(
@@ -220,9 +214,10 @@ mod tests {
         );
 
         // Compute eval_claim and build final accumulator
-        let eval_claim = result.witness.codeword.evaluate_hypercube_base(
-            &MultilinearPoint::new(result.instance.eval_point.clone()),
-        );
+        let eval_claim = result
+            .witness
+            .codeword
+            .evaluate_hypercube_base(&MultilinearPoint::new(result.instance.eval_point.clone()));
 
         let final_acc = WarpAccumulator::new(
             WarpAccumulatorInstance {
@@ -266,22 +261,19 @@ mod tests {
             let omega = F::from_u64(7);
 
             let mut counter = step * 100;
-            let result = quasar_then_warp_fold(
-                &shape,
-                &fresh,
-                &acc,
-                omega,
-                &tau_challenges,
-                &[],
-                |_| {
+            let result =
+                quasar_then_warp_fold(&shape, &fresh, &acc, omega, &tau_challenges, &[], |_| {
                     counter += 1;
                     F::from_u64(counter + 600)
-                },
-            );
+                });
 
-            let eval_claim = result.witness.codeword.evaluate_hypercube_base(
-                &MultilinearPoint::new(result.instance.eval_point.clone()),
-            );
+            let eval_claim =
+                result
+                    .witness
+                    .codeword
+                    .evaluate_hypercube_base(&MultilinearPoint::new(
+                        result.instance.eval_point.clone(),
+                    ));
 
             acc = WarpAccumulator::new(
                 WarpAccumulatorInstance {

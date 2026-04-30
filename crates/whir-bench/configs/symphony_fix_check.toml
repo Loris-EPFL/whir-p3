@@ -1,0 +1,12 @@
+schemes = ["symphony", "quasar_warp", "quasar_symphony"]
+warmup = 0
+repeats = 1
+output = "output/symphony_fix_check.jsonl"
+
+[axes]
+log_n = [14, 16, 18, 20]
+arity = [4]
+batch = [1]
+ivc_steps = [6]
+step_muls = [100]
+seed = 42

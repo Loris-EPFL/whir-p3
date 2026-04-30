@@ -1,10 +1,9 @@
-# Smoke-test config exercising all 7 schemes at small size.
+# Smoke-test config exercising report-safe schemes at small size.
 #
 # Two fairness families:
 #   Family A (accumulate N fresh R1CS instances, no step circuit):
 #     - independent_whir  — N × WHIR proofs, no fold
 #     - pure_warp         — fold N instances at l=2
-#     - warp_batch        — batch-reduce + fold l=2, N = ivc_steps × batch
 #     - warp_union        — Quasar union fold, N = ivc_steps × (arity-1)
 #
 #   Family B (IVC-prove N step circuits, step+verifier unified):
@@ -16,7 +15,7 @@
 # on prover time normalized by `total_instances` (emitted as a counter).
 
 schemes = [
-    "independent_whir", "pure_warp", "warp_batch", "warp_union",
+    "independent_whir", "pure_warp", "warp_union",
     "quasar_warp", "symphony", "quasar_symphony",
 ]
 warmup  = 0

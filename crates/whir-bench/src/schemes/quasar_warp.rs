@@ -5,12 +5,11 @@
 
 use p3_field::PrimeCharacteristicRing;
 use p3_koala_bear::GenericPoseidon2LinearLayersKoalaBear;
-use warp::decider::warp_decide_algebraic_rs;
 use whir_ivc::{
     step::WorkloadStepCircuit,
     warp_ivc::{
-        compute_recursive_circuit_size_union, warp_ivc_init_recursive_union,
-        warp_ivc_step_recursive_union, WarpIVCConfig, WarpIVCState,
+        WarpIVCConfig, WarpIVCState, compute_recursive_circuit_size_union,
+        warp_ivc_init_recursive_union, warp_ivc_step_recursive_union,
     },
 };
 use whir_spartan::r1cs::{R1CSInstance, R1CSShape};
@@ -18,7 +17,8 @@ use whir_spartan::r1cs::{R1CSInstance, R1CSShape};
 use crate::{
     axes::Axes,
     fixtures::{
-        make_challenger, make_hc, make_poseidon2_circuit_config, produce_synthetic_r1cs, EF, F,
+        EF, F, make_challenger, make_hc, make_poseidon2_circuit_config, produce_synthetic_r1cs,
+        verify_full_warp_terminal_measured,
     },
     metrics::{Metrics, StaticMetrics},
     scheme::FoldingScheme,
@@ -29,7 +29,7 @@ pub struct QuasarWarp {
     shape: R1CSShape<F>,
     instance: R1CSInstance<F>,
     ivc_config: WarpIVCConfig,
-    ivc_steps: usize,
+    total_step_circuits: usize,
     arity: usize,
     step_muls: usize,
 }
@@ -40,8 +40,9 @@ impl FoldingScheme for QuasarWarp {
 
     fn setup(axes: &Axes) -> Self {
         let (shape, instance, _, _, _, _) = produce_synthetic_r1cs(axes.log_n);
+        let arity = axes.arity.max(2);
         let ivc_config = WarpIVCConfig {
-            fold_arity: axes.arity,
+            fold_arity: arity,
             use_union: true,
             ..Default::default()
         };
@@ -49,8 +50,8 @@ impl FoldingScheme for QuasarWarp {
             shape,
             instance,
             ivc_config,
-            ivc_steps: axes.ivc_steps,
-            arity: axes.arity,
+            total_step_circuits: axes.total_step_circuits.unwrap_or(axes.ivc_steps).max(1),
+            arity,
             step_muls: axes.step_muls,
         }
     }
@@ -67,25 +68,17 @@ impl FoldingScheme for QuasarWarp {
         let step = WorkloadStepCircuit::new(self.step_muls);
         let step_input = [F::ZERO];
 
-        let log_m = self
-            .shape
-            .num_cons()
-            .next_power_of_two()
-            .trailing_zeros() as usize;
-        let (target_w, _, _) = compute_recursive_circuit_size_union::<
-            F,
-            GenericPoseidon2LinearLayersKoalaBear,
-            _,
-            _,
-        >(
-            &step,
-            &step_input,
-            &poseidon_config,
-            &poseidon_perm,
-            self.shape.num_poly_vars_y(),
-            self.arity,
-            log_m,
-        );
+        let log_m = self.shape.num_cons().next_power_of_two().trailing_zeros() as usize;
+        let (target_w, _, _) =
+            compute_recursive_circuit_size_union::<F, GenericPoseidon2LinearLayersKoalaBear, _, _>(
+                &step,
+                &step_input,
+                &poseidon_config,
+                &poseidon_perm,
+                self.shape.num_poly_vars_y(),
+                self.arity,
+                log_m,
+            );
 
         let circuit_constraints_cell = {
             let (_, c, _) = compute_recursive_circuit_size_union::<
@@ -137,11 +130,18 @@ impl FoldingScheme for QuasarWarp {
             );
 
             let circuits_per_step = self.arity - 1;
-            let num_ivc_steps = self.ivc_steps / circuits_per_step;
+            let num_ivc_steps = self.total_step_circuits.div_ceil(circuits_per_step);
 
             for s in 0..num_ivc_steps {
                 let step_inputs: Vec<Vec<F>> = (0..circuits_per_step)
-                    .map(|i| vec![F::from_u64(s as u64 * 10 + i as u64)])
+                    .map(|i| {
+                        let global = s * circuits_per_step + i;
+                        if global < self.total_step_circuits {
+                            vec![F::from_u64(global as u64)]
+                        } else {
+                            vec![F::ZERO]
+                        }
+                    })
                     .collect();
                 let mut ch = make_challenger(s as u64 + 200);
                 state = warp_ivc_step_recursive_union::<
@@ -174,16 +174,30 @@ impl FoldingScheme for QuasarWarp {
             }
             state
         });
-        m.count("total_instances", self.ivc_steps as u64);
+        let circuits_per_step = self.arity - 1;
+        let folds = self.total_step_circuits.div_ceil(circuits_per_step);
+        let padded = folds * circuits_per_step - self.total_step_circuits;
+        m.count("total_instances", self.total_step_circuits as u64);
+        m.count("total_step_circuits", self.total_step_circuits as u64);
+        m.count(
+            "target_total_step_circuits",
+            self.total_step_circuits as u64,
+        );
+        m.count("padding_step_circuits", padded as u64);
+        m.count("folds", folds as u64);
+        m.count("fresh_per_full_fold", circuits_per_step as u64);
         m.count("family_b", 1);
         state
     }
 
     fn verify(&self, proof: &Self::Proof, m: &mut Metrics) -> anyhow::Result<()> {
-        m.time("verify_total", || {
-            warp_decide_algebraic_rs(&proof.shape, &proof.accumulator)
-                .map_err(|e| anyhow::anyhow!("decider failed: {e:?}"))
-        })
+        verify_full_warp_terminal_measured(
+            m,
+            &proof.shape,
+            &proof.accumulator,
+            self.ivc_config.rs_folding_factor,
+            self.ivc_config.rs_log_inv_rate,
+        )
     }
 
     fn static_metrics(&self, _proof: &Self::Proof) -> StaticMetrics {
@@ -192,12 +206,7 @@ impl FoldingScheme for QuasarWarp {
             let step = WorkloadStepCircuit::new(self.step_muls);
             let step_input = [F::ZERO];
             let log_m = self.shape.num_cons().next_power_of_two().trailing_zeros() as usize;
-            compute_recursive_circuit_size_union::<
-                F,
-                GenericPoseidon2LinearLayersKoalaBear,
-                _,
-                _,
-            >(
+            compute_recursive_circuit_size_union::<F, GenericPoseidon2LinearLayersKoalaBear, _, _>(
                 &step,
                 &step_input,
                 &cfg,
@@ -227,10 +236,13 @@ mod tests {
             ivc_steps: 6,
             step_muls: 100,
             seed: 42,
+            total_instances: None,
+            total_step_circuits: None,
         };
         let s = QuasarWarp::setup(&axes);
         let mut m = Metrics::new();
         let p = s.prove(&mut m);
-        assert!(s.verify(&p, &mut m).is_ok());
+        let result = s.verify(&p, &mut m);
+        assert!(result.is_ok(), "verify failed: {result:?}");
     }
 }

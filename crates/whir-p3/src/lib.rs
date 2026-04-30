@@ -14,8 +14,8 @@ pub use whir_pcs::{fiat_shamir, sumcheck, whir};
 pub use whir_spartan as spartan;
 // Accumulation.
 pub use accumulation;
-pub use warp;
 pub use quasar;
+pub use warp;
 // Circuit.
 pub use whir_circuit as circuit;
 // IVC.

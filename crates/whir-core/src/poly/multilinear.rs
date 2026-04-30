@@ -8,8 +8,8 @@ use itertools::Itertools;
 use p3_field::{ExtensionField, Field};
 use p3_matrix::dense::RowMajorMatrix;
 use rand::{
-    distr::{Distribution, StandardUniform},
     RngExt,
+    distr::{Distribution, StandardUniform},
 };
 
 /// A point `(x_1, ..., x_n)` in `F^n` for some field `F`.
@@ -233,10 +233,10 @@ impl<F> Index<usize> for MultilinearPoint<F> {
 mod tests {
     use alloc::vec;
 
+    use p3_field::{PrimeCharacteristicRing, extension::BinomialExtensionField};
     use p3_koala_bear::KoalaBear;
-    use p3_field::{extension::BinomialExtensionField, PrimeCharacteristicRing};
     use proptest::prelude::*;
-    use rand::{rngs::SmallRng, SeedableRng};
+    use rand::{SeedableRng, rngs::SmallRng};
 
     use super::*;
 

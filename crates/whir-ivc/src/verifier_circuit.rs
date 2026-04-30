@@ -66,11 +66,31 @@ impl<F: Field + PrimeField64> AccumulationVerifierWitness<F> {
         Self {
             input_commitment_roots,
             input_targets: input_targets.iter().map(|t| to_arr(t)).collect(),
-            sumcheck_s0s: transcript.constraint_batch_proof.round_polys.iter().map(|[s0, _]| to_arr(s0)).collect(),
-            sumcheck_s2s: transcript.constraint_batch_proof.round_polys.iter().map(|[_, s2]| to_arr(s2)).collect(),
-            individual_evals: transcript.constraint_batch_proof.individual_evals.iter().map(|e| to_arr(e)).collect(),
+            sumcheck_s0s: transcript
+                .constraint_batch_proof
+                .round_polys
+                .iter()
+                .map(|[s0, _]| to_arr(s0))
+                .collect(),
+            sumcheck_s2s: transcript
+                .constraint_batch_proof
+                .round_polys
+                .iter()
+                .map(|[_, s2]| to_arr(s2))
+                .collect(),
+            individual_evals: transcript
+                .constraint_batch_proof
+                .individual_evals
+                .iter()
+                .map(|e| to_arr(e))
+                .collect(),
             codeword_batching_challenge: transcript.codeword_batching_challenge,
-            ood_point: transcript.ood_point.as_slice().iter().map(|p| to_arr(p)).collect(),
+            ood_point: transcript
+                .ood_point
+                .as_slice()
+                .iter()
+                .map(|p| to_arr(p))
+                .collect(),
             shift_query_indices: transcript.shift_query_indices.clone(),
             num_vars,
         }
@@ -95,7 +115,8 @@ pub fn synthesize_accumulation_verifier<F, L, P, const WIDTH: usize, const RATE:
     perm: &P,
     witness: &AccumulationVerifierWitness<F>,
     w_param: F, // Extension field irreducible parameter (W=11 for KoalaBear)
-) -> (Vec<ExtVar<4>>, ExtVal<F, 4>) // (reduction_point_vars, combined_eval_val)
+) -> (Vec<ExtVar<4>>, ExtVal<F, 4>)
+// (reduction_point_vars, combined_eval_val)
 where
     F: Field + PrimeCharacteristicRing + PrimeField64,
     L: GenericPoseidon2LinearLayers<WIDTH>,
@@ -150,10 +171,14 @@ where
         // γⁱ · target_i
         let target_ext = alloc_ext(builder, &ExtVal::new(witness.input_targets[i]));
         let target_val = ExtVal::new(witness.input_targets[i]);
-        let (scaled, scaled_val) =
-            ext_scale(builder, &target_ext, &target_val, gamma_power_val);
-        let (new_sum, new_sum_val) =
-            ext_add(builder, &claimed_sum_ext, &claimed_sum_val, &scaled, &scaled_val);
+        let (scaled, scaled_val) = ext_scale(builder, &target_ext, &target_val, gamma_power_val);
+        let (new_sum, new_sum_val) = ext_add(
+            builder,
+            &claimed_sum_ext,
+            &claimed_sum_val,
+            &scaled,
+            &scaled_val,
+        );
         claimed_sum_ext = new_sum;
         claimed_sum_val = new_sum_val;
 
@@ -177,36 +202,24 @@ where
         let s2_val = ExtVal::new(witness.sumcheck_s2s[round]);
 
         // Observe [s0, s2] into challenger (4+4 = 8 base field elements)
-        challenger.observe_slice::<L, P>(
-            builder,
-            poseidon_config,
-            perm,
-            &s0.vars,
-            &s0_val.vals,
-        );
-        challenger.observe_slice::<L, P>(
-            builder,
-            poseidon_config,
-            perm,
-            &s2.vars,
-            &s2_val.vals,
-        );
+        challenger.observe_slice::<L, P>(builder, poseidon_config, perm, &s0.vars, &s0_val.vals);
+        challenger.observe_slice::<L, P>(builder, poseidon_config, perm, &s2.vars, &s2_val.vals);
 
         // Sample challenge r (EF element = 4 base field samples)
-        let (r_var, r_val) =
-            challenger.sample_ext::<L, P, 4>(builder, poseidon_config, perm);
+        let (r_var, r_val) = challenger.sample_ext::<L, P, 4>(builder, poseidon_config, perm);
         reduction_point_vars.push(r_var);
         reduction_point_vals.push(r_val);
 
         // Verify sumcheck round: extrapolate_012 over EF
         // s1 = claimed_sum - s0 (component-wise)
-        let s1_vals = ExtVal::<F, 4>::new(core::array::from_fn(|j| claimed_sum_val.vals[j] - s0_val.vals[j]));
+        let s1_vals = ExtVal::<F, 4>::new(core::array::from_fn(|j| {
+            claimed_sum_val.vals[j] - s0_val.vals[j]
+        }));
         let s1 = alloc_ext(builder, &s1_vals);
         // Constrain: s0 + s1 = claimed_sum (component-wise)
         for j in 0..4 {
             builder.enforce(
-                LinearCombination::from_var(s0.vars[j])
-                    + LinearCombination::from_var(s1.vars[j]),
+                LinearCombination::from_var(s0.vars[j]) + LinearCombination::from_var(s1.vars[j]),
                 LinearCombination::from_constant(F::ONE),
                 LinearCombination::from_var(claimed_sum_ext.vars[j]),
             );
@@ -238,8 +251,7 @@ where
 
         // new_claimed = s0 + dr + s2r2
         let (temp, temp_val) = ext_add(builder, &s0, &s0_val, &dr, &dr_val);
-        let (new_claimed, new_claimed_val) =
-            ext_add(builder, &temp, &temp_val, &s2r2, &s2r2_val);
+        let (new_claimed, new_claimed_val) = ext_add(builder, &temp, &temp_val, &s2r2, &s2r2_val);
 
         claimed_sum_ext = new_claimed;
         claimed_sum_val = new_claimed_val;
@@ -277,8 +289,13 @@ where
         let eval = alloc_ext(builder, &ExtVal::new(witness.individual_evals[i]));
         let eval_val = ExtVal::new(witness.individual_evals[i]);
         let (scaled, scaled_val) = ext_scale(builder, &eval, &eval_val, eta_power_val);
-        let (new_combined, new_combined_val) =
-            ext_add(builder, &combined_eval_ext, &combined_eval_val, &scaled, &scaled_val);
+        let (new_combined, new_combined_val) = ext_add(
+            builder,
+            &combined_eval_ext,
+            &combined_eval_val,
+            &scaled,
+            &scaled_val,
+        );
         combined_eval_ext = new_combined;
         combined_eval_val = new_combined_val;
 
@@ -289,8 +306,7 @@ where
     // Phase 5: Derive OOD point and shift indices, check consistency
     // ==========================================================
     for i in 0..num_vars {
-        let (ood_var, _ood_val) =
-            challenger.sample_ext::<L, P, 4>(builder, poseidon_config, perm);
+        let (ood_var, _ood_val) = challenger.sample_ext::<L, P, 4>(builder, poseidon_config, perm);
         // Constrain: derived OOD component matches transcript
         let expected = alloc_ext(builder, &ExtVal::new(witness.ood_point[i]));
         for j in 0..4 {
@@ -329,7 +345,8 @@ pub fn synthesize_unified_ivc_circuit<F, L, P, S, const WIDTH: usize, const RATE
     verifier_witness: Option<&AccumulationVerifierWitness<F>>,
     w_param: F,
     target_num_witness: Option<usize>, // If set, pad to this many witness vars
-) -> Vec<Var> // output state variables
+) -> Vec<Var>
+// output state variables
 where
     F: Field + PrimeCharacteristicRing + PrimeField64,
     L: GenericPoseidon2LinearLayers<WIDTH>,
@@ -430,21 +447,22 @@ pub fn verify_sumcheck_round<F: Field>(
 mod tests {
     use alloc::vec;
 
-    use p3_koala_bear::{KoalaBear, GenericPoseidon2LinearLayersKoalaBear, Poseidon2KoalaBear};
     use p3_challenger::DuplexChallenger;
     use p3_dft::Radix2DFTSmallBatch;
-    use p3_field::{extension::BinomialExtensionField, BasedVectorSpace, Field, PrimeCharacteristicRing};
+    use p3_field::{
+        BasedVectorSpace, Field, PrimeCharacteristicRing, extension::BinomialExtensionField,
+    };
+    use p3_koala_bear::{GenericPoseidon2LinearLayersKoalaBear, KoalaBear, Poseidon2KoalaBear};
     use p3_symmetric::{PaddingFreeSponge, TruncatedPermutation};
-    use rand::{rngs::SmallRng, SeedableRng};
+    use rand::{SeedableRng, rngs::SmallRng};
 
     use super::*;
     use crate::{
         accumulation::{
-            linearized::initialize_accumulator_from_spartan,
-            scheme::LinearizedAccumulationProver,
+            linearized::initialize_accumulator_from_spartan, scheme::LinearizedAccumulationProver,
         },
         fiat_shamir::domain_separator::DomainSeparator,
-        parameters::{errors::SecurityAssumption, FoldingFactor, ProtocolParameters},
+        parameters::{FoldingFactor, ProtocolParameters, errors::SecurityAssumption},
         spartan::{
             r1cs::{R1CSInstance, R1CSShape, SparseMatEntry},
             r1cs_prover::R1CSProver,
@@ -462,7 +480,9 @@ mod tests {
 
     fn make_shape_and_instance(square: u64) -> (R1CSShape<F>, R1CSInstance<F>) {
         let shape = R1CSShape::new(
-            4, 4, 1,
+            4,
+            4,
+            1,
             vec![SparseMatEntry::new(0, 0, F::ONE)],
             vec![SparseMatEntry::new(0, 0, F::ONE)],
             vec![SparseMatEntry::new(0, 1, F::ONE)],
@@ -472,22 +492,31 @@ mod tests {
         let mut witness = vec![F::ZERO; 4];
         witness[0] = F::from_u64(root);
         witness[1] = F::from_u64(square);
-        (shape.clone(), R1CSInstance::new(shape, vec![F::ZERO], witness))
+        (
+            shape.clone(),
+            R1CSInstance::new(shape, vec![F::ZERO], witness),
+        )
     }
 
     fn make_whir_config() -> WhirConfig<EF, F, MyHash, MyCompress, MyChallenger> {
         let mut rng = SmallRng::seed_from_u64(55);
         let perm = Perm::new_from_rng_128(&mut rng);
         let params = ProtocolParameters {
-            security_level: 100, pow_bits: 0, rs_domain_initial_reduction_factor: 1,
+            security_level: 100,
+            pow_bits: 0,
+            rs_domain_initial_reduction_factor: 1,
             folding_factor: FoldingFactor::Constant(2),
-            merkle_hash: MyHash::new(perm.clone()), merkle_compress: MyCompress::new(perm),
-            soundness_type: SecurityAssumption::CapacityBound, starting_log_inv_rate: 1,
+            merkle_hash: MyHash::new(perm.clone()),
+            merkle_compress: MyCompress::new(perm),
+            soundness_type: SecurityAssumption::CapacityBound,
+            starting_log_inv_rate: 1,
         };
         WhirConfig::new(3, params)
     }
 
-    fn seed_challenger(config: &WhirConfig<EF, F, MyHash, MyCompress, MyChallenger>) -> MyChallenger {
+    fn seed_challenger(
+        config: &WhirConfig<EF, F, MyHash, MyCompress, MyChallenger>,
+    ) -> MyChallenger {
         let perm = Perm::new_from_rng_128(&mut SmallRng::seed_from_u64(99));
         let mut challenger = MyChallenger::new(perm);
         let mut domainsep = DomainSeparator::<EF, F>::new(vec![]);
@@ -510,10 +539,18 @@ mod tests {
         let proof1 = spartan.prove::<EF, _>(&instance1, &mut chal1);
 
         let acc0 = initialize_accumulator_from_spartan::<F, EF, F, 8>(
-            &shape, &proof0, spartan.prepare_witness(&instance0), [F::ZERO; 8], EF::from_u64(3),
+            &shape,
+            &proof0,
+            spartan.prepare_witness(&instance0),
+            [F::ZERO; 8],
+            EF::from_u64(3),
         );
         let acc1 = initialize_accumulator_from_spartan::<F, EF, F, 8>(
-            &shape, &proof1, spartan.prepare_witness(&instance1), [F::ONE; 8], EF::from_u64(3),
+            &shape,
+            &proof1,
+            spartan.prepare_witness(&instance1),
+            [F::ONE; 8],
+            EF::from_u64(3),
         );
 
         let config = make_whir_config();
@@ -521,7 +558,10 @@ mod tests {
         let mut prover_challenger = seed_challenger(&config);
         let (_output, proof) = LinearizedAccumulationProver::new(&config)
             .accumulate::<_, F, <F as Field>::Packing, _, 8>(
-                &dft, &mut prover_challenger, &[acc0.clone(), acc1.clone()], 2,
+                &dft,
+                &mut prover_challenger,
+                &[acc0.clone(), acc1.clone()],
+                2,
             )
             .unwrap();
 
@@ -549,7 +589,8 @@ mod tests {
 
         // 3. Synthesize the recursive circuit
         let _perm_circuit = Perm::new_from_rng_128(&mut SmallRng::seed_from_u64(99));
-        let _poseidon_config = Poseidon2CircuitConfig::<F, 16>::from_rng(8, 20, 3, &mut SmallRng::seed_from_u64(99));
+        let _poseidon_config =
+            Poseidon2CircuitConfig::<F, 16>::from_rng(8, 20, 3, &mut SmallRng::seed_from_u64(99));
 
         // We need to initialize the circuit challenger to match the prover's challenger.
         // The prover started with seed_challenger() which includes domain separator observation.
@@ -579,39 +620,42 @@ mod tests {
         let _real_fresh = MyChallenger::new(fresh_perm.clone());
 
         // Re-accumulate with a fresh challenger (no domain separator)
-        let mut fresh_prover_chal = MyChallenger::new(
-            Perm::new_from_rng_128(&mut SmallRng::seed_from_u64(99))
-        );
+        let mut fresh_prover_chal =
+            MyChallenger::new(Perm::new_from_rng_128(&mut SmallRng::seed_from_u64(99)));
         let (_output2, proof2) = LinearizedAccumulationProver::new(&config)
             .accumulate::<_, F, <F as Field>::Packing, _, 8>(
-                &dft, &mut fresh_prover_chal, &[acc0.clone(), acc1.clone()], 2,
+                &dft,
+                &mut fresh_prover_chal,
+                &[acc0.clone(), acc1.clone()],
+                2,
             )
             .unwrap();
 
         let witness2 = AccumulationVerifierWitness::from_transcript(
             &proof2.transcript,
-            vec![acc0.public_instance.commitment_root.to_vec(), acc1.public_instance.commitment_root.to_vec()],
+            vec![
+                acc0.public_instance.commitment_root.to_vec(),
+                acc1.public_instance.commitment_root.to_vec(),
+            ],
             input_targets.clone(),
             3,
         );
 
         let perm_for_circuit = Perm::new_from_rng_128(&mut SmallRng::seed_from_u64(99));
-        let config_for_circuit = Poseidon2CircuitConfig::<F, 16>::from_rng(
-            8, 20, 3, &mut SmallRng::seed_from_u64(99),
-        );
+        let config_for_circuit =
+            Poseidon2CircuitConfig::<F, 16>::from_rng(8, 20, 3, &mut SmallRng::seed_from_u64(99));
 
         let mut builder2 = CircuitBuilder::<F>::new();
         let mut circuit_chal2 = CircuitChallenger::<F, 16, 8>::new(&mut builder2);
 
-        let (_reduction_vars, _combined_val) =
-            synthesize_accumulation_verifier::<F, L, _, 16, 8>(
-                &mut builder2,
-                &mut circuit_chal2,
-                &config_for_circuit,
-                &perm_for_circuit,
-                &witness2,
-                F::from_u64(3), // W parameter for KoalaBear EF
-            );
+        let (_reduction_vars, _combined_val) = synthesize_accumulation_verifier::<F, L, _, 16, 8>(
+            &mut builder2,
+            &mut circuit_chal2,
+            &config_for_circuit,
+            &perm_for_circuit,
+            &witness2,
+            F::from_u64(3), // W parameter for KoalaBear EF
+        );
 
         // 4. Build and verify R1CS
         let num_circuit_constraints = builder2.num_constraints();

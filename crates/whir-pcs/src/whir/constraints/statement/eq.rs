@@ -2,11 +2,11 @@ use alloc::vec::Vec;
 
 use itertools::Itertools;
 use p3_field::{
-    dot_product, ExtensionField, Field, PackedFieldExtension, PackedValue, PrimeCharacteristicRing,
+    ExtensionField, Field, PackedFieldExtension, PackedValue, PrimeCharacteristicRing, dot_product,
 };
 use p3_matrix::{
-    dense::{RowMajorMatrix, RowMajorMatrixView},
     Matrix,
+    dense::{RowMajorMatrix, RowMajorMatrixView},
 };
 use p3_maybe_rayon::prelude::*;
 use p3_multilinear_util::eq_batch::eval_eq_batch;
@@ -357,10 +357,10 @@ impl<F: Field> EqStatement<F> {
 mod tests {
     use alloc::vec;
 
+    use p3_field::{PrimeCharacteristicRing, extension::BinomialExtensionField};
     use p3_koala_bear::KoalaBear;
-    use p3_field::{extension::BinomialExtensionField, PrimeCharacteristicRing};
     use proptest::prelude::*;
-    use rand::{rngs::SmallRng, RngExt, SeedableRng};
+    use rand::{RngExt, SeedableRng, rngs::SmallRng};
 
     use super::*;
 

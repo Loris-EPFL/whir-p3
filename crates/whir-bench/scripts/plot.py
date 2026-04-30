@@ -34,6 +34,7 @@ def load_jsonl(path: str) -> pd.DataFrame:
             if obj.get("skipped"):
                 continue
             flat = {
+                "workload": obj.get("workload") or "legacy",
                 "scheme": obj["scheme"],
                 "run": obj["run"],
                 **obj["axes"],
@@ -96,6 +97,7 @@ SCHEME_STYLES = {
     "pure_warp": {"color": "#1f77b4", "marker": "o", "label": "Pure WARP"},
     "quasar_warp": {"color": "#ff7f0e", "marker": "s", "label": "Quasar + WARP"},
     "symphony": {"color": "#2ca02c", "marker": "^", "label": "Symphony"},
+    "symphony_standard_arity": {"color": "#2ca02c", "marker": "v", "label": "Symphony standard"},
     "quasar_symphony": {"color": "#d62728", "marker": "D", "label": "Quasar + Symphony"},
 }
 
@@ -444,25 +446,57 @@ def _plot_fold_verify_speedup(df, ax):
 
 
 def _plot_circuit_size_arity_speedup(df, ax):
-    """Bar chart: in-circuit constraint reduction = poseidon2_union / algebraic_union."""
+    """Bar chart: Quasar's in-circuit speedup per arity.
+
+    Two grouped bars per arity:
+      - Poseidon2 standard ÷ union (how much does Quasar save on hash path?)
+      - Algebraic standard ÷ union (CP-SNARK path — typically ≈1, since the
+        algebraic verifier defers hashing to the terminal decider)
+    """
     if df.empty:
         ax.text(0.5, 0.5, "(no circuit_size_arity data)", transform=ax.transAxes, ha="center", color="gray")
         return
-    p2 = df[df["variant"] == "poseidon2_union"].set_index("arity")["constraints"]
-    alg = df[df["variant"] == "algebraic_union"].set_index("arity")["constraints"]
-    common = sorted(set(p2.index) & set(alg.index))
-    if not common:
-        ax.text(0.5, 0.5, "(symphony feature disabled — no algebraic data)",
+
+    def series(variant):
+        sub = df[df["variant"] == variant]
+        return sub.set_index("arity")["constraints"] if not sub.empty else None
+
+    p2_std = series("poseidon2_standard")
+    p2_un  = series("poseidon2_union")
+    al_std = series("algebraic_standard")
+    al_un  = series("algebraic_union")
+    if p2_std is None or p2_un is None:
+        ax.text(0.5, 0.5, "(no standard/union pair present)",
                 transform=ax.transAxes, ha="center", color="gray")
         return
-    ratios = [p2.loc[a] / alg.loc[a] for a in common]
-    bars = ax.bar([str(a) for a in common], ratios, color="#9467bd", alpha=0.8)
-    for b, v in zip(bars, ratios):
-        ax.text(b.get_x() + b.get_width() / 2, v, f"{v:.0f}×",
+
+    arities = sorted(set(p2_std.index) & set(p2_un.index))
+    width = 0.35
+    x_base = np.arange(len(arities))
+    p2_ratios = [p2_std.loc[a] / p2_un.loc[a] for a in arities]
+    bars1 = ax.bar(x_base - width / 2, p2_ratios, width,
+                   color="#1f77b4", alpha=0.85, label="Poseidon2 std ÷ union")
+    for b, v in zip(bars1, p2_ratios):
+        ax.text(b.get_x() + b.get_width() / 2, v, f"{v:.1f}×",
                 ha="center", va="bottom", fontsize=7)
+
+    if al_std is not None and al_un is not None:
+        al_arities = sorted(set(al_std.index) & set(al_un.index) & set(arities))
+        al_ratios = [al_std.loc[a] / al_un.loc[a] for a in al_arities]
+        al_idx = [arities.index(a) for a in al_arities]
+        bars2 = ax.bar(np.array(al_idx) + width / 2, al_ratios, width,
+                       color="#d62728", alpha=0.85, label="Algebraic std ÷ union")
+        for b, v in zip(bars2, al_ratios):
+            ax.text(b.get_x() + b.get_width() / 2, v, f"{v:.1f}×",
+                    ha="center", va="bottom", fontsize=7)
+
+    ax.axhline(1.0, color="gray", linestyle=":", linewidth=0.8)
+    ax.set_xticks(x_base)
+    ax.set_xticklabels([str(a) for a in arities])
     ax.set(xlabel="Fold arity ℓ",
-           ylabel="Poseidon2 ÷ algebraic",
-           title="In-circuit size reduction (Poseidon2 ÷ algebraic, union)")
+           ylabel="standard ÷ union (×)",
+           title="Quasar in-circuit speedup vs arity (std ÷ union)")
+    ax.legend(fontsize=7)
     ax.grid(axis="y", alpha=0.3)
 
 
@@ -543,56 +577,268 @@ def _plot_fold_verify_full(df, ax):
 
 
 def _plot_circuit_size_arity(df, ax):
-    """In-circuit fold-verifier size vs arity — Quasar's real payoff."""
+    """In-circuit fold-verifier size vs arity — Quasar's real payoff.
+
+    Plots four lines when all variants are present:
+      - poseidon2_standard (dashed, blue): absorbs ℓ roots → linear in ℓ
+      - poseidon2_union    (solid,  blue): absorbs 1 union root → sub-linear
+      - algebraic_standard (dashed, red ): ℓ-1 chained l=2 folds → linear
+      - algebraic_union    (solid,  red ): union algebraic → +8 per doubling
+    The gap between each solid/dashed pair is the Quasar win at that arity.
+    """
     if df.empty:
         ax.text(0.5, 0.5, "(no circuit_size_arity data)", transform=ax.transAxes, ha="center", color="gray")
         return
     styles = {
-        "poseidon2_union": {"color": "#1f77b4", "marker": "o",
-                            "label": "Poseidon2 + Quasar union"},
-        "algebraic_union": {"color": "#d62728", "marker": "s",
-                            "label": "Algebraic + Quasar union"},
+        "poseidon2_standard": {"color": "#1f77b4", "marker": "o", "linestyle": "--",
+                               "label": "Poseidon2 standard (ℓ roots)"},
+        "poseidon2_union":    {"color": "#1f77b4", "marker": "o", "linestyle": "-",
+                               "label": "Poseidon2 + Quasar union (1 root)"},
+        "algebraic_standard": {"color": "#d62728", "marker": "s", "linestyle": "--",
+                               "label": "Algebraic standard (ℓ-1 chained folds)"},
+        "algebraic_union":    {"color": "#d62728", "marker": "s", "linestyle": "-",
+                               "label": "Algebraic + Quasar union"},
     }
     for variant, grp in df.groupby("variant"):
         grp = grp.sort_values("arity")
-        st = styles.get(variant, {"color": "gray", "marker": "x", "label": variant})
-        ax.plot(grp["arity"], grp["constraints"], "-",
-                marker=st["marker"], color=st["color"], label=st["label"], linewidth=1.5)
+        st = styles.get(variant, {"color": "gray", "marker": "x",
+                                   "linestyle": ":", "label": variant})
+        ax.plot(grp["arity"], grp["constraints"],
+                linestyle=st["linestyle"], marker=st["marker"],
+                color=st["color"], label=st["label"], linewidth=1.5)
     ax.set(xlabel="Fold arity ℓ",
            ylabel="R1CS constraints (unified circuit)",
-           title="In-circuit verifier size vs arity (union variants)",
+           title="In-circuit verifier size vs arity (standard vs Quasar)",
            xscale="log", yscale="log")
-    ax.legend(fontsize=8)
+    ax.legend(fontsize=7)
+
+
+_WV_LOG_N_LINESTYLES = ["-", "--", ":", "-."]
+
+
+def _plot_warp_vs_whir_prove(df, ax):
+    """Total prover time vs N, one line group per log_n.
+
+    Two colors: WHIR (blue), WARP-direct (red).
+    One linestyle per log_n value so the witness-size scaling is visible.
+    """
+    if df.empty:
+        ax.text(0.5, 0.5, "(no warp_vs_whir data)", transform=ax.transAxes,
+                ha="center", color="gray")
+        return
+    log_ns = sorted(df["log_n"].unique())
+    for li, ln in enumerate(log_ns):
+        ls = _WV_LOG_N_LINESTYLES[li % len(_WV_LOG_N_LINESTYLES)]
+        g = df[df["log_n"] == ln].sort_values("n_instances")
+        ax.plot(g["n_instances"], g["whir_prove_us"] / 1e3,
+                linestyle=ls, marker="o", color="#1f77b4", linewidth=1.4,
+                label=f"WHIR  log_n={ln}")
+        ax.plot(g["n_instances"], g["warp_direct_prove_us"] / 1e3,
+                linestyle=ls, marker="s", color="#d62728", linewidth=1.4,
+                label=f"WARP-direct  log_n={ln}")
+    ax.set(xlabel="N (instances proved)", ylabel="prover time (ms)",
+           title="Prover: aggregated WARP vs N independent WHIR proofs",
+           xscale="log", yscale="log")
+    ax.legend(fontsize=6, ncol=len(log_ns), loc="upper left")
+
+
+def _plot_warp_vs_whir_verify(df, ax):
+    if df.empty:
+        ax.text(0.5, 0.5, "(no warp_vs_whir data)", transform=ax.transAxes,
+                ha="center", color="gray")
+        return
+    log_ns = sorted(df["log_n"].unique())
+    for li, ln in enumerate(log_ns):
+        ls = _WV_LOG_N_LINESTYLES[li % len(_WV_LOG_N_LINESTYLES)]
+        g = df[df["log_n"] == ln].sort_values("n_instances")
+        ax.plot(g["n_instances"], g["whir_verify_us"] / 1e3,
+                linestyle=ls, marker="o", color="#1f77b4", linewidth=1.4,
+                label=f"WHIR  log_n={ln}")
+        ax.plot(g["n_instances"], g["warp_direct_verify_us"] / 1e3,
+                linestyle=ls, marker="s", color="#d62728", linewidth=1.4,
+                label=f"WARP-direct  log_n={ln}")
+    ax.set(xlabel="N (instances verified)", ylabel="verifier time (ms)",
+           title="Verifier: aggregated WARP vs N independent WHIR proofs",
+           xscale="log", yscale="log")
+    ax.legend(fontsize=6, ncol=len(log_ns), loc="upper left")
+
+
+def _plot_warp_vs_whir_speedup(df, ax):
+    """Grouped bars: WARP-direct prover speedups per (log_n, N) cell."""
+    if df.empty:
+        ax.text(0.5, 0.5, "(no warp_vs_whir data)", transform=ax.transAxes,
+                ha="center", color="gray")
+        return
+    g = df.copy()
+    g["prove_sp"] = g["whir_prove_us"] / g["warp_direct_prove_us"]
+    log_ns = sorted(g["log_n"].unique())
+    n_vals = sorted(g["n_instances"].unique())
+    n_log = len(log_ns)
+    n_n = len(n_vals)
+    # Per cell: 2 bars (prover, verifier). Group cells by N, color by log_n.
+    width = 0.8 / max(n_log, 1)
+    x_base = np.arange(n_n)
+    palette = ["#1f77b4", "#d62728", "#2ca02c", "#ff7f0e"]
+    for i, ln in enumerate(log_ns):
+        sub = g[g["log_n"] == ln]
+        prove_vals = [
+            sub[sub["n_instances"] == nn]["prove_sp"].median() if not sub[sub["n_instances"] == nn].empty else np.nan
+            for nn in n_vals
+        ]
+        offset = (i - (n_log - 1) / 2) * width
+        ax.bar(x_base + offset, prove_vals, width,
+               color=palette[i % len(palette)], alpha=0.85,
+               label=f"prover  log_n={ln}")
+        for xi, v in zip(x_base + offset, prove_vals):
+            if not np.isnan(v):
+                ax.text(xi, v, f"{v:.1f}×",
+                        ha="center", va="bottom", fontsize=6)
+    ax.axhline(1.0, color="gray", linestyle=":", linewidth=0.8)
+    ax.set_xticks(x_base)
+    ax.set_xticklabels([str(n) for n in n_vals])
+    ax.set(xlabel="N (instances)",
+           ylabel="prover speedup WHIR ÷ WARP-direct (×)",
+           title="WARP-direct prover speedup vs N independent WHIR (≥1× = WARP wins)")
+    ax.legend(fontsize=6, loc="upper left")
+    ax.grid(axis="y", alpha=0.3)
 
 
 def plot_unified_dashboard(path: str, out: str):
     """Unified dashboard: scheme rows (prover comparisons) + microbench rows
-    (verifier/circuit/terminal microbenches) in one 5×3 figure."""
+    (verifier/circuit/terminal microbenches) in one 6×3 figure."""
     df_scheme = load_jsonl(path)
     mb = load_microbenches(path)
 
-    fig, axes = plt.subplots(5, 3, figsize=(22, 24))
+    fig, axes = plt.subplots(6, 3, figsize=(22, 28))
 
-    # Row 1 — Family A scheme comparison: prove time + total_instances-normalized
-    _plot_scheme_prove(df_scheme, axes[0, 0], family_counter="counter_family_a",
-                       title="Family A — prove_total vs log_n")
-    _plot_scheme_normalized(df_scheme, axes[0, 1], family_counter="counter_family_a",
-                            title="Family A — ms per R1CS instance (fair)")
-    _plot_scheme_verify(df_scheme, axes[0, 2], family_counter="counter_family_a",
-                        title="Family A — verify_total")
+    if "workload" in df_scheme.columns and (df_scheme["workload"] != "legacy").any():
+        # Row 1 — Family A, exact same number of R1CS instances.
+        # The default dashboard points pair log_n and total_instances (for
+        # example 14/48, 16/96, ...). Filtering to max(log_n) and then plotting
+        # by total_instances leaves a single x-value, so Row 1 uses log_n as the
+        # varying axis for paired points. Cartesian data still uses N at max
+        # log_n to avoid aggregating unlike workloads.
+        family_a_x, family_a_fixed, family_a_scope = _family_a_axis_plan(df_scheme)
+        _plot_workload_metric(
+            df_scheme, axes[0, 0], "family_a_same_n", family_a_x, "phase_e2e_prove",
+            f"Family A same-N — E2E prover ({family_a_scope})",
+            "prove time (ms, log scale)", fixed=family_a_fixed,
+            schemes=[
+                "independent_whir",
+                "pure_warp", "pure_warp_succinct",
+                "warp_standard", "warp_standard_succinct",
+                "warp_union", "warp_union_succinct",
+            ],
+        )
+        _plot_workload_metric(
+            df_scheme, axes[0, 1], "family_a_same_n", family_a_x,
+            "phase_post_spartan_prove",
+            f"Family A same-N — post-Spartan prover ({family_a_scope})",
+            "prove time (ms, log scale)", fixed=family_a_fixed,
+            schemes=[
+                "independent_whir",
+                "pure_warp", "pure_warp_succinct",
+                "warp_standard", "warp_standard_succinct",
+                "warp_union", "warp_union_succinct",
+            ],
+        )
+        _plot_workload_verify(
+            df_scheme, axes[0, 2], "family_a_same_n", family_a_x,
+            f"Family A same-N — terminal verify total ({family_a_scope})",
+            fixed=family_a_fixed,
+            schemes=[
+                "independent_whir",
+                "pure_warp", "pure_warp_succinct",
+                "warp_standard", "warp_standard_succinct",
+                "warp_union", "warp_union_succinct",
+            ],
+        )
 
-    # Row 2 — Family B scheme comparison
-    _plot_scheme_prove(df_scheme, axes[1, 0], family_counter="counter_family_b",
-                       title="Family B — prove_total vs log_n")
-    _plot_scheme_normalized(df_scheme, axes[1, 1], family_counter="counter_family_b",
-                            title="Family B — ms per step circuit (fair)")
-    _plot_scheme_verify(df_scheme, axes[1, 2], family_counter="counter_family_b",
-                        title="Family B — verify_total")
+        # Row 2 — Quasar claim in the full workload: same N, same arity.
+        quasar_fixed = {"log_n": "max", "total_instances": "max"}
+        _plot_workload_metric(
+            df_scheme, axes[1, 0], "quasar_arity", "arity", "phase_e2e_prove",
+            "Full WARP arity sweep — standard vs Quasar union prover",
+            "prove time (ms, log scale)", fixed=quasar_fixed,
+            schemes=[
+                "warp_standard", "warp_standard_succinct",
+                "warp_union", "warp_union_succinct",
+            ],
+        )
+        _plot_workload_verify(
+            df_scheme, axes[1, 1], "quasar_arity", "arity",
+            "Full WARP arity sweep — terminal decider verify",
+            fixed=quasar_fixed,
+            schemes=[
+                "warp_standard", "warp_standard_succinct",
+                "warp_union", "warp_union_succinct",
+            ],
+            metric="phase_terminal_decider",
+            ylabel="terminal decider time (ms, log scale)",
+        )
+        _plot_speedup(
+            df_scheme, axes[1, 2], "quasar_arity", "arity",
+            "warp_standard_succinct", "warp_union_succinct", "phase_terminal_decider",
+            "Full WARP terminal-decider speedup: standard / union",
+            fixed=quasar_fixed,
+        )
 
-    # Row 3 — Native verifier microbenches
-    _plot_fs_scaling_abs(mb.get("fs_scaling", pd.DataFrame()), axes[2, 0])
-    _plot_fold_verify_full(mb.get("fold_verify", pd.DataFrame()), axes[2, 1])
-    _plot_fs_scaling_speedup(mb.get("fs_scaling", pd.DataFrame()), axes[2, 2])
+        # Row 3 — Recursive IVC, exact same number of step circuits.
+        recursive_fixed = {"arity": "max", "step_muls": "max"}
+        _plot_workload_metric(
+            df_scheme, axes[2, 0], "recursive_ivc", "total_step_circuits",
+            "phase_e2e_prove",
+            "Recursive same-step workload — prover (Poseidon2/Symphony × Quasar)",
+            "prove time (ms, log scale)", fixed=recursive_fixed,
+            schemes=[
+                "warp_recursive_standard_arity", "warp_recursive_standard_arity_succinct",
+                "quasar_warp", "quasar_warp_succinct",
+                "symphony_standard_arity", "symphony_standard_arity_succinct",
+                "quasar_symphony", "quasar_symphony_succinct",
+            ],
+        )
+        _plot_workload_metric_per_unit(
+            df_scheme, axes[2, 1], "recursive_ivc", "total_step_circuits",
+            "phase_e2e_prove",
+            "total_step_circuits",
+            "Recursive same-step workload — prover per step circuit",
+            "ms / step circuit (log scale)", fixed=recursive_fixed,
+            schemes=[
+                "warp_recursive_standard_arity", "warp_recursive_standard_arity_succinct",
+                "quasar_warp", "quasar_warp_succinct",
+                "symphony_standard_arity", "symphony_standard_arity_succinct",
+                "quasar_symphony", "quasar_symphony_succinct",
+            ],
+        )
+        _plot_workload_verify(
+            df_scheme, axes[2, 2], "recursive_ivc", "total_step_circuits",
+            "Recursive same-step workload — terminal verify",
+            fixed=recursive_fixed,
+            schemes=[
+                "warp_recursive_standard_arity", "warp_recursive_standard_arity_succinct",
+                "quasar_warp", "quasar_warp_succinct",
+                "symphony_standard_arity", "symphony_standard_arity_succinct",
+                "quasar_symphony", "quasar_symphony_succinct",
+            ],
+        )
+    else:
+        # Legacy rows: kept for old JSONL files, but these panels are not
+        # apples-to-apples because schemes interpret `ivc_steps` differently.
+        _plot_scheme_prove(df_scheme, axes[0, 0], family_counter="counter_family_a",
+                           title="LEGACY Family A — mixed workload prover")
+        _plot_scheme_normalized(df_scheme, axes[0, 1], family_counter="counter_family_a",
+                                title="LEGACY Family A — normalized post-Spartan")
+        _plot_scheme_verify(df_scheme, axes[0, 2], family_counter="counter_family_a",
+                            title="LEGACY Family A — mixed workload verify")
+        _plot_scheme_prove(df_scheme, axes[1, 0], family_counter="counter_family_b",
+                           title="LEGACY Family B — mixed workload prover")
+        _plot_scheme_normalized(df_scheme, axes[1, 1], family_counter="counter_family_b",
+                                title="LEGACY Family B — normalized")
+        _plot_scheme_verify(df_scheme, axes[1, 2], family_counter="counter_family_b",
+                            title="LEGACY Family B — verify")
+        _plot_fs_scaling_abs(mb.get("fs_scaling", pd.DataFrame()), axes[2, 0])
+        _plot_fold_verify_full(mb.get("fold_verify", pd.DataFrame()), axes[2, 1])
+        _plot_fs_scaling_speedup(mb.get("fs_scaling", pd.DataFrame()), axes[2, 2])
 
     # Row 4 — In-circuit verifier microbenches
     _plot_circuit_size_arity(mb.get("circuit_size_arity", pd.DataFrame()), axes[3, 0])
@@ -605,10 +851,15 @@ def plot_unified_dashboard(path: str, out: str):
     _plot_whir_estimate(mb.get("whir_in_circuit_estimate", pd.DataFrame()), axes[4, 1])
     _plot_fold_verify_speedup(mb.get("fold_verify", pd.DataFrame()), axes[4, 2])
 
+    # Row 6 — Headline: aggregated WARP vs N independent WHIR proofs.
+    _plot_warp_vs_whir_prove(mb.get("warp_vs_whir", pd.DataFrame()), axes[5, 0])
+    _plot_warp_vs_whir_verify(mb.get("warp_vs_whir", pd.DataFrame()), axes[5, 1])
+    _plot_warp_vs_whir_speedup(mb.get("warp_vs_whir", pd.DataFrame()), axes[5, 2])
+
     for row in axes:
         for ax in row:
             ax.grid(True, alpha=0.3)
-    fig.suptitle("whir-bench unified dashboard", fontsize=15)
+    # No figure-level suptitle: the top strip was blocking the Row-1 panels.
     fig.tight_layout()
     fig.savefig(out)
     plt.close(fig)
@@ -622,12 +873,241 @@ def plot_unified_dashboard(path: str, out: str):
 SCHEME_STYLES_FULL = {
     "independent_whir": {"color": "#7f7f7f", "marker": "x", "label": "independent_whir"},
     "pure_warp":        {"color": "#1f77b4", "marker": "o", "label": "pure_warp"},
-    "warp_batch":       {"color": "#ff7f0e", "marker": "s", "label": "warp_batch"},
+    "pure_warp_succinct": {"color": "#1f77b4", "marker": "o", "linestyle": "--", "label": "pure_warp + WHIR"},
+    "warp_standard":    {"color": "#9467bd", "marker": "P", "label": "warp_standard"},
+    "warp_standard_succinct": {"color": "#9467bd", "marker": "P", "linestyle": "--", "label": "warp_standard + WHIR"},
     "warp_union":       {"color": "#2ca02c", "marker": "^", "label": "warp_union"},
+    "warp_union_succinct": {"color": "#2ca02c", "marker": "^", "linestyle": "--", "label": "warp_union + WHIR"},
+    "warp_recursive_standard": {"color": "#8c564b", "marker": "v", "label": "warp_recursive_standard"},
+    "warp_recursive_standard_succinct": {"color": "#8c564b", "marker": "v", "linestyle": "--", "label": "warp_recursive_standard + WHIR"},
+    "warp_recursive_standard_arity": {"color": "#9467bd", "marker": "P", "label": "standard WARP (arity)"},
+    "warp_recursive_standard_arity_succinct": {"color": "#9467bd", "marker": "P", "linestyle": "--", "label": "standard WARP (arity) + WHIR"},
     "quasar_warp":      {"color": "#1f77b4", "marker": "o", "label": "quasar_warp"},
+    "quasar_warp_succinct": {"color": "#1f77b4", "marker": "o", "linestyle": "--", "label": "quasar_warp + WHIR"},
     "symphony":         {"color": "#2ca02c", "marker": "^", "label": "symphony"},
+    "symphony_succinct": {"color": "#2ca02c", "marker": "^", "linestyle": "--", "label": "symphony + WHIR"},
+    "symphony_standard_arity": {"color": "#17becf", "marker": "v", "label": "symphony standard (arity)"},
+    "symphony_standard_arity_succinct": {"color": "#17becf", "marker": "v", "linestyle": "--", "label": "symphony standard (arity) + WHIR"},
     "quasar_symphony":  {"color": "#d62728", "marker": "D", "label": "quasar_symphony"},
+    "quasar_symphony_succinct": {"color": "#d62728", "marker": "D", "linestyle": "--", "label": "quasar_symphony + WHIR"},
 }
+
+
+def _phase(df: pd.DataFrame, name: str) -> pd.Series:
+    col = f"phase_{name}"
+    if col in df.columns:
+        return df[col].fillna(0)
+    return pd.Series(0, index=df.index)
+
+
+def _counter(df: pd.DataFrame, name: str) -> pd.Series:
+    col = f"counter_{name}"
+    if col in df.columns:
+        return df[col].fillna(0)
+    return pd.Series(0, index=df.index)
+
+
+def _with_e2e(df: pd.DataFrame) -> pd.DataFrame:
+    out = df.copy()
+    out["phase_e2e_prove"] = _phase(out, "prove_total") + _phase(out, "spartan")
+    out["phase_post_spartan_prove"] = _phase(out, "prove_total")
+    return out
+
+
+def _workload(df: pd.DataFrame, name: str) -> pd.DataFrame:
+    if "workload" not in df.columns:
+        return df.iloc[0:0]
+    return df[df["workload"] == name].copy()
+
+
+def _select_fixed(sub: pd.DataFrame, fixed: dict[str, str]) -> pd.DataFrame:
+    out = sub
+    for col, mode in fixed.items():
+        if col not in out.columns or out.empty:
+            continue
+        value = out[col].max() if mode == "max" else out[col].min()
+        out = out[out[col] == value]
+    return out
+
+
+def _family_a_axis_plan(df: pd.DataFrame) -> tuple[str, dict[str, str] | None, str]:
+    sub = _workload(df, "family_a_same_n")
+    if {"log_n", "total_instances"}.issubset(sub.columns):
+        pairs = sub[["log_n", "total_instances"]].dropna().drop_duplicates()
+        if not pairs.empty:
+            log_count = pairs["log_n"].nunique()
+            n_count = pairs["total_instances"].nunique()
+            per_log = pairs.groupby("log_n")["total_instances"].nunique()
+            per_n = pairs.groupby("total_instances")["log_n"].nunique()
+            is_paired_sweep = log_count > 1 and per_log.max() == 1 and per_n.max() == 1
+            if is_paired_sweep:
+                return "log_n", None, "paired N"
+            if n_count > 1:
+                return "total_instances", {"log_n": "max"}, "max log_n"
+    return "log_n", None, "paired N"
+
+
+def _plot_workload_metric(
+    df: pd.DataFrame,
+    ax,
+    workload: str,
+    x_col: str,
+    metric: str,
+    title: str,
+    ylabel: str,
+    *,
+    fixed: dict[str, str] | None = None,
+    schemes: list[str] | None = None,
+    yscale: str = "log",
+):
+    sub = _with_e2e(_workload(df, workload))
+    if fixed:
+        sub = _select_fixed(sub, fixed)
+    if schemes:
+        sub = sub[sub["scheme"].isin(schemes)]
+    if sub.empty or x_col not in sub.columns or metric not in sub.columns:
+        ax.text(0.5, 0.5, f"(no {workload} data)",
+                transform=ax.transAxes, ha="center", color="gray")
+        ax.set(title=title)
+        return
+
+    agg = sub.groupby(["scheme", x_col])[metric].median().reset_index()
+    for scheme, g in agg.groupby("scheme"):
+        g = g.sort_values(x_col)
+        if len(g) < 2:
+            continue
+        st = SCHEME_STYLES_FULL.get(scheme, {"color": "gray", "marker": "x", "label": scheme})
+        ax.plot(g[x_col], g[metric] / 1e6, st.get("linestyle", "-"),
+                marker=st["marker"], color=st["color"], label=st["label"], linewidth=1.5)
+    ax.set(xlabel=x_col, ylabel=ylabel, title=title, yscale=yscale)
+    handles, _ = ax.get_legend_handles_labels()
+    if handles:
+        ax.legend(fontsize=7)
+    else:
+        ax.text(0.5, 0.5, f"(only one {x_col} point)",
+                transform=ax.transAxes, ha="center", color="gray")
+
+
+def _plot_workload_metric_per_unit(
+    df: pd.DataFrame,
+    ax,
+    workload: str,
+    x_col: str,
+    metric: str,
+    unit_col: str,
+    title: str,
+    ylabel: str,
+    *,
+    fixed: dict[str, str] | None = None,
+    schemes: list[str] | None = None,
+    yscale: str = "log",
+):
+    sub = _with_e2e(_workload(df, workload))
+    if fixed:
+        sub = _select_fixed(sub, fixed)
+    if schemes:
+        sub = sub[sub["scheme"].isin(schemes)]
+
+    if unit_col not in sub.columns and f"counter_{unit_col}" in sub.columns:
+        unit_col = f"counter_{unit_col}"
+    if (
+        sub.empty
+        or x_col not in sub.columns
+        or metric not in sub.columns
+        or unit_col not in sub.columns
+    ):
+        ax.text(0.5, 0.5, f"(no {workload} data)",
+                transform=ax.transAxes, ha="center", color="gray")
+        ax.set(title=title)
+        return
+
+    sub = sub.copy()
+    sub = sub[sub[unit_col].fillna(0) > 0]
+    sub["metric_per_unit"] = sub[metric] / sub[unit_col]
+    agg = sub.groupby(["scheme", x_col])["metric_per_unit"].median().reset_index()
+    for scheme, g in agg.groupby("scheme"):
+        g = g.sort_values(x_col)
+        if len(g) < 2:
+            continue
+        st = SCHEME_STYLES_FULL.get(scheme, {"color": "gray", "marker": "x", "label": scheme})
+        ax.plot(g[x_col], g["metric_per_unit"] / 1e6, st.get("linestyle", "-"),
+                marker=st["marker"], color=st["color"], label=st["label"], linewidth=1.5)
+    ax.set(xlabel=x_col, ylabel=ylabel, title=title, yscale=yscale)
+    handles, _ = ax.get_legend_handles_labels()
+    if handles:
+        ax.legend(fontsize=7)
+    else:
+        ax.text(0.5, 0.5, f"(only one {x_col} point)",
+                transform=ax.transAxes, ha="center", color="gray")
+
+
+def _plot_workload_verify(
+    df: pd.DataFrame,
+    ax,
+    workload: str,
+    x_col: str,
+    title: str,
+    *,
+    fixed: dict[str, str] | None = None,
+    schemes: list[str] | None = None,
+    metric: str = "phase_verify_total",
+    ylabel: str = "verify time (ms, log scale)",
+):
+    _plot_workload_metric(
+        df,
+        ax,
+        workload,
+        x_col,
+        metric,
+        title,
+        ylabel,
+        fixed=fixed,
+        schemes=schemes,
+    )
+
+
+def _plot_speedup(
+    df: pd.DataFrame,
+    ax,
+    workload: str,
+    x_col: str,
+    numerator_scheme: str,
+    denominator_scheme: str,
+    metric: str,
+    title: str,
+    *,
+    fixed: dict[str, str] | None = None,
+):
+    sub = _with_e2e(_workload(df, workload))
+    if fixed:
+        sub = _select_fixed(sub, fixed)
+    if sub.empty or x_col not in sub.columns or metric not in sub.columns:
+        ax.text(0.5, 0.5, f"(no {workload} data)",
+                transform=ax.transAxes, ha="center", color="gray")
+        ax.set(title=title)
+        return
+    agg = sub.groupby(["scheme", x_col])[metric].median().reset_index()
+    pivot = agg.pivot(index=x_col, columns="scheme", values=metric).dropna()
+    if numerator_scheme not in pivot or denominator_scheme not in pivot:
+        alt_num = numerator_scheme.removesuffix("_succinct")
+        alt_den = denominator_scheme.removesuffix("_succinct")
+        if alt_num in pivot and alt_den in pivot:
+            numerator_scheme, denominator_scheme = alt_num, alt_den
+        else:
+            ax.text(0.5, 0.5, "(missing schemes)",
+                    transform=ax.transAxes, ha="center", color="gray")
+            ax.set(title=title)
+            return
+    if numerator_scheme not in pivot or denominator_scheme not in pivot:
+        ax.text(0.5, 0.5, "(missing schemes)",
+                transform=ax.transAxes, ha="center", color="gray")
+        ax.set(title=title)
+        return
+    speedup = pivot[numerator_scheme] / pivot[denominator_scheme]
+    ax.bar(speedup.index.astype(str), speedup.values, color="#d62728", alpha=0.75)
+    for i, v in enumerate(speedup.values):
+        ax.text(i, v, f"{v:.2f}x", ha="center", va="bottom", fontsize=8)
+    ax.set(xlabel=x_col, ylabel="speedup (x)", title=title)
 
 
 def _filter_family(df: pd.DataFrame, family_counter: str) -> pd.DataFrame:
@@ -646,9 +1126,13 @@ def _plot_scheme_prove(df, ax, family_counter: str, title: str):
     for scheme, g in agg.groupby("scheme"):
         g = g.sort_values("log_n")
         st = SCHEME_STYLES_FULL.get(scheme, {"color": "gray", "marker": "x", "label": scheme})
-        ax.plot(g["log_n"], g["phase_prove_total"] / 1e6, "-",
+        ax.plot(g["log_n"], g["phase_prove_total"] / 1e6, st.get("linestyle", "-"),
                 marker=st["marker"], color=st["color"], label=st["label"], linewidth=1.5)
-    ax.set(xlabel="log₂(constraints)", ylabel="prove_total (ms)", title=title)
+    # Log y-scale: O(n·log n) curves read as near-straight lines instead of
+    # looking "exponential" on a linear axis. Small absolute differences at
+    # the small-log_n end aren't visually compressed into a flat line.
+    ax.set(xlabel="log₂(constraints)", ylabel="prove_total (ms, log scale)",
+           title=title, yscale="log")
     ax.legend(fontsize=7)
 
 
@@ -662,7 +1146,7 @@ def _plot_scheme_verify(df, ax, family_counter: str, title: str):
     for scheme, g in agg.groupby("scheme"):
         g = g.sort_values("log_n")
         st = SCHEME_STYLES_FULL.get(scheme, {"color": "gray", "marker": "x", "label": scheme})
-        ax.plot(g["log_n"], g["phase_verify_total"] / 1e3, "-",
+        ax.plot(g["log_n"], g["phase_verify_total"] / 1e3, st.get("linestyle", "-"),
                 marker=st["marker"], color=st["color"], label=st["label"], linewidth=1.5)
     ax.set(xlabel="log₂(constraints)", ylabel="verify_total (µs)",
            title=title, yscale="log")
@@ -682,9 +1166,10 @@ def _plot_scheme_normalized(df, ax, family_counter: str, title: str):
     for scheme, g in agg.groupby("scheme"):
         g = g.sort_values("log_n")
         st = SCHEME_STYLES_FULL.get(scheme, {"color": "gray", "marker": "x", "label": scheme})
-        ax.plot(g["log_n"], g["ms_per_instance"], "-",
+        ax.plot(g["log_n"], g["ms_per_instance"], st.get("linestyle", "-"),
                 marker=st["marker"], color=st["color"], label=st["label"], linewidth=1.5)
-    ax.set(xlabel="log₂(constraints)", ylabel="ms / instance", title=title)
+    ax.set(xlabel="log₂(constraints)", ylabel="ms / instance (log scale)",
+           title=title, yscale="log")
     ax.legend(fontsize=7)
 
 
@@ -735,7 +1220,7 @@ def plot_compare_all(path: str, out: str):
     for row in axes:
         for ax in row:
             ax.grid(True, alpha=0.3)
-    fig.suptitle("compare_bench dashboard", fontsize=15)
+    # No figure-level suptitle: the top strip was blocking the Row-1 panels.
     fig.tight_layout()
     fig.savefig(out)
     plt.close(fig)
@@ -750,8 +1235,10 @@ def cmd_aggregate(df: pd.DataFrame):
 
 SCHEME_REPORT_LABEL = {
     "pure_warp":       "A: WARP (l=2)",
+    "warp_recursive_standard_arity": "A: WARP standard (l=arity)",
     "quasar_warp":     "B: WARP+Quasar (l=arity)",
     "symphony":        "C: Symphony (l=2)",
+    "symphony_standard_arity": "C: Symphony standard (l=arity)",
     "quasar_symphony": "D: Symphony+Quasar (l=arity)",
 }
 
@@ -782,7 +1269,14 @@ def cmd_report(df: pd.DataFrame):
 
         baseline_ms_per_step = None
         subset = grp_prove.sort_values(["scheme", "ivc_steps"])
-        for scheme in ["pure_warp", "quasar_warp", "symphony", "quasar_symphony"]:
+        for scheme in [
+            "warp_recursive_standard_arity",
+            "quasar_warp",
+            "symphony_standard_arity",
+            "quasar_symphony",
+            "pure_warp",
+            "symphony",
+        ]:
             scheme_rows = subset[subset["scheme"] == scheme]
             if scheme_rows.empty:
                 continue

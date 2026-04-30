@@ -7,11 +7,11 @@
 //!   - Extension-field (D=4) multiplication ≈ 20 R1CS constraints
 //!   - Merkle path verification per level = 1 Poseidon2 compression
 
-use rand::{rngs::SmallRng, SeedableRng};
+use rand::{SeedableRng, rngs::SmallRng};
 use whir_spartan::{r1cs::R1CSInstance, r1cs_prover::R1CSProver};
 
 use crate::{
-    fixtures::{make_whir_config, F},
+    fixtures::{F, make_whir_config},
     microbench::{Microbench, MicrobenchAxes, MicrobenchRow},
 };
 

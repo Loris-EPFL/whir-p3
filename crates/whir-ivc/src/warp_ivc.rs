@@ -20,30 +20,28 @@ use p3_field::{ExtensionField, Field, PrimeCharacteristicRing, PrimeField64, Two
 use p3_poseidon2::GenericPoseidon2LinearLayers;
 use p3_symmetric::{CryptographicHasher, Permutation, PseudoCompressionFunction};
 
+use crate::{
+    accumulation::{
+        constraint_batch::constraint_batch_prove,
+        linearized::linearized_statement_from_spartan_proof, random_lc::random_linear_combination,
+    },
+    circuit::{
+        builder::CircuitBuilder, poseidon2::Poseidon2CircuitConfig, sponge::CircuitChallenger,
+    },
+    ivc::warp_fold_verifier_circuit::{WarpFoldVerifierWitness, synthesize_warp_ivc_circuit},
+    poly::evals::EvaluationsList,
+    spartan::{
+        r1cs::{R1CSInstance, R1CSShape},
+        r1cs_prover::R1CSProver,
+    },
+};
 use warp::{
     accumulator::{
         FreshInstance, WarpAccumulator, WarpAccumulatorInstance, WarpAccumulatorWitness,
     },
     encoding::{merkle_commit_codeword, rs_encode},
     fold::{
-        warp_fold_prove_rs_committed, RSEncodingConfig,
-        WarpFoldResult,
-    },
-};
-use crate::{
-    accumulation::{
-        constraint_batch::constraint_batch_prove,
-        linearized::linearized_statement_from_spartan_proof,
-        random_lc::random_linear_combination,
-    },
-    circuit::{builder::CircuitBuilder, poseidon2::Poseidon2CircuitConfig, sponge::CircuitChallenger},
-    ivc::warp_fold_verifier_circuit::{
-        WarpFoldVerifierWitness, synthesize_warp_ivc_circuit,
-    },
-    poly::evals::EvaluationsList,
-    spartan::{
-        r1cs::{R1CSInstance, R1CSShape},
-        r1cs_prover::R1CSProver,
+        RSEncodingConfig, WarpFoldResult, derive_fold_challenges, warp_fold_prove_rs_committed,
     },
 };
 
@@ -122,10 +120,8 @@ fn make_initial_accumulator<F: Field>(
 fn rebuild_accumulator<F: Field>(result: &WarpFoldResult<F>) -> WarpAccumulator<F, F, F, 8> {
     // The fold's eval_point is in LSB-first convention (from compute_eq_table).
     // evaluate_hypercube_base uses MSB-first, so we reverse.
-    let eval_claim = crate::warp::fold::evaluate_mle_lsb(
-        &result.witness.codeword,
-        &result.instance.eval_point,
-    );
+    let eval_claim =
+        crate::warp::fold::evaluate_mle_lsb(&result.witness.codeword, &result.instance.eval_point);
     WarpAccumulator::new(
         WarpAccumulatorInstance {
             commitment_root: result.commitment_root,
@@ -197,21 +193,38 @@ where
     // Pre-compute fresh commitment root for Fiat-Shamir seeding
     let rs_config = RSEncodingConfig::new(ivc_config.rs_folding_factor, ivc_config.rs_log_inv_rate);
     let fresh_witness_poly = EvaluationsList::new(fresh.witness.clone());
-    let fresh_cw = rs_encode(&fresh_witness_poly, rs_config.folding_factor, rs_config.log_inv_rate, dft);
-    let (fresh_root, _) = merkle_commit_codeword::<
-        F, F, <F as Field>::Packing, <F as Field>::Packing, H, C, 8,
-    >(&fresh_cw, rs_config.folding_factor, merkle_hash.clone(), merkle_compress.clone());
+    let fresh_cw = rs_encode(
+        &fresh_witness_poly,
+        rs_config.folding_factor,
+        rs_config.log_inv_rate,
+        dft,
+    );
+    let (fresh_root, _) =
+        merkle_commit_codeword::<F, F, <F as Field>::Packing, <F as Field>::Packing, H, C, 8>(
+            &fresh_cw,
+            rs_config.folding_factor,
+            merkle_hash.clone(),
+            merkle_compress.clone(),
+        );
 
     // Derive omega, tau from native challenger (Fiat-Shamir)
     let mut fold_chal = make_fold_challenger();
-    for &val in &acc.instance.commitment_root { fold_chal.observe(val); }
+    for &val in &acc.instance.commitment_root {
+        fold_chal.observe(val);
+    }
     fold_chal.observe(acc.instance.eval_claim);
-    for &val in &acc.instance.eval_point { fold_chal.observe(val); }
+    for &val in &acc.instance.eval_point {
+        fold_chal.observe(val);
+    }
     fold_chal.observe(acc.instance.pesat_target);
-    for &val in &fresh_root { fold_chal.observe(val); }
+    for &val in &fresh_root {
+        fold_chal.observe(val);
+    }
     // Match derive_fold_challenges: fresh instances absorb zeros
     fold_chal.observe(F::ZERO); // fresh eval_claim
-    for _ in 0..log_code { fold_chal.observe(F::ZERO); } // fresh eval_point
+    for _ in 0..log_code {
+        fold_chal.observe(F::ZERO);
+    } // fresh eval_point
     fold_chal.observe(F::ZERO); // fresh pesat_target
 
     let omega: F = fold_chal.sample();
@@ -227,16 +240,154 @@ where
     let mh = merkle_hash.clone();
     let mc = merkle_compress.clone();
     let result = warp_fold_prove_rs_committed(
-        shape, &[fresh], &acc, omega, &tau,
+        shape,
+        &[fresh],
+        &acc,
+        omega,
+        &tau,
         &fresh_betas,
-        &rs_config, dft,
+        &rs_config,
+        dft,
         |round_evals| {
-            for &e in round_evals { fold_chal.observe(e); }
+            for &e in round_evals {
+                fold_chal.observe(e);
+            }
             fold_chal.sample()
         },
         |codeword, folding_factor| {
             let (root, _tree) = merkle_commit_codeword::<
-                F, F, <F as Field>::Packing, <F as Field>::Packing, H, C, 8,
+                F,
+                F,
+                <F as Field>::Packing,
+                <F as Field>::Packing,
+                H,
+                C,
+                8,
+            >(codeword, folding_factor, mh.clone(), mc.clone());
+            root
+        },
+    );
+
+    let new_acc = rebuild_accumulator(&result);
+
+    WarpIVCState {
+        step: 1,
+        accumulator: new_acc,
+        shape: shape.clone(),
+        last_fold_result: Some(result),
+        prev_acc_instance: Some(acc.instance.clone()),
+        public_state,
+    }
+}
+
+/// Fold-only variant of [`warp_ivc_init`].
+///
+/// Skips Spartan: the caller is responsible for running Spartan over the
+/// R1CS instance externally and packaging the result as a [`FreshInstance`]
+/// (public_input + padded witness).  All work inside this function is
+/// post-Spartan (RS encode + Merkle commit + twin-constraint sumcheck +
+/// shift/OOD + eval batching).
+///
+/// Use this when you want `prove_total` timers to measure fold cost only
+/// — e.g. the benchmark schemes comparing WARP-family prover work.
+pub fn warp_ivc_init_fold<F, Dft, H, C, FoldChal>(
+    shape: &R1CSShape<F>,
+    fresh: FreshInstance<F>,
+    ivc_config: &WarpIVCConfig,
+    dft: &Dft,
+    merkle_hash: H,
+    merkle_compress: C,
+    public_state: Vec<F>,
+    mut make_fold_challenger: impl FnMut() -> FoldChal,
+) -> WarpIVCState<F>
+where
+    F: TwoAdicField + PrimeField64 + Ord,
+    Dft: TwoAdicSubgroupDft<F>,
+    H: CryptographicHasher<F, [F; 8]>
+        + CryptographicHasher<<F as Field>::Packing, [<F as Field>::Packing; 8]>
+        + Sync
+        + Clone,
+    C: PseudoCompressionFunction<[F; 8], 2>
+        + PseudoCompressionFunction<[<F as Field>::Packing; 8], 2>
+        + Sync
+        + Clone,
+    <F as Field>::Packing: Eq + Send + Sync,
+    FoldChal: CanObserve<F> + CanSample<F>,
+{
+    let num_inputs = fresh.public_input.len();
+    let num_witness = fresh.witness.len();
+    let log_code = num_witness.trailing_zeros() as usize + ivc_config.rs_log_inv_rate;
+    let log_m = shape.num_cons().next_power_of_two().trailing_zeros() as usize;
+    let acc = make_initial_accumulator(num_witness, log_code, log_m, num_inputs);
+
+    let rs_config = RSEncodingConfig::new(ivc_config.rs_folding_factor, ivc_config.rs_log_inv_rate);
+    let fresh_witness_poly = EvaluationsList::new(fresh.witness.clone());
+    let fresh_cw = rs_encode(
+        &fresh_witness_poly,
+        rs_config.folding_factor,
+        rs_config.log_inv_rate,
+        dft,
+    );
+    let (fresh_root, _) =
+        merkle_commit_codeword::<F, F, <F as Field>::Packing, <F as Field>::Packing, H, C, 8>(
+            &fresh_cw,
+            rs_config.folding_factor,
+            merkle_hash.clone(),
+            merkle_compress.clone(),
+        );
+
+    let mut fold_chal = make_fold_challenger();
+    for &val in &acc.instance.commitment_root {
+        fold_chal.observe(val);
+    }
+    fold_chal.observe(acc.instance.eval_claim);
+    for &val in &acc.instance.eval_point {
+        fold_chal.observe(val);
+    }
+    fold_chal.observe(acc.instance.pesat_target);
+    for &val in &fresh_root {
+        fold_chal.observe(val);
+    }
+    fold_chal.observe(F::ZERO);
+    for _ in 0..log_code {
+        fold_chal.observe(F::ZERO);
+    }
+    fold_chal.observe(F::ZERO);
+
+    let omega: F = fold_chal.sample();
+    let log_l = 1;
+    let tau: Vec<F> = (0..log_l).map(|_| fold_chal.sample()).collect();
+
+    let fresh_betas: Vec<Vec<F>> = (0..1)
+        .map(|_| (0..log_m).map(|_| fold_chal.sample()).collect())
+        .collect();
+
+    let mh = merkle_hash.clone();
+    let mc = merkle_compress.clone();
+    let result = warp_fold_prove_rs_committed(
+        shape,
+        &[fresh],
+        &acc,
+        omega,
+        &tau,
+        &fresh_betas,
+        &rs_config,
+        dft,
+        |round_evals| {
+            for &e in round_evals {
+                fold_chal.observe(e);
+            }
+            fold_chal.sample()
+        },
+        |codeword, folding_factor| {
+            let (root, _tree) = merkle_commit_codeword::<
+                F,
+                F,
+                <F as Field>::Packing,
+                <F as Field>::Packing,
+                H,
+                C,
+                8,
             >(codeword, folding_factor, mh.clone(), mc.clone());
             root
         },
@@ -310,22 +461,39 @@ where
     // Pre-compute fresh commitment root for Fiat-Shamir seeding
     let rs_config = RSEncodingConfig::new(ivc_config.rs_folding_factor, ivc_config.rs_log_inv_rate);
     let fresh_witness_poly = EvaluationsList::new(fresh.witness.clone());
-    let fresh_cw = rs_encode(&fresh_witness_poly, rs_config.folding_factor, rs_config.log_inv_rate, dft);
-    let (fresh_root, _) = merkle_commit_codeword::<
-        F, F, <F as Field>::Packing, <F as Field>::Packing, H, C, 8,
-    >(&fresh_cw, rs_config.folding_factor, merkle_hash.clone(), merkle_compress.clone());
+    let fresh_cw = rs_encode(
+        &fresh_witness_poly,
+        rs_config.folding_factor,
+        rs_config.log_inv_rate,
+        dft,
+    );
+    let (fresh_root, _) =
+        merkle_commit_codeword::<F, F, <F as Field>::Packing, <F as Field>::Packing, H, C, 8>(
+            &fresh_cw,
+            rs_config.folding_factor,
+            merkle_hash.clone(),
+            merkle_compress.clone(),
+        );
 
     // Derive omega, tau from native challenger (Fiat-Shamir)
     let prev_inst = &prev_state.accumulator.instance;
     let log_code = prev_state.accumulator.log_code_len();
     let mut fold_chal = make_fold_challenger();
-    for &val in &prev_inst.commitment_root { fold_chal.observe(val); }
+    for &val in &prev_inst.commitment_root {
+        fold_chal.observe(val);
+    }
     fold_chal.observe(prev_inst.eval_claim);
-    for &val in &prev_inst.eval_point { fold_chal.observe(val); }
+    for &val in &prev_inst.eval_point {
+        fold_chal.observe(val);
+    }
     fold_chal.observe(prev_inst.pesat_target);
-    for &val in &fresh_root { fold_chal.observe(val); }
+    for &val in &fresh_root {
+        fold_chal.observe(val);
+    }
     fold_chal.observe(F::ZERO);
-    for _ in 0..log_code { fold_chal.observe(F::ZERO); }
+    for _ in 0..log_code {
+        fold_chal.observe(F::ZERO);
+    }
     fold_chal.observe(F::ZERO);
 
     let omega: F = fold_chal.sample();
@@ -333,7 +501,11 @@ where
     let tau: Vec<F> = (0..log_l).map(|_| fold_chal.sample()).collect();
 
     // Sample fresh betas for PESAT soundness
-    let log_m = prev_state.shape.num_cons().next_power_of_two().trailing_zeros() as usize;
+    let log_m = prev_state
+        .shape
+        .num_cons()
+        .next_power_of_two()
+        .trailing_zeros() as usize;
     let fresh_betas: Vec<Vec<F>> = (0..1)
         .map(|_| (0..log_m).map(|_| fold_chal.sample()).collect())
         .collect();
@@ -342,16 +514,267 @@ where
     let mh = merkle_hash.clone();
     let mc = merkle_compress.clone();
     let result = warp_fold_prove_rs_committed(
-        &prev_state.shape, &[fresh], &prev_state.accumulator, omega, &tau,
+        &prev_state.shape,
+        &[fresh],
+        &prev_state.accumulator,
+        omega,
+        &tau,
         &fresh_betas,
-        &rs_config, dft,
+        &rs_config,
+        dft,
         |round_evals| {
-            for &e in round_evals { fold_chal.observe(e); }
+            for &e in round_evals {
+                fold_chal.observe(e);
+            }
             fold_chal.sample()
         },
         |codeword, folding_factor| {
             let (root, _tree) = merkle_commit_codeword::<
-                F, F, <F as Field>::Packing, <F as Field>::Packing, H, C, 8,
+                F,
+                F,
+                <F as Field>::Packing,
+                <F as Field>::Packing,
+                H,
+                C,
+                8,
+            >(codeword, folding_factor, mh.clone(), mc.clone());
+            root
+        },
+    );
+
+    let new_acc = rebuild_accumulator(&result);
+
+    WarpIVCState {
+        step: prev_state.step + 1,
+        accumulator: new_acc,
+        shape: prev_state.shape.clone(),
+        last_fold_result: Some(result),
+        prev_acc_instance: Some(prev_state.accumulator.instance.clone()),
+        public_state: new_public_state,
+    }
+}
+
+/// Fold-only variant of [`warp_ivc_step`]. Skips Spartan; caller provides a
+/// pre-linearized [`FreshInstance`].  See [`warp_ivc_init_fold`] for the
+/// rationale.
+pub fn warp_ivc_step_fold<F, Dft, H, C, FoldChal>(
+    prev_state: &WarpIVCState<F>,
+    fresh: FreshInstance<F>,
+    ivc_config: &WarpIVCConfig,
+    dft: &Dft,
+    merkle_hash: H,
+    merkle_compress: C,
+    new_public_state: Vec<F>,
+    mut make_fold_challenger: impl FnMut() -> FoldChal,
+) -> WarpIVCState<F>
+where
+    F: TwoAdicField + PrimeField64 + Ord,
+    Dft: TwoAdicSubgroupDft<F>,
+    H: CryptographicHasher<F, [F; 8]>
+        + CryptographicHasher<<F as Field>::Packing, [<F as Field>::Packing; 8]>
+        + Sync
+        + Clone,
+    C: PseudoCompressionFunction<[F; 8], 2>
+        + PseudoCompressionFunction<[<F as Field>::Packing; 8], 2>
+        + Sync
+        + Clone,
+    <F as Field>::Packing: Eq + Send + Sync,
+    FoldChal: CanObserve<F> + CanSample<F>,
+{
+    let rs_config = RSEncodingConfig::new(ivc_config.rs_folding_factor, ivc_config.rs_log_inv_rate);
+    let fresh_witness_poly = EvaluationsList::new(fresh.witness.clone());
+    let fresh_cw = rs_encode(
+        &fresh_witness_poly,
+        rs_config.folding_factor,
+        rs_config.log_inv_rate,
+        dft,
+    );
+    let (fresh_root, _) =
+        merkle_commit_codeword::<F, F, <F as Field>::Packing, <F as Field>::Packing, H, C, 8>(
+            &fresh_cw,
+            rs_config.folding_factor,
+            merkle_hash.clone(),
+            merkle_compress.clone(),
+        );
+
+    let prev_inst = &prev_state.accumulator.instance;
+    let log_code = prev_state.accumulator.log_code_len();
+    let mut fold_chal = make_fold_challenger();
+    for &val in &prev_inst.commitment_root {
+        fold_chal.observe(val);
+    }
+    fold_chal.observe(prev_inst.eval_claim);
+    for &val in &prev_inst.eval_point {
+        fold_chal.observe(val);
+    }
+    fold_chal.observe(prev_inst.pesat_target);
+    for &val in &fresh_root {
+        fold_chal.observe(val);
+    }
+    fold_chal.observe(F::ZERO);
+    for _ in 0..log_code {
+        fold_chal.observe(F::ZERO);
+    }
+    fold_chal.observe(F::ZERO);
+
+    let omega: F = fold_chal.sample();
+    let log_l = 1;
+    let tau: Vec<F> = (0..log_l).map(|_| fold_chal.sample()).collect();
+
+    let log_m = prev_state
+        .shape
+        .num_cons()
+        .next_power_of_two()
+        .trailing_zeros() as usize;
+    let fresh_betas: Vec<Vec<F>> = (0..1)
+        .map(|_| (0..log_m).map(|_| fold_chal.sample()).collect())
+        .collect();
+
+    let mh = merkle_hash.clone();
+    let mc = merkle_compress.clone();
+    let result = warp_fold_prove_rs_committed(
+        &prev_state.shape,
+        &[fresh],
+        &prev_state.accumulator,
+        omega,
+        &tau,
+        &fresh_betas,
+        &rs_config,
+        dft,
+        |round_evals| {
+            for &e in round_evals {
+                fold_chal.observe(e);
+            }
+            fold_chal.sample()
+        },
+        |codeword, folding_factor| {
+            let (root, _tree) = merkle_commit_codeword::<
+                F,
+                F,
+                <F as Field>::Packing,
+                <F as Field>::Packing,
+                H,
+                C,
+                8,
+            >(codeword, folding_factor, mh.clone(), mc.clone());
+            root
+        },
+    );
+
+    let new_acc = rebuild_accumulator(&result);
+
+    WarpIVCState {
+        step: prev_state.step + 1,
+        accumulator: new_acc,
+        shape: prev_state.shape.clone(),
+        last_fold_result: Some(result),
+        prev_acc_instance: Some(prev_state.accumulator.instance.clone()),
+        public_state: new_public_state,
+    }
+}
+
+/// Fold-only multi-fresh variant using the standard WARP verifier path.
+///
+/// This commits every fresh codeword independently and absorbs all fresh roots
+/// into Fiat-Shamir. It is the apples-to-apples non-union baseline for Quasar:
+/// same arity and same fresh instances as [`warp_ivc_step_union`], but without
+/// the union commitment.
+#[allow(clippy::too_many_arguments)]
+pub fn warp_ivc_step_standard<F, Dft, H, C, FoldChal>(
+    prev_state: &WarpIVCState<F>,
+    fresh_instances: &[FreshInstance<F>],
+    ivc_config: &WarpIVCConfig,
+    dft: &Dft,
+    merkle_hash: H,
+    merkle_compress: C,
+    new_public_state: Vec<F>,
+    mut make_fold_challenger: impl FnMut() -> FoldChal,
+) -> WarpIVCState<F>
+where
+    F: TwoAdicField + PrimeField64 + Ord,
+    Dft: TwoAdicSubgroupDft<F>,
+    H: CryptographicHasher<F, [F; 8]>
+        + CryptographicHasher<<F as Field>::Packing, [<F as Field>::Packing; 8]>
+        + Sync
+        + Clone,
+    C: PseudoCompressionFunction<[F; 8], 2>
+        + PseudoCompressionFunction<[<F as Field>::Packing; 8], 2>
+        + Sync
+        + Clone,
+    <F as Field>::Packing: Eq + Send + Sync,
+    FoldChal: CanObserve<F> + CanSample<F>,
+{
+    assert!(
+        !fresh_instances.is_empty(),
+        "standard WARP fold needs at least one fresh instance"
+    );
+
+    let shape = &prev_state.shape;
+    let rs_config = RSEncodingConfig::new(ivc_config.rs_folding_factor, ivc_config.rs_log_inv_rate);
+
+    let fresh_roots: Vec<[F; 8]> = fresh_instances
+        .iter()
+        .map(|fresh| {
+            let wp = EvaluationsList::new(fresh.witness.clone());
+            let cw = rs_encode(&wp, rs_config.folding_factor, rs_config.log_inv_rate, dft);
+            let (root, _) = merkle_commit_codeword::<
+                F,
+                F,
+                <F as Field>::Packing,
+                <F as Field>::Packing,
+                H,
+                C,
+                8,
+            >(
+                &cw,
+                rs_config.folding_factor,
+                merkle_hash.clone(),
+                merkle_compress.clone(),
+            );
+            root
+        })
+        .collect();
+
+    let prev_inst = &prev_state.accumulator.instance;
+    let log_m = shape.num_cons().next_power_of_two().trailing_zeros() as usize;
+    let mut fold_chal = make_fold_challenger();
+    let (omega, tau, fresh_betas) = derive_fold_challenges(
+        &prev_inst.commitment_root,
+        prev_inst.eval_claim,
+        &prev_inst.eval_point,
+        prev_inst.pesat_target,
+        &fresh_roots,
+        prev_state.accumulator.log_code_len(),
+        log_m,
+        &mut fold_chal,
+    );
+
+    let mh = merkle_hash.clone();
+    let mc = merkle_compress.clone();
+    let result = warp_fold_prove_rs_committed(
+        shape,
+        fresh_instances,
+        &prev_state.accumulator,
+        omega,
+        &tau,
+        &fresh_betas,
+        &rs_config,
+        dft,
+        |round_evals| {
+            for &e in round_evals {
+                fold_chal.observe(e);
+            }
+            fold_chal.sample()
+        },
+        |codeword, folding_factor| {
+            let (root, _tree) = merkle_commit_codeword::<
+                F,
+                F,
+                <F as Field>::Packing,
+                <F as Field>::Packing,
+                H,
+                C,
+                8,
             >(codeword, folding_factor, mh.clone(), mc.clone());
             root
         },
@@ -419,22 +842,32 @@ where
     let prev_fold_omega = if let Some(prev_inst) = &prev_state.prev_acc_instance {
         // Replay the PREVIOUS fold's FS to recover its omega
         let mut dry_chal = make_fold_challenger();
-        for &val in &prev_inst.commitment_root { dry_chal.observe(val); }
+        for &val in &prev_inst.commitment_root {
+            dry_chal.observe(val);
+        }
         dry_chal.observe(prev_inst.eval_claim);
-        for &val in &prev_inst.eval_point { dry_chal.observe(val); }
+        for &val in &prev_inst.eval_point {
+            dry_chal.observe(val);
+        }
         dry_chal.observe(prev_inst.pesat_target);
         // Observe the fresh instance data from the previous fold result.
         // Must match derive_fold_challenges exactly: fresh instances absorb
         // root + ZERO (eval_claim) + ZERO×log_code (eval_point) + ZERO (pesat_target).
         if let Some(fr) = &prev_state.last_fold_result {
             if let Some(root) = fr.fresh_commitment_roots.first() {
-                for &val in root { dry_chal.observe(val); }
+                for &val in root {
+                    dry_chal.observe(val);
+                }
             } else {
-                for _ in 0..8 { dry_chal.observe(F::ZERO); }
+                for _ in 0..8 {
+                    dry_chal.observe(F::ZERO);
+                }
             }
             dry_chal.observe(F::ZERO); // fresh eval_claim = 0 (matches derive_fold_challenges)
             let log_code = prev_inst.eval_point.len();
-            for _ in 0..log_code { dry_chal.observe(F::ZERO); } // fresh eval_point = [0,...,0]
+            for _ in 0..log_code {
+                dry_chal.observe(F::ZERO);
+            } // fresh eval_point = [0,...,0]
             dry_chal.observe(F::ZERO); // fresh pesat_target = 0
         }
         let omega: F = dry_chal.sample();
@@ -444,15 +877,16 @@ where
     };
 
     // ── Build the verifier witness from the previous fold ──
-    let verifier_witness = if let (Some(fold_result), Some(prev_inst)) = (
-        &prev_state.last_fold_result,
-        &prev_state.prev_acc_instance,
-    ) {
+    let verifier_witness = if let (Some(fold_result), Some(prev_inst)) =
+        (&prev_state.last_fold_result, &prev_state.prev_acc_instance)
+    {
         // FS-absorbed values: must match derive_fold_challenges which absorbs
         // F::ZERO for fresh instances' eval_claim, eval_point, pesat_target.
         let commitment_roots = vec![
             prev_inst.commitment_root.to_vec(),
-            fold_result.fresh_commitment_roots.first()
+            fold_result
+                .fresh_commitment_roots
+                .first()
                 .map(|r| r.to_vec())
                 .unwrap_or_else(|| vec![F::ZERO; 8]),
         ];
@@ -465,18 +899,27 @@ where
         // The fold's twin-constraint sumcheck uses the ACTUAL mu_i and eta_i.
         let actual_eval_claims = vec![
             prev_inst.eval_claim,
-            fold_result.fresh_eval_claims.first().copied().unwrap_or(F::ZERO),
+            fold_result
+                .fresh_eval_claims
+                .first()
+                .copied()
+                .unwrap_or(F::ZERO),
         ];
         let actual_pesat_targets = vec![
             prev_inst.pesat_target,
-            fold_result.fresh_pesat_targets.first().copied().unwrap_or(F::ZERO),
+            fold_result
+                .fresh_pesat_targets
+                .first()
+                .copied()
+                .unwrap_or(F::ZERO),
         ];
-        let actual_eval_points = vec![
-            prev_inst.eval_point.clone(),
-            vec![F::ZERO; log_n],
-        ];
+        let actual_eval_points = vec![prev_inst.eval_point.clone(), vec![F::ZERO; log_n]];
 
-        let log_m = prev_state.shape.num_cons().next_power_of_two().trailing_zeros() as usize;
+        let log_m = prev_state
+            .shape
+            .num_cons()
+            .next_power_of_two()
+            .trailing_zeros() as usize;
 
         let mut w = WarpFoldVerifierWitness::from_fold_result(
             commitment_roots,
@@ -547,24 +990,41 @@ where
     let fold_shape = &prev_state.shape;
     let rs_config = RSEncodingConfig::new(ivc_config.rs_folding_factor, ivc_config.rs_log_inv_rate);
     let fresh_witness_poly = EvaluationsList::new(fresh.witness.clone());
-    let fresh_cw = rs_encode(&fresh_witness_poly, rs_config.folding_factor, rs_config.log_inv_rate, dft);
-    let (fresh_root, _) = merkle_commit_codeword::<
-        F, F, <F as Field>::Packing, <F as Field>::Packing, H, C, 8,
-    >(&fresh_cw, rs_config.folding_factor, merkle_hash.clone(), merkle_compress.clone());
+    let fresh_cw = rs_encode(
+        &fresh_witness_poly,
+        rs_config.folding_factor,
+        rs_config.log_inv_rate,
+        dft,
+    );
+    let (fresh_root, _) =
+        merkle_commit_codeword::<F, F, <F as Field>::Packing, <F as Field>::Packing, H, C, 8>(
+            &fresh_cw,
+            rs_config.folding_factor,
+            merkle_hash.clone(),
+            merkle_compress.clone(),
+        );
 
     // ── Derive omega, tau from native challenger ──
     let prev_inst = &prev_state.accumulator.instance;
     let log_code = prev_state.accumulator.log_code_len();
     let mut fold_chal = make_fold_challenger();
-    for &val in &prev_inst.commitment_root { fold_chal.observe(val); }
+    for &val in &prev_inst.commitment_root {
+        fold_chal.observe(val);
+    }
     fold_chal.observe(prev_inst.eval_claim);
-    for &val in &prev_inst.eval_point { fold_chal.observe(val); }
+    for &val in &prev_inst.eval_point {
+        fold_chal.observe(val);
+    }
     fold_chal.observe(prev_inst.pesat_target);
-    for &val in &fresh_root { fold_chal.observe(val); }
+    for &val in &fresh_root {
+        fold_chal.observe(val);
+    }
     // Match derive_fold_challenges: fresh instances absorb zeros for eval_claim,
     // eval_point, and pesat_target.
     fold_chal.observe(F::ZERO); // fresh eval_claim
-    for _ in 0..log_code { fold_chal.observe(F::ZERO); } // fresh eval_point
+    for _ in 0..log_code {
+        fold_chal.observe(F::ZERO);
+    } // fresh eval_point
     fold_chal.observe(F::ZERO); // fresh pesat_target
 
     let omega: F = fold_chal.sample();
@@ -581,16 +1041,29 @@ where
     let mh = merkle_hash.clone();
     let mc = merkle_compress.clone();
     let result = warp_fold_prove_rs_committed(
-        fold_shape, &[fresh], &prev_state.accumulator, omega, &tau,
+        fold_shape,
+        &[fresh],
+        &prev_state.accumulator,
+        omega,
+        &tau,
         &fresh_betas,
-        &rs_config, dft,
+        &rs_config,
+        dft,
         |round_evals| {
-            for &e in round_evals { fold_chal.observe(e); }
+            for &e in round_evals {
+                fold_chal.observe(e);
+            }
             fold_chal.sample()
         },
         |codeword, folding_factor| {
             let (root, _tree) = merkle_commit_codeword::<
-                F, F, <F as Field>::Packing, <F as Field>::Packing, H, C, 8,
+                F,
+                F,
+                <F as Field>::Packing,
+                <F as Field>::Packing,
+                H,
+                C,
+                8,
             >(codeword, folding_factor, mh.clone(), mc.clone());
             root
         },
@@ -608,6 +1081,247 @@ where
     }
 }
 
+/// Execute one recursive IVC step with a standard WARP fold at arbitrary arity.
+///
+/// This mirrors [`warp_ivc_step_recursive_union`] but keeps the standard WARP
+/// verifier path: every fresh recursive-circuit commitment root is absorbed
+/// individually. Use it to isolate Quasar's union-root effect from WARP's
+/// batched proving effect.
+#[allow(clippy::too_many_arguments)]
+pub fn warp_ivc_step_recursive_standard_arity<F, EF, Dft, H, C, Challenger, L, Perm2, S, FoldChal>(
+    prev_state: &WarpIVCState<F>,
+    step_circuit: &S,
+    step_input_states: &[Vec<F>],
+    arity: usize,
+    spartan_challenger: &mut Challenger,
+    ivc_config: &WarpIVCConfig,
+    dft: &Dft,
+    merkle_hash: H,
+    merkle_compress: C,
+    poseidon_config: &Poseidon2CircuitConfig<F, 16>,
+    poseidon_perm: &Perm2,
+    target_num_witness: Option<usize>,
+    new_public_state: Vec<F>,
+    mut make_fold_challenger: impl FnMut() -> FoldChal,
+) -> WarpIVCState<F>
+where
+    F: TwoAdicField + PrimeField64 + Ord + PrimeCharacteristicRing,
+    EF: ExtensionField<F> + TwoAdicField,
+    Dft: TwoAdicSubgroupDft<F>,
+    Challenger: FieldChallenger<F> + GrindingChallenger<Witness = F>,
+    H: CryptographicHasher<F, [F; 8]>
+        + CryptographicHasher<<F as Field>::Packing, [<F as Field>::Packing; 8]>
+        + Sync
+        + Clone,
+    C: PseudoCompressionFunction<[F; 8], 2>
+        + PseudoCompressionFunction<[<F as Field>::Packing; 8], 2>
+        + Sync
+        + Clone,
+    <F as Field>::Packing: Eq + Send + Sync,
+    L: GenericPoseidon2LinearLayers<16>,
+    Perm2: Permutation<[F; 16]>,
+    S: crate::ivc::step::StepCircuit<F>,
+    FoldChal: CanObserve<F> + CanSample<F>,
+{
+    let num_fresh = step_input_states.len();
+    assert!(num_fresh > 0, "need at least one step input state");
+    assert!(arity.is_power_of_two(), "arity must be a power of two");
+    assert_eq!(
+        (1 + num_fresh).next_power_of_two(),
+        arity,
+        "num_fresh+1 must equal arity for consistent standard sizing"
+    );
+    let log_l = arity.trailing_zeros() as usize;
+    let shape = &prev_state.shape;
+    let rs_config = RSEncodingConfig::new(ivc_config.rs_folding_factor, ivc_config.rs_log_inv_rate);
+    let log_m_for_circuit = shape.num_cons().next_power_of_two().trailing_zeros() as usize;
+
+    let verifier_witness = if let (Some(fold_result), Some(prev_inst)) =
+        (&prev_state.last_fold_result, &prev_state.prev_acc_instance)
+    {
+        if fold_result.sumcheck_round_polys.len() == log_l {
+            let mut fresh_roots = fold_result.fresh_commitment_roots.clone();
+            fresh_roots.resize(num_fresh, [F::ZERO; 8]);
+
+            let prev_fold_omega = {
+                let mut dry_chal = make_fold_challenger();
+                let (omega, _, _) = derive_fold_challenges(
+                    &prev_inst.commitment_root,
+                    prev_inst.eval_claim,
+                    &prev_inst.eval_point,
+                    prev_inst.pesat_target,
+                    &fresh_roots,
+                    prev_inst.eval_point.len(),
+                    log_m_for_circuit,
+                    &mut dry_chal,
+                );
+                omega
+            };
+
+            let log_n = prev_inst.eval_point.len();
+            let mut commitment_roots = Vec::with_capacity(arity);
+            commitment_roots.push(prev_inst.commitment_root.to_vec());
+            commitment_roots.extend(fresh_roots.iter().map(|r| r.to_vec()));
+            commitment_roots.resize(arity, vec![F::ZERO; 8]);
+
+            let mut fs_eval_claims = vec![prev_inst.eval_claim];
+            fs_eval_claims.resize(arity, F::ZERO);
+            let mut fs_eval_points = vec![prev_inst.eval_point.clone()];
+            fs_eval_points.resize(arity, vec![F::ZERO; log_n]);
+            let mut fs_pesat_targets = vec![prev_inst.pesat_target];
+            fs_pesat_targets.resize(arity, F::ZERO);
+
+            let mut actual_eval_claims = Vec::with_capacity(arity);
+            actual_eval_claims.push(prev_inst.eval_claim);
+            actual_eval_claims.extend_from_slice(&fold_result.fresh_eval_claims);
+            actual_eval_claims.resize(arity, F::ZERO);
+
+            let mut actual_pesat_targets = Vec::with_capacity(arity);
+            actual_pesat_targets.push(prev_inst.pesat_target);
+            actual_pesat_targets.extend_from_slice(&fold_result.fresh_pesat_targets);
+            actual_pesat_targets.resize(arity, F::ZERO);
+
+            let mut actual_eval_points = vec![prev_inst.eval_point.clone()];
+            actual_eval_points.resize(arity, vec![F::ZERO; log_n]);
+
+            let mut w = WarpFoldVerifierWitness::from_fold_result(
+                commitment_roots,
+                fs_eval_claims,
+                fs_eval_points,
+                fs_pesat_targets,
+                &fold_result.sumcheck_round_polys,
+                prev_fold_omega,
+                num_fresh,
+                log_m_for_circuit,
+            );
+            w.all_eval_claims = Some(actual_eval_claims);
+            w.all_pesat_targets = Some(actual_pesat_targets);
+            w.all_eval_points = Some(actual_eval_points);
+            Some(w)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    let spartan_prover = R1CSProver::new();
+    let mut fresh_instances = Vec::with_capacity(num_fresh);
+
+    for step_input_state in step_input_states {
+        let mut builder = CircuitBuilder::<F>::new();
+        let mut circuit_challenger = CircuitChallenger::<F, 16, 8>::new(&mut builder);
+        let _output_vars = synthesize_warp_ivc_circuit::<F, L, Perm2, S, 16, 8>(
+            &mut builder,
+            &mut circuit_challenger,
+            poseidon_config,
+            poseidon_perm,
+            step_circuit,
+            step_input_state,
+            verifier_witness.as_ref(),
+            target_num_witness,
+        );
+        let (unified_shape, unified_instance) = builder.build();
+        assert!(
+            unified_shape.is_sat(unified_instance.witness(), unified_instance.input()),
+            "recursive standard-arity circuit is not satisfiable at step {}",
+            prev_state.step,
+        );
+
+        let _spartan_proof = spartan_prover.prove::<EF, _>(&unified_instance, spartan_challenger);
+        let witness_poly = spartan_prover.prepare_witness(&unified_instance);
+
+        let num_inputs = unified_instance.input().len();
+        let z = witness_poly.as_slice();
+        let public_input = z[..num_inputs].to_vec();
+        let num_witness = prev_state.accumulator.witness.witness.len();
+        let mut witness_part = z[num_inputs..].to_vec();
+        witness_part.resize(num_witness, F::ZERO);
+        fresh_instances.push(FreshInstance {
+            public_input,
+            witness: witness_part,
+        });
+    }
+
+    let fresh_roots: Vec<[F; 8]> = fresh_instances
+        .iter()
+        .map(|fresh| {
+            let wp = EvaluationsList::new(fresh.witness.clone());
+            let cw = rs_encode(&wp, rs_config.folding_factor, rs_config.log_inv_rate, dft);
+            let (root, _) = merkle_commit_codeword::<
+                F,
+                F,
+                <F as Field>::Packing,
+                <F as Field>::Packing,
+                H,
+                C,
+                8,
+            >(
+                &cw,
+                rs_config.folding_factor,
+                merkle_hash.clone(),
+                merkle_compress.clone(),
+            );
+            root
+        })
+        .collect();
+
+    let prev_inst = &prev_state.accumulator.instance;
+    let mut fold_chal = make_fold_challenger();
+    let (omega, tau, fresh_betas) = derive_fold_challenges(
+        &prev_inst.commitment_root,
+        prev_inst.eval_claim,
+        &prev_inst.eval_point,
+        prev_inst.pesat_target,
+        &fresh_roots,
+        prev_state.accumulator.log_code_len(),
+        log_m_for_circuit,
+        &mut fold_chal,
+    );
+
+    let mh = merkle_hash.clone();
+    let mc = merkle_compress.clone();
+    let result = warp_fold_prove_rs_committed(
+        shape,
+        &fresh_instances,
+        &prev_state.accumulator,
+        omega,
+        &tau,
+        &fresh_betas,
+        &rs_config,
+        dft,
+        |round_evals| {
+            for &e in round_evals {
+                fold_chal.observe(e);
+            }
+            fold_chal.sample()
+        },
+        |codeword, folding_factor| {
+            let (root, _tree) = merkle_commit_codeword::<
+                F,
+                F,
+                <F as Field>::Packing,
+                <F as Field>::Packing,
+                H,
+                C,
+                8,
+            >(codeword, folding_factor, mh.clone(), mc.clone());
+            root
+        },
+    );
+
+    let new_acc = rebuild_accumulator(&result);
+
+    WarpIVCState {
+        step: prev_state.step + 1,
+        accumulator: new_acc,
+        shape: shape.clone(),
+        last_fold_result: Some(result),
+        prev_acc_instance: Some(prev_state.accumulator.instance.clone()),
+        public_state: new_public_state,
+    }
+}
+
 /// Compute the target witness count for unified circuits.
 ///
 /// Builds a dummy circuit with the verifier to determine the witness count,
@@ -619,7 +1333,8 @@ pub fn compute_recursive_circuit_size<F, L, Perm2, S>(
     poseidon_perm: &Perm2,
     num_eval_point_vars: usize,
     log_m: usize,
-) -> (usize, usize, usize) // (num_witness, num_constraints, num_poly_vars_y)
+) -> (usize, usize, usize)
+// (num_witness, num_constraints, num_poly_vars_y)
 where
     F: Field + PrimeCharacteristicRing + PrimeField64,
     L: GenericPoseidon2LinearLayers<16>,
@@ -741,6 +1456,577 @@ where
     (num_witness, num_constraints, shape.num_poly_vars_y())
 }
 
+/// Non-union (standard WARP) counterpart of `compute_recursive_circuit_size_union`.
+///
+/// At fold arity ℓ the verifier absorbs **ℓ** individual commitment roots and
+/// runs the same `log_l`-round sumcheck. This is the Quasar-paper baseline the
+/// union variant is meant to beat: Poseidon2 cost scales **linearly in ℓ** from
+/// the ℓ root absorptions, whereas the union variant stays sub-linear.
+pub fn compute_recursive_circuit_size_standard<F, L, Perm2, S>(
+    step_circuit: &S,
+    step_input_state: &[F],
+    poseidon_config: &Poseidon2CircuitConfig<F, 16>,
+    poseidon_perm: &Perm2,
+    num_eval_point_vars: usize,
+    fold_arity: usize,
+    log_m: usize,
+) -> (usize, usize, usize)
+where
+    F: Field + PrimeCharacteristicRing + PrimeField64,
+    L: GenericPoseidon2LinearLayers<16>,
+    Perm2: Permutation<[F; 16]>,
+    S: crate::ivc::step::StepCircuit<F>,
+{
+    let log_l = (fold_arity.trailing_zeros() as usize).max(1);
+    let num_fresh = fold_arity.saturating_sub(1).max(1);
+
+    let dummy_witness = WarpFoldVerifierWitness {
+        input_commitment_roots: vec![vec![F::ZERO; 8]; fold_arity],
+        input_eval_claims: vec![F::ZERO; fold_arity],
+        input_eval_points: vec![vec![F::ZERO; num_eval_point_vars]; fold_arity],
+        input_pesat_targets: vec![F::ZERO; fold_arity],
+        sumcheck_evals: vec![[F::ZERO; 3]; log_l],
+        num_rounds: log_l,
+        omega: F::ZERO,
+        num_fresh,
+        log_m,
+        union_commitment_root: None,
+        all_eval_claims: None,
+        all_pesat_targets: None,
+        all_eval_points: None,
+        shift_positions: Vec::new(),
+        shift_input_values: Vec::new(),
+        shift_auth_paths: Vec::new(),
+        shift_folding_factor: 0,
+        shift_codeword_roots: Vec::new(),
+        shift_union_mode: false,
+        alpha_eval: F::ZERO,
+        ood_answers: Vec::new(),
+        ood_points: Vec::new(),
+        rho: F::ZERO,
+        eval_batch_round_polys: Vec::new(),
+        eval_batch_challenges: Vec::new(),
+        new_eval_claim: F::ZERO,
+    };
+
+    let mut builder = CircuitBuilder::<F>::new();
+    let mut challenger = CircuitChallenger::<F, 16, 8>::new(&mut builder);
+
+    let _ = synthesize_warp_ivc_circuit::<F, L, Perm2, S, 16, 8>(
+        &mut builder,
+        &mut challenger,
+        poseidon_config,
+        poseidon_perm,
+        step_circuit,
+        step_input_state,
+        Some(&dummy_witness),
+        None,
+    );
+
+    let num_witness = builder.num_witness_vars();
+    let num_constraints = builder.num_constraints();
+    let (shape, _) = builder.build();
+    (num_witness, num_constraints, shape.num_poly_vars_y())
+}
+
+/// Initialize the standard recursive IVC state (Poseidon2 verifier, non-union l=2).
+///
+/// This is the non-Quasar, non-Symphony recursive baseline: the first step builds
+/// a recursive circuit containing a dummy standard WARP verifier, Spartan-proves
+/// it, and folds it into a zero accumulator with a standard l=2 WARP fold. Later
+/// calls to [`warp_ivc_step_recursive`] verify this fold inside the next circuit.
+#[allow(clippy::too_many_arguments)]
+pub fn warp_ivc_init_recursive_standard<F, EF, Dft, H, C, Challenger, L, Perm2, S, FoldChal>(
+    shape: &R1CSShape<F>,
+    _instance: &R1CSInstance<F>,
+    spartan_challenger: &mut Challenger,
+    ivc_config: &WarpIVCConfig,
+    dft: &Dft,
+    merkle_hash: H,
+    merkle_compress: C,
+    poseidon_config: &Poseidon2CircuitConfig<F, 16>,
+    poseidon_perm: &Perm2,
+    step_circuit: &S,
+    step_input_state: &[F],
+    new_public_state: Vec<F>,
+    mut make_fold_challenger: impl FnMut() -> FoldChal,
+) -> WarpIVCState<F>
+where
+    F: TwoAdicField + PrimeField64 + Ord + PrimeCharacteristicRing,
+    EF: ExtensionField<F> + TwoAdicField,
+    Dft: TwoAdicSubgroupDft<F>,
+    Challenger: FieldChallenger<F> + GrindingChallenger<Witness = F>,
+    H: CryptographicHasher<F, [F; 8]>
+        + CryptographicHasher<<F as Field>::Packing, [<F as Field>::Packing; 8]>
+        + Sync
+        + Clone,
+    C: PseudoCompressionFunction<[F; 8], 2>
+        + PseudoCompressionFunction<[<F as Field>::Packing; 8], 2>
+        + Sync
+        + Clone,
+    <F as Field>::Packing: Eq + Send + Sync,
+    L: GenericPoseidon2LinearLayers<16>,
+    Perm2: Permutation<[F; 16]>,
+    S: crate::ivc::step::StepCircuit<F>,
+    FoldChal: CanObserve<F> + CanSample<F>,
+{
+    let rs_config = RSEncodingConfig::new(ivc_config.rs_folding_factor, ivc_config.rs_log_inv_rate);
+    let log_m = shape.num_cons().next_power_of_two().trailing_zeros() as usize;
+    let num_eval_point_vars = shape.num_poly_vars_y();
+
+    let (target_witness, _, _) = compute_recursive_circuit_size::<F, L, Perm2, S>(
+        step_circuit,
+        step_input_state,
+        poseidon_config,
+        poseidon_perm,
+        num_eval_point_vars,
+        log_m,
+    );
+
+    let dummy_omega = {
+        let mut ch = make_fold_challenger();
+        for _ in 0..2 {
+            for _ in 0..8 {
+                ch.observe(F::ZERO);
+            }
+            ch.observe(F::ZERO);
+            for _ in 0..num_eval_point_vars {
+                ch.observe(F::ZERO);
+            }
+            ch.observe(F::ZERO);
+        }
+        ch.sample()
+    };
+
+    let dummy_verifier = WarpFoldVerifierWitness {
+        input_commitment_roots: vec![vec![F::ZERO; 8]; 2],
+        input_eval_claims: vec![F::ZERO; 2],
+        input_eval_points: vec![vec![F::ZERO; num_eval_point_vars]; 2],
+        input_pesat_targets: vec![F::ZERO; 2],
+        sumcheck_evals: vec![[F::ZERO; 3]],
+        num_rounds: 1,
+        omega: dummy_omega,
+        num_fresh: 1,
+        log_m,
+        union_commitment_root: None,
+        all_eval_claims: None,
+        all_pesat_targets: None,
+        all_eval_points: None,
+        shift_positions: Vec::new(),
+        shift_input_values: Vec::new(),
+        shift_auth_paths: Vec::new(),
+        shift_folding_factor: 0,
+        shift_codeword_roots: Vec::new(),
+        shift_union_mode: false,
+        alpha_eval: F::ZERO,
+        ood_answers: Vec::new(),
+        ood_points: Vec::new(),
+        rho: F::ZERO,
+        eval_batch_round_polys: Vec::new(),
+        eval_batch_challenges: Vec::new(),
+        new_eval_claim: F::ZERO,
+    };
+
+    let mut builder = CircuitBuilder::<F>::new();
+    let mut circuit_challenger = CircuitChallenger::<F, 16, 8>::new(&mut builder);
+    let _ = synthesize_warp_ivc_circuit::<F, L, Perm2, S, 16, 8>(
+        &mut builder,
+        &mut circuit_challenger,
+        poseidon_config,
+        poseidon_perm,
+        step_circuit,
+        step_input_state,
+        Some(&dummy_verifier),
+        Some(target_witness),
+    );
+    let (init_shape, init_instance) = builder.build();
+    assert!(
+        init_shape.is_sat(init_instance.witness(), init_instance.input()),
+        "init recursive standard circuit is not satisfiable"
+    );
+
+    let spartan_prover = R1CSProver::new();
+    let _spartan_proof = spartan_prover.prove::<EF, _>(&init_instance, spartan_challenger);
+    let witness_poly = spartan_prover.prepare_witness(&init_instance);
+
+    let num_inputs = init_instance.input().len();
+    let z = witness_poly.as_slice();
+    let num_vars_y = 1usize << init_shape.num_poly_vars_y();
+    let num_witness = num_vars_y / 2;
+    let mut init_witness = z[num_inputs..].to_vec();
+    init_witness.resize(num_witness, F::ZERO);
+
+    let init_log_m = init_shape.num_cons().next_power_of_two().trailing_zeros() as usize;
+    let zero_witness_poly = EvaluationsList::new(vec![F::ZERO; num_witness]);
+    let zero_cw = rs_encode(
+        &zero_witness_poly,
+        rs_config.folding_factor,
+        rs_config.log_inv_rate,
+        dft,
+    );
+    let (zero_root, _) =
+        merkle_commit_codeword::<F, F, <F as Field>::Packing, <F as Field>::Packing, H, C, 8>(
+            &zero_cw,
+            rs_config.folding_factor,
+            merkle_hash.clone(),
+            merkle_compress.clone(),
+        );
+    let log_code = zero_cw.as_slice().len().trailing_zeros() as usize;
+    let zero_acc = WarpAccumulator::new(
+        WarpAccumulatorInstance {
+            commitment_root: zero_root,
+            eval_point: vec![F::ZERO; log_code],
+            eval_claim: F::ZERO,
+            pesat_tau: vec![F::ZERO; init_log_m],
+            pesat_x: vec![F::ZERO; num_inputs],
+            pesat_target: F::ZERO,
+        },
+        WarpAccumulatorWitness {
+            codeword: zero_cw,
+            witness: vec![F::ZERO; num_witness],
+        },
+    );
+
+    let fresh = FreshInstance {
+        public_input: z[..num_inputs].to_vec(),
+        witness: init_witness,
+    };
+    let fresh_witness_poly = EvaluationsList::new(fresh.witness.clone());
+    let fresh_cw = rs_encode(
+        &fresh_witness_poly,
+        rs_config.folding_factor,
+        rs_config.log_inv_rate,
+        dft,
+    );
+    let (fresh_root, _) =
+        merkle_commit_codeword::<F, F, <F as Field>::Packing, <F as Field>::Packing, H, C, 8>(
+            &fresh_cw,
+            rs_config.folding_factor,
+            merkle_hash.clone(),
+            merkle_compress.clone(),
+        );
+
+    let mut fold_chal = make_fold_challenger();
+    for &val in &zero_acc.instance.commitment_root {
+        fold_chal.observe(val);
+    }
+    fold_chal.observe(zero_acc.instance.eval_claim);
+    for &val in &zero_acc.instance.eval_point {
+        fold_chal.observe(val);
+    }
+    fold_chal.observe(zero_acc.instance.pesat_target);
+    for &val in &fresh_root {
+        fold_chal.observe(val);
+    }
+    fold_chal.observe(F::ZERO);
+    for _ in 0..log_code {
+        fold_chal.observe(F::ZERO);
+    }
+    fold_chal.observe(F::ZERO);
+
+    let omega: F = fold_chal.sample();
+    let tau: Vec<F> = (0..1).map(|_| fold_chal.sample()).collect();
+    let fresh_betas: Vec<Vec<F>> = (0..1)
+        .map(|_| (0..init_log_m).map(|_| fold_chal.sample()).collect())
+        .collect();
+
+    let mh = merkle_hash.clone();
+    let mc = merkle_compress.clone();
+    let result = warp_fold_prove_rs_committed(
+        &init_shape,
+        &[fresh],
+        &zero_acc,
+        omega,
+        &tau,
+        &fresh_betas,
+        &rs_config,
+        dft,
+        |round_evals| {
+            for &e in round_evals {
+                fold_chal.observe(e);
+            }
+            fold_chal.sample()
+        },
+        |codeword, folding_factor| {
+            let (root, _) = merkle_commit_codeword::<
+                F,
+                F,
+                <F as Field>::Packing,
+                <F as Field>::Packing,
+                H,
+                C,
+                8,
+            >(codeword, folding_factor, mh.clone(), mc.clone());
+            root
+        },
+    );
+
+    let new_acc = rebuild_accumulator(&result);
+    WarpIVCState {
+        step: 1,
+        accumulator: new_acc,
+        shape: init_shape,
+        last_fold_result: Some(result),
+        prev_acc_instance: Some(zero_acc.instance),
+        public_state: new_public_state,
+    }
+}
+
+/// Initialize the standard recursive IVC state at arbitrary fold arity.
+///
+/// This is the same recursive-circuit workload as [`warp_ivc_init_recursive_union`],
+/// but it uses the standard WARP Fiat-Shamir path: all `arity - 1` fresh roots
+/// are absorbed individually. It is the apples-to-apples non-Quasar baseline
+/// for recursive arity sweeps.
+#[allow(clippy::too_many_arguments)]
+pub fn warp_ivc_init_recursive_standard_arity<F, EF, Dft, H, C, Challenger, L, Perm2, S, FoldChal>(
+    shape: &R1CSShape<F>,
+    _instance: &R1CSInstance<F>,
+    spartan_challenger: &mut Challenger,
+    ivc_config: &WarpIVCConfig,
+    dft: &Dft,
+    merkle_hash: H,
+    merkle_compress: C,
+    poseidon_config: &Poseidon2CircuitConfig<F, 16>,
+    poseidon_perm: &Perm2,
+    step_circuit: &S,
+    step_input_state: &[F],
+    arity: usize,
+    new_public_state: Vec<F>,
+    mut make_fold_challenger: impl FnMut() -> FoldChal,
+) -> WarpIVCState<F>
+where
+    F: TwoAdicField + PrimeField64 + Ord + PrimeCharacteristicRing,
+    EF: ExtensionField<F> + TwoAdicField,
+    Dft: TwoAdicSubgroupDft<F>,
+    Challenger: FieldChallenger<F> + GrindingChallenger<Witness = F>,
+    H: CryptographicHasher<F, [F; 8]>
+        + CryptographicHasher<<F as Field>::Packing, [<F as Field>::Packing; 8]>
+        + Sync
+        + Clone,
+    C: PseudoCompressionFunction<[F; 8], 2>
+        + PseudoCompressionFunction<[<F as Field>::Packing; 8], 2>
+        + Sync
+        + Clone,
+    <F as Field>::Packing: Eq + Send + Sync,
+    L: GenericPoseidon2LinearLayers<16>,
+    Perm2: Permutation<[F; 16]>,
+    S: crate::ivc::step::StepCircuit<F>,
+    FoldChal: CanObserve<F> + CanSample<F>,
+{
+    assert!(
+        arity.is_power_of_two() && arity >= 2,
+        "arity must be a power of two >= 2"
+    );
+    let log_l = arity.trailing_zeros() as usize;
+    let num_fresh = arity - 1;
+    let rs_config = RSEncodingConfig::new(ivc_config.rs_folding_factor, ivc_config.rs_log_inv_rate);
+    let log_m = shape.num_cons().next_power_of_two().trailing_zeros() as usize;
+    let num_eval_point_vars = shape.num_poly_vars_y();
+
+    let (target_witness, _, _) = compute_recursive_circuit_size_standard::<F, L, Perm2, S>(
+        step_circuit,
+        step_input_state,
+        poseidon_config,
+        poseidon_perm,
+        num_eval_point_vars,
+        arity,
+        log_m,
+    );
+
+    let dummy_omega = {
+        let mut ch = make_fold_challenger();
+        for _ in 0..arity {
+            for _ in 0..8 {
+                ch.observe(F::ZERO);
+            }
+            ch.observe(F::ZERO);
+            for _ in 0..num_eval_point_vars {
+                ch.observe(F::ZERO);
+            }
+            ch.observe(F::ZERO);
+        }
+        ch.sample()
+    };
+
+    let dummy_verifier = WarpFoldVerifierWitness {
+        input_commitment_roots: vec![vec![F::ZERO; 8]; arity],
+        input_eval_claims: vec![F::ZERO; arity],
+        input_eval_points: vec![vec![F::ZERO; num_eval_point_vars]; arity],
+        input_pesat_targets: vec![F::ZERO; arity],
+        sumcheck_evals: vec![[F::ZERO; 3]; log_l],
+        num_rounds: log_l,
+        omega: dummy_omega,
+        num_fresh,
+        log_m,
+        union_commitment_root: None,
+        all_eval_claims: None,
+        all_pesat_targets: None,
+        all_eval_points: None,
+        shift_positions: Vec::new(),
+        shift_input_values: Vec::new(),
+        shift_auth_paths: Vec::new(),
+        shift_folding_factor: 0,
+        shift_codeword_roots: Vec::new(),
+        shift_union_mode: false,
+        alpha_eval: F::ZERO,
+        ood_answers: Vec::new(),
+        ood_points: Vec::new(),
+        rho: F::ZERO,
+        eval_batch_round_polys: Vec::new(),
+        eval_batch_challenges: Vec::new(),
+        new_eval_claim: F::ZERO,
+    };
+
+    let mut builder = CircuitBuilder::<F>::new();
+    let mut circuit_challenger = CircuitChallenger::<F, 16, 8>::new(&mut builder);
+    let _ = synthesize_warp_ivc_circuit::<F, L, Perm2, S, 16, 8>(
+        &mut builder,
+        &mut circuit_challenger,
+        poseidon_config,
+        poseidon_perm,
+        step_circuit,
+        step_input_state,
+        Some(&dummy_verifier),
+        Some(target_witness),
+    );
+    let (init_shape, init_instance) = builder.build();
+    assert!(
+        init_shape.is_sat(init_instance.witness(), init_instance.input()),
+        "init recursive standard-arity circuit is not satisfiable"
+    );
+
+    let spartan_prover = R1CSProver::new();
+    let _spartan_proof = spartan_prover.prove::<EF, _>(&init_instance, spartan_challenger);
+    let witness_poly = spartan_prover.prepare_witness(&init_instance);
+
+    let num_inputs = init_instance.input().len();
+    let z = witness_poly.as_slice();
+    let num_vars_y = 1usize << init_shape.num_poly_vars_y();
+    let num_witness = num_vars_y / 2;
+    let mut init_witness = z[num_inputs..].to_vec();
+    init_witness.resize(num_witness, F::ZERO);
+
+    let init_log_m = init_shape.num_cons().next_power_of_two().trailing_zeros() as usize;
+    let zero_witness_poly = EvaluationsList::new(vec![F::ZERO; num_witness]);
+    let zero_cw = rs_encode(
+        &zero_witness_poly,
+        rs_config.folding_factor,
+        rs_config.log_inv_rate,
+        dft,
+    );
+    let (zero_root, _) =
+        merkle_commit_codeword::<F, F, <F as Field>::Packing, <F as Field>::Packing, H, C, 8>(
+            &zero_cw,
+            rs_config.folding_factor,
+            merkle_hash.clone(),
+            merkle_compress.clone(),
+        );
+    let log_code = zero_cw.as_slice().len().trailing_zeros() as usize;
+    let zero_acc = WarpAccumulator::new(
+        WarpAccumulatorInstance {
+            commitment_root: zero_root,
+            eval_point: vec![F::ZERO; log_code],
+            eval_claim: F::ZERO,
+            pesat_tau: vec![F::ZERO; init_log_m],
+            pesat_x: vec![F::ZERO; num_inputs],
+            pesat_target: F::ZERO,
+        },
+        WarpAccumulatorWitness {
+            codeword: zero_cw,
+            witness: vec![F::ZERO; num_witness],
+        },
+    );
+
+    let mut fresh_instances = Vec::with_capacity(num_fresh);
+    fresh_instances.push(FreshInstance {
+        public_input: z[..num_inputs].to_vec(),
+        witness: init_witness,
+    });
+    for _ in 1..num_fresh {
+        fresh_instances.push(FreshInstance {
+            public_input: vec![F::ZERO; num_inputs],
+            witness: vec![F::ZERO; num_witness],
+        });
+    }
+
+    let fresh_roots: Vec<[F; 8]> = fresh_instances
+        .iter()
+        .map(|fresh| {
+            let wp = EvaluationsList::new(fresh.witness.clone());
+            let cw = rs_encode(&wp, rs_config.folding_factor, rs_config.log_inv_rate, dft);
+            let (root, _) = merkle_commit_codeword::<
+                F,
+                F,
+                <F as Field>::Packing,
+                <F as Field>::Packing,
+                H,
+                C,
+                8,
+            >(
+                &cw,
+                rs_config.folding_factor,
+                merkle_hash.clone(),
+                merkle_compress.clone(),
+            );
+            root
+        })
+        .collect();
+
+    let mut fold_chal = make_fold_challenger();
+    let (omega, tau, fresh_betas) = derive_fold_challenges(
+        &zero_acc.instance.commitment_root,
+        zero_acc.instance.eval_claim,
+        &zero_acc.instance.eval_point,
+        zero_acc.instance.pesat_target,
+        &fresh_roots,
+        zero_acc.log_code_len(),
+        init_log_m,
+        &mut fold_chal,
+    );
+
+    let mh = merkle_hash.clone();
+    let mc = merkle_compress.clone();
+    let result = warp_fold_prove_rs_committed(
+        &init_shape,
+        &fresh_instances,
+        &zero_acc,
+        omega,
+        &tau,
+        &fresh_betas,
+        &rs_config,
+        dft,
+        |round_evals| {
+            for &e in round_evals {
+                fold_chal.observe(e);
+            }
+            fold_chal.sample()
+        },
+        |codeword, folding_factor| {
+            let (root, _) = merkle_commit_codeword::<
+                F,
+                F,
+                <F as Field>::Packing,
+                <F as Field>::Packing,
+                H,
+                C,
+                8,
+            >(codeword, folding_factor, mh.clone(), mc.clone());
+            root
+        },
+    );
+
+    let new_acc = rebuild_accumulator(&result);
+    WarpIVCState {
+        step: 1,
+        accumulator: new_acc,
+        shape: init_shape,
+        last_fold_result: Some(result),
+        prev_acc_instance: Some(zero_acc.instance),
+        public_state: new_public_state,
+    }
+}
+
 /// Execute one IVC step with Batch reduction for batch > 1.
 ///
 /// Takes multiple R1CS instances, runs Spartan + Batch reduction to combine
@@ -785,7 +2071,8 @@ where
     for (inst, challenger) in instances.iter().zip(spartan_challengers.iter_mut()) {
         let _proof = spartan_prover.prove::<EF, _>(inst, challenger);
         let witness = spartan_prover.prepare_witness(inst);
-        let linear = linearized_statement_from_spartan_proof(shape, &_proof, linearization_challenge);
+        let linear =
+            linearized_statement_from_spartan_proof(shape, &_proof, linearization_challenge);
         witnesses.push(witness);
         linears.push(linear);
     }
@@ -810,9 +2097,8 @@ where
         targets.push(t);
     }
 
-    let (_batch_proof, _reduction_point) = constraint_batch_prove(
-        gamma, &weights, &targets, &witnesses, cb_challenger,
-    );
+    let (_batch_proof, _reduction_point) =
+        constraint_batch_prove(gamma, &weights, &targets, &witnesses, cb_challenger);
 
     // Random LC: combine witnesses
     let wit_refs: Vec<&EvaluationsList<F>> = witnesses.iter().collect();
@@ -835,22 +2121,39 @@ where
     // Pre-compute fresh commitment root for Fiat-Shamir
     let rs_config = RSEncodingConfig::new(ivc_config.rs_folding_factor, ivc_config.rs_log_inv_rate);
     let fresh_witness_poly = EvaluationsList::new(fresh.witness.clone());
-    let fresh_cw = rs_encode(&fresh_witness_poly, rs_config.folding_factor, rs_config.log_inv_rate, dft);
-    let (fresh_root, _) = merkle_commit_codeword::<
-        F, F, <F as Field>::Packing, <F as Field>::Packing, H, C, 8,
-    >(&fresh_cw, rs_config.folding_factor, merkle_hash.clone(), merkle_compress.clone());
+    let fresh_cw = rs_encode(
+        &fresh_witness_poly,
+        rs_config.folding_factor,
+        rs_config.log_inv_rate,
+        dft,
+    );
+    let (fresh_root, _) =
+        merkle_commit_codeword::<F, F, <F as Field>::Packing, <F as Field>::Packing, H, C, 8>(
+            &fresh_cw,
+            rs_config.folding_factor,
+            merkle_hash.clone(),
+            merkle_compress.clone(),
+        );
 
     // Derive omega, tau from native challenger
     let prev_inst = &prev_state.accumulator.instance;
     let log_code = prev_state.accumulator.log_code_len();
     let mut fold_chal = make_fold_challenger();
-    for &val in &prev_inst.commitment_root { fold_chal.observe(val); }
+    for &val in &prev_inst.commitment_root {
+        fold_chal.observe(val);
+    }
     fold_chal.observe(prev_inst.eval_claim);
-    for &val in &prev_inst.eval_point { fold_chal.observe(val); }
+    for &val in &prev_inst.eval_point {
+        fold_chal.observe(val);
+    }
     fold_chal.observe(prev_inst.pesat_target);
-    for &val in &fresh_root { fold_chal.observe(val); }
+    for &val in &fresh_root {
+        fold_chal.observe(val);
+    }
     fold_chal.observe(F::ZERO);
-    for _ in 0..log_code { fold_chal.observe(F::ZERO); }
+    for _ in 0..log_code {
+        fold_chal.observe(F::ZERO);
+    }
     fold_chal.observe(F::ZERO);
 
     let omega: F = fold_chal.sample();
@@ -867,16 +2170,192 @@ where
     let mh = merkle_hash.clone();
     let mc = merkle_compress.clone();
     let result = warp_fold_prove_rs_committed(
-        shape, &[fresh], &prev_state.accumulator, omega, &tau,
+        shape,
+        &[fresh],
+        &prev_state.accumulator,
+        omega,
+        &tau,
         &fresh_betas,
-        &rs_config, dft,
+        &rs_config,
+        dft,
         |round_evals| {
-            for &e in round_evals { fold_chal.observe(e); }
+            for &e in round_evals {
+                fold_chal.observe(e);
+            }
             fold_chal.sample()
         },
         |codeword, folding_factor| {
             let (root, _tree) = merkle_commit_codeword::<
-                F, F, <F as Field>::Packing, <F as Field>::Packing, H, C, 8,
+                F,
+                F,
+                <F as Field>::Packing,
+                <F as Field>::Packing,
+                H,
+                C,
+                8,
+            >(codeword, folding_factor, mh.clone(), mc.clone());
+            root
+        },
+    );
+
+    let new_acc = rebuild_accumulator(&result);
+
+    WarpIVCState {
+        step: prev_state.step + 1,
+        accumulator: new_acc,
+        shape: shape.clone(),
+        last_fold_result: Some(result),
+        prev_acc_instance: Some(prev_state.accumulator.instance.clone()),
+        public_state: new_public_state,
+    }
+}
+
+/// Fold-only variant of [`warp_ivc_step_batch`]. Skips Spartan; caller
+/// provides pre-prepared witness polynomials and linearized statements
+/// (one pair per fresh instance in the batch).  Everything else (constraint
+/// batching + random LC + WARP fold) runs unchanged inside.
+#[allow(clippy::too_many_arguments)]
+pub fn warp_ivc_step_batch_fold<F, EF, Dft, H, C, Challenger, FoldChal>(
+    prev_state: &WarpIVCState<F>,
+    witnesses: &[EvaluationsList<F>],
+    linears: &[whir_pcs::whir::constraints::statement::LinearStatement<F, EF>],
+    num_inputs: usize,
+    ivc_config: &WarpIVCConfig,
+    dft: &Dft,
+    merkle_hash: H,
+    merkle_compress: C,
+    cb_challenger: &mut Challenger,
+    new_public_state: Vec<F>,
+    mut make_fold_challenger: impl FnMut() -> FoldChal,
+) -> WarpIVCState<F>
+where
+    F: TwoAdicField + PrimeField64 + Ord,
+    EF: ExtensionField<F> + TwoAdicField + p3_field::Algebra<EF>,
+    Dft: TwoAdicSubgroupDft<F>,
+    Challenger: FieldChallenger<F> + GrindingChallenger<Witness = F>,
+    H: CryptographicHasher<F, [F; 8]>
+        + CryptographicHasher<<F as Field>::Packing, [<F as Field>::Packing; 8]>
+        + Sync
+        + Clone,
+    C: PseudoCompressionFunction<[F; 8], 2>
+        + PseudoCompressionFunction<[<F as Field>::Packing; 8], 2>
+        + Sync
+        + Clone,
+    <F as Field>::Packing: Eq + Send + Sync,
+    FoldChal: CanObserve<F> + CanSample<F>,
+{
+    let shape = &prev_state.shape;
+    let batch = witnesses.len();
+    assert!(batch > 0);
+    assert_eq!(witnesses.len(), linears.len());
+
+    // Batch reduction: constraint batch + random LC.
+    let mut batch_chal = make_fold_challenger();
+    batch_chal.observe(F::from_u64(prev_state.step as u64));
+    batch_chal.observe(F::from_u64(batch as u64));
+    let gamma: F = batch_chal.sample();
+    let eta: F = batch_chal.sample();
+
+    let mut weights = Vec::with_capacity(batch);
+    let mut targets = Vec::with_capacity(batch);
+    for linear in linears {
+        let (w, &t) = linear
+            .iter()
+            .next()
+            .expect("each linear claim must have at least one entry");
+        weights.push(w.clone());
+        targets.push(t);
+    }
+
+    let (_batch_proof, _reduction_point) =
+        constraint_batch_prove(gamma, &weights, &targets, witnesses, cb_challenger);
+
+    let wit_refs: Vec<&EvaluationsList<F>> = witnesses.iter().collect();
+    let combined = random_linear_combination(&wit_refs, eta);
+
+    let combined_slice = combined.as_slice();
+    let public_input = combined_slice[..num_inputs].to_vec();
+    let witness_raw = &combined_slice[num_inputs..];
+    let num_witness = witness_raw.len().next_power_of_two();
+    let mut padded_witness = witness_raw.to_vec();
+    padded_witness.resize(num_witness, F::ZERO);
+
+    let fresh = FreshInstance {
+        public_input,
+        witness: padded_witness,
+    };
+
+    let rs_config = RSEncodingConfig::new(ivc_config.rs_folding_factor, ivc_config.rs_log_inv_rate);
+    let fresh_witness_poly = EvaluationsList::new(fresh.witness.clone());
+    let fresh_cw = rs_encode(
+        &fresh_witness_poly,
+        rs_config.folding_factor,
+        rs_config.log_inv_rate,
+        dft,
+    );
+    let (fresh_root, _) =
+        merkle_commit_codeword::<F, F, <F as Field>::Packing, <F as Field>::Packing, H, C, 8>(
+            &fresh_cw,
+            rs_config.folding_factor,
+            merkle_hash.clone(),
+            merkle_compress.clone(),
+        );
+
+    let prev_inst = &prev_state.accumulator.instance;
+    let log_code = prev_state.accumulator.log_code_len();
+    let mut fold_chal = make_fold_challenger();
+    for &val in &prev_inst.commitment_root {
+        fold_chal.observe(val);
+    }
+    fold_chal.observe(prev_inst.eval_claim);
+    for &val in &prev_inst.eval_point {
+        fold_chal.observe(val);
+    }
+    fold_chal.observe(prev_inst.pesat_target);
+    for &val in &fresh_root {
+        fold_chal.observe(val);
+    }
+    fold_chal.observe(F::ZERO);
+    for _ in 0..log_code {
+        fold_chal.observe(F::ZERO);
+    }
+    fold_chal.observe(F::ZERO);
+
+    let omega: F = fold_chal.sample();
+    let log_l = 1;
+    let tau: Vec<F> = (0..log_l).map(|_| fold_chal.sample()).collect();
+
+    let log_m = shape.num_cons().next_power_of_two().trailing_zeros() as usize;
+    let fresh_betas: Vec<Vec<F>> = (0..1)
+        .map(|_| (0..log_m).map(|_| fold_chal.sample()).collect())
+        .collect();
+
+    let mh = merkle_hash.clone();
+    let mc = merkle_compress.clone();
+    let result = warp_fold_prove_rs_committed(
+        shape,
+        &[fresh],
+        &prev_state.accumulator,
+        omega,
+        &tau,
+        &fresh_betas,
+        &rs_config,
+        dft,
+        |round_evals| {
+            for &e in round_evals {
+                fold_chal.observe(e);
+            }
+            fold_chal.sample()
+        },
+        |codeword, folding_factor| {
+            let (root, _tree) = merkle_commit_codeword::<
+                F,
+                F,
+                <F as Field>::Packing,
+                <F as Field>::Packing,
+                H,
+                C,
+                8,
             >(codeword, folding_factor, mh.clone(), mc.clone());
             root
         },
@@ -964,13 +2443,15 @@ where
     let union_cw = build_union_codeword(&all_codewords);
 
     // Commit the union codeword to get the union root
-    let union_ff = crate::warp::encoding::union_folding_factor(
-        rs_config.folding_factor, l,
-    );
+    let union_ff = crate::warp::encoding::union_folding_factor(rs_config.folding_factor, l);
     let union_ev = EvaluationsList::new(union_cw);
-    let (union_root, _) = merkle_commit_codeword::<
-        F, F, <F as Field>::Packing, <F as Field>::Packing, H, C, 8,
-    >(&union_ev, union_ff, merkle_hash.clone(), merkle_compress.clone());
+    let (union_root, _) =
+        merkle_commit_codeword::<F, F, <F as Field>::Packing, <F as Field>::Packing, H, C, 8>(
+            &union_ev,
+            union_ff,
+            merkle_hash.clone(),
+            merkle_compress.clone(),
+        );
 
     // Derive challenges via union FS: O(1) absorption
     let prev_inst = &prev_state.accumulator.instance;
@@ -1002,19 +2483,33 @@ where
         &rs_config,
         dft,
         |round_evals| {
-            for &e in round_evals { fold_chal.observe(e); }
+            for &e in round_evals {
+                fold_chal.observe(e);
+            }
             fold_chal.sample()
         },
         |codeword, folding_factor| {
             let (root, _tree) = merkle_commit_codeword::<
-                F, F, <F as Field>::Packing, <F as Field>::Packing, H, C, 8,
+                F,
+                F,
+                <F as Field>::Packing,
+                <F as Field>::Packing,
+                H,
+                C,
+                8,
             >(codeword, folding_factor, mh.clone(), mc.clone());
             root
         },
         |ucw, uff| {
             let uev = EvaluationsList::new(ucw.to_vec());
             let (root, _tree) = merkle_commit_codeword::<
-                F, F, <F as Field>::Packing, <F as Field>::Packing, H, C, 8,
+                F,
+                F,
+                <F as Field>::Packing,
+                <F as Field>::Packing,
+                H,
+                C,
+                8,
             >(&uev, uff, mh2.clone(), mc2.clone());
             root
         },
@@ -1107,7 +2602,8 @@ where
     assert!(num_fresh > 0, "need at least one step input state");
     assert!(arity.is_power_of_two(), "arity must be a power of two");
     assert_eq!(
-        (1 + num_fresh).next_power_of_two(), arity,
+        (1 + num_fresh).next_power_of_two(),
+        arity,
         "num_fresh+1 must equal arity for consistent union sizing"
     );
     let log_l = arity.trailing_zeros() as usize;
@@ -1116,19 +2612,23 @@ where
 
     // ── Pre-derive omega for verifier witness (must match what the fold will use) ──
     // Replay the PREVIOUS fold's FS to recover its omega.
-    let (prev_fold_omega, prev_union_root) = if let (Some(fold_result), Some(prev_inst)) = (
-        &prev_state.last_fold_result,
-        &prev_state.prev_acc_instance,
-    ) {
+    let (prev_fold_omega, prev_union_root) = if let (Some(fold_result), Some(prev_inst)) =
+        (&prev_state.last_fold_result, &prev_state.prev_acc_instance)
+    {
         let mut dry_chal = make_fold_challenger();
-        for &val in &prev_inst.commitment_root { dry_chal.observe(val); }
+        for &val in &prev_inst.commitment_root {
+            dry_chal.observe(val);
+        }
         dry_chal.observe(prev_inst.eval_claim);
-        for &val in &prev_inst.eval_point { dry_chal.observe(val); }
+        for &val in &prev_inst.eval_point {
+            dry_chal.observe(val);
+        }
         dry_chal.observe(prev_inst.pesat_target);
         // Absorb the previous fold's union root
-        let ur = fold_result.union_commitment_root
-            .unwrap_or([F::ZERO; 8]);
-        for &val in &ur { dry_chal.observe(val); }
+        let ur = fold_result.union_commitment_root.unwrap_or([F::ZERO; 8]);
+        for &val in &ur {
+            dry_chal.observe(val);
+        }
         let omega: F = dry_chal.sample();
         (omega, ur.to_vec())
     } else {
@@ -1142,7 +2642,9 @@ where
     // verifier (uses padding instead). From step 3 onwards, all previous folds
     // are union folds with log_l rounds.
     let log_m_for_circuit = shape.num_cons().next_power_of_two().trailing_zeros() as usize;
-    let has_union_fold = prev_state.last_fold_result.as_ref()
+    let has_union_fold = prev_state
+        .last_fold_result
+        .as_ref()
         .is_some_and(|fr| fr.sumcheck_round_polys.len() == log_l);
     let verifier_witness = if has_union_fold {
         let fold_result = prev_state
@@ -1225,7 +2727,10 @@ where
         let num_witness = num_vars_y / 2;
         let mut witness_part = z[num_inputs..].to_vec();
         witness_part.resize(num_witness, F::ZERO);
-        fresh_instances.push(FreshInstance { public_input, witness: witness_part });
+        fresh_instances.push(FreshInstance {
+            public_input,
+            witness: witness_part,
+        });
 
         if unified_shape_opt.is_none() {
             unified_shape_opt = Some(unified_shape);
@@ -1259,13 +2764,15 @@ where
     let union_cw = build_union_codeword(&all_codewords_raw);
 
     // ── Commit union codeword ──
-    let union_ff = crate::warp::encoding::union_folding_factor(
-        rs_config.folding_factor, l,
-    );
+    let union_ff = crate::warp::encoding::union_folding_factor(rs_config.folding_factor, l);
     let union_ev = EvaluationsList::new(union_cw);
-    let (union_root, _) = merkle_commit_codeword::<
-        F, F, <F as Field>::Packing, <F as Field>::Packing, H, C, 8,
-    >(&union_ev, union_ff, merkle_hash.clone(), merkle_compress.clone());
+    let (union_root, _) =
+        merkle_commit_codeword::<F, F, <F as Field>::Packing, <F as Field>::Packing, H, C, 8>(
+            &union_ev,
+            union_ff,
+            merkle_hash.clone(),
+            merkle_compress.clone(),
+        );
 
     // ── Derive challenges via union FS path: O(1) absorption ──
     let prev_inst = &prev_state.accumulator.instance;
@@ -1297,19 +2804,33 @@ where
         &rs_config,
         dft,
         |round_evals| {
-            for &e in round_evals { fold_chal.observe(e); }
+            for &e in round_evals {
+                fold_chal.observe(e);
+            }
             fold_chal.sample()
         },
         |codeword, folding_factor| {
             let (root, _tree) = merkle_commit_codeword::<
-                F, F, <F as Field>::Packing, <F as Field>::Packing, H, C, 8,
+                F,
+                F,
+                <F as Field>::Packing,
+                <F as Field>::Packing,
+                H,
+                C,
+                8,
             >(codeword, folding_factor, mh.clone(), mc.clone());
             root
         },
         |ucw, uff| {
             let uev = EvaluationsList::new(ucw.to_vec());
             let (root, _tree) = merkle_commit_codeword::<
-                F, F, <F as Field>::Packing, <F as Field>::Packing, H, C, 8,
+                F,
+                F,
+                <F as Field>::Packing,
+                <F as Field>::Packing,
+                H,
+                C,
+                8,
             >(&uev, uff, mh2.clone(), mc2.clone());
             root
         },
@@ -1375,12 +2896,16 @@ where
     let log_m = shape.num_cons().next_power_of_two().trailing_zeros() as usize;
 
     // Compute target witness count by building a dummy recursive circuit with verifier
-    let (target_witness, _, _target_poly_vars_y) = compute_recursive_circuit_size_union::<
-        F, L, Perm2, S,
-    >(
-        step_circuit, step_input_state, poseidon_config, poseidon_perm,
-        shape.num_poly_vars_y(), arity, log_m,
-    );
+    let (target_witness, _, _target_poly_vars_y) =
+        compute_recursive_circuit_size_union::<F, L, Perm2, S>(
+            step_circuit,
+            step_input_state,
+            poseidon_config,
+            poseidon_perm,
+            shape.num_poly_vars_y(),
+            arity,
+            log_m,
+        );
 
     // Build init circuit WITH dummy verifier. To make it satisfiable, we need omega
     // to match what the in-circuit Poseidon2 will derive from the dummy input data.
@@ -1389,12 +2914,18 @@ where
     let log_code_dummy = shape.num_poly_vars_y(); // eval_point length
     let mut dummy_chal = make_fold_challenger();
     // Union path: observe running acc (all zeros)
-    for _ in 0..8 { dummy_chal.observe(F::ZERO); } // root
+    for _ in 0..8 {
+        dummy_chal.observe(F::ZERO);
+    } // root
     dummy_chal.observe(F::ZERO); // eval_claim
-    for _ in 0..log_code_dummy { dummy_chal.observe(F::ZERO); } // eval_point
+    for _ in 0..log_code_dummy {
+        dummy_chal.observe(F::ZERO);
+    } // eval_point
     dummy_chal.observe(F::ZERO); // pesat_target
     // Union root (all zeros)
-    for _ in 0..8 { dummy_chal.observe(F::ZERO); }
+    for _ in 0..8 {
+        dummy_chal.observe(F::ZERO);
+    }
     let dummy_omega: F = dummy_chal.sample();
 
     let l_dummy = arity.next_power_of_two();
@@ -1453,10 +2984,19 @@ where
 
     // RS-encode zero witness to get initial codeword and root
     let zero_witness_poly = EvaluationsList::new(vec![F::ZERO; num_witness]);
-    let zero_cw = rs_encode(&zero_witness_poly, rs_config.folding_factor, rs_config.log_inv_rate, dft);
-    let (zero_root, _) = merkle_commit_codeword::<
-        F, F, <F as Field>::Packing, <F as Field>::Packing, H, C, 8,
-    >(&zero_cw, rs_config.folding_factor, merkle_hash.clone(), merkle_compress.clone());
+    let zero_cw = rs_encode(
+        &zero_witness_poly,
+        rs_config.folding_factor,
+        rs_config.log_inv_rate,
+        dft,
+    );
+    let (zero_root, _) =
+        merkle_commit_codeword::<F, F, <F as Field>::Packing, <F as Field>::Packing, H, C, 8>(
+            &zero_cw,
+            rs_config.folding_factor,
+            merkle_hash.clone(),
+            merkle_compress.clone(),
+        );
 
     let log_code = zero_cw.as_slice().len().trailing_zeros() as usize;
     let zero_acc = WarpAccumulator::new(
@@ -1495,7 +3035,12 @@ where
 
     // RS-encode fresh witness for commit_fn (the fold will re-encode internally)
     let fresh_wp = EvaluationsList::new(init_witness);
-    let _fresh_cw = rs_encode(&fresh_wp, rs_config.folding_factor, rs_config.log_inv_rate, dft);
+    let _fresh_cw = rs_encode(
+        &fresh_wp,
+        rs_config.folding_factor,
+        rs_config.log_inv_rate,
+        dft,
+    );
 
     // Use union FS path with a dummy union root (all zeros).
     // At step 1, the dry run and in-circuit verifier will replay this same path.
@@ -1515,15 +3060,29 @@ where
     let mh = merkle_hash.clone();
     let mc = merkle_compress.clone();
     let result = warp_fold_prove_rs_committed(
-        &init_shape, &fresh_instances, &zero_acc, omega, &tau, &fresh_betas,
-        &rs_config, dft,
+        &init_shape,
+        &fresh_instances,
+        &zero_acc,
+        omega,
+        &tau,
+        &fresh_betas,
+        &rs_config,
+        dft,
         |round_evals| {
-            for &e in round_evals { fold_chal.observe(e); }
+            for &e in round_evals {
+                fold_chal.observe(e);
+            }
             fold_chal.sample()
         },
         |codeword, folding_factor| {
             let (root, _tree) = merkle_commit_codeword::<
-                F, F, <F as Field>::Packing, <F as Field>::Packing, H, C, 8,
+                F,
+                F,
+                <F as Field>::Packing,
+                <F as Field>::Packing,
+                H,
+                C,
+                8,
             >(codeword, folding_factor, mh.clone(), mc.clone());
             root
         },
@@ -1551,7 +3110,7 @@ where
 
 #[cfg(feature = "symphony")]
 use crate::{
-    cp_snark::{commit_fold_transcript_with_shift_queries, CommittedFoldTranscript},
+    cp_snark::{CommittedFoldTranscript, commit_fold_transcript_full_with_output},
     ivc::warp_fold_verifier_algebraic::{
         AlgebraicFoldVerifierWitness, synthesize_warp_ivc_circuit_cp,
     },
@@ -1563,8 +3122,16 @@ use crate::{
 /// for terminal verification. Uses Symphony's `HashCommitment` for binding.
 /// The circuit is much smaller (~17x) because Poseidon2 hashing is
 /// replaced by native challenge derivation.
+/// Merkle tree type used to authenticate codewords in the CP-SNARK path.
+///
+/// The tree is NOT `Clone`, so we cache it through an `Option` that is
+/// moved between steps (see [`warp_ivc_step_recursive_cp`]).
 #[cfg(feature = "symphony")]
-#[derive(Clone, Debug)]
+pub type CpAccumulatorTree<F> =
+    p3_merkle_tree::MerkleTree<F, F, p3_matrix::dense::RowMajorMatrix<F>, 8>;
+
+#[cfg(feature = "symphony")]
+#[derive(Debug)]
 pub struct WarpIVCStateCp<F: Field> {
     /// Current step number.
     pub step: usize,
@@ -1580,6 +3147,16 @@ pub struct WarpIVCStateCp<F: Field> {
     pub public_state: Vec<F>,
     /// Committed fold transcripts — binding-verified at terminal via Symphony.
     pub committed_transcripts: Vec<CommittedFoldTranscript<F>>,
+    /// Cached Merkle tree of the running accumulator's codeword.
+    ///
+    /// Populated by [`warp_ivc_init_cp`] and subsequent
+    /// [`warp_ivc_step_recursive_cp`] calls.  The next step consumes
+    /// (`take`s) this tree to open shift-query auth paths without
+    /// rebuilding — at log_n=20 that saves ~2²⁰ Poseidon2 hashes per step.
+    ///
+    /// `Option` because the tree type is not `Clone`, so the step
+    /// function moves it out and replaces it with the newly-built one.
+    pub accumulator_tree: Option<CpAccumulatorTree<F>>,
 }
 
 /// Initialize the WARP IVC in CP-SNARK mode (Symphony-backed).
@@ -1639,10 +3216,19 @@ where
     // ── Pre-compute fresh commitment root + tree for Fiat-Shamir seeding ──
     // Keep the tree for shift query opening later (avoids redundant rebuild).
     let fresh_witness_poly = EvaluationsList::new(fresh.witness.clone());
-    let fresh_cw = rs_encode(&fresh_witness_poly, rs_config.folding_factor, rs_config.log_inv_rate, dft);
-    let (fresh_root, fresh_tree) = merkle_commit_codeword::<
-        F, F, <F as Field>::Packing, <F as Field>::Packing, H, C, 8,
-    >(&fresh_cw, rs_config.folding_factor, merkle_hash.clone(), merkle_compress.clone());
+    let fresh_cw = rs_encode(
+        &fresh_witness_poly,
+        rs_config.folding_factor,
+        rs_config.log_inv_rate,
+        dft,
+    );
+    let (fresh_root, fresh_tree) =
+        merkle_commit_codeword::<F, F, <F as Field>::Packing, <F as Field>::Packing, H, C, 8>(
+            &fresh_cw,
+            rs_config.folding_factor,
+            merkle_hash.clone(),
+            merkle_compress.clone(),
+        );
 
     // ── Derive omega, tau from native Poseidon2 challenger ──
     let input_commitment_roots = vec![acc.instance.commitment_root.to_vec(), fresh_root.to_vec()];
@@ -1652,9 +3238,13 @@ where
 
     let mut fold_chal = make_fold_challenger();
     for i in 0..2 {
-        for &val in &input_commitment_roots[i] { fold_chal.observe(val); }
+        for &val in &input_commitment_roots[i] {
+            fold_chal.observe(val);
+        }
         fold_chal.observe(input_eval_claims[i]);
-        for &val in &input_eval_points[i] { fold_chal.observe(val); }
+        for &val in &input_eval_points[i] {
+            fold_chal.observe(val);
+        }
         fold_chal.observe(input_pesat_targets[i]);
     }
     let omega: F = fold_chal.sample();
@@ -1667,8 +3257,16 @@ where
         .collect();
 
     // ── Run fold with Poseidon2-derived challenges ──
+    //
+    // The commit_fn closure captures the newly-built folded codeword's
+    // Merkle tree through interior mutability so we can cache it in the
+    // new state — saving a full rebuild at the next step.
     let mh = merkle_hash.clone();
     let mc = merkle_compress.clone();
+    let captured_folded_tree: alloc::rc::Rc<core::cell::RefCell<Option<CpAccumulatorTree<F>>>> =
+        alloc::rc::Rc::new(core::cell::RefCell::new(None));
+    let captured_folded_tree_fn = alloc::rc::Rc::clone(&captured_folded_tree);
+
     let mut result = warp_fold_prove_rs_committed(
         shape,
         &[fresh],
@@ -1679,24 +3277,49 @@ where
         &rs_config,
         dft,
         |round_evals| {
-            for &e in round_evals { fold_chal.observe(e); }
+            for &e in round_evals {
+                fold_chal.observe(e);
+            }
             fold_chal.sample()
         },
-        |codeword, folding_factor| {
-            let (root, _tree) = merkle_commit_codeword::<
-                F, F, <F as Field>::Packing, <F as Field>::Packing, H, C, 8,
+        move |codeword, folding_factor| {
+            let (root, tree) = merkle_commit_codeword::<
+                F,
+                F,
+                <F as Field>::Packing,
+                <F as Field>::Packing,
+                H,
+                C,
+                8,
             >(codeword, folding_factor, mh.clone(), mc.clone());
+            *captured_folded_tree_fn.borrow_mut() = Some(tree);
             root
         },
     );
 
+    // Extract the captured folded-codeword tree (this becomes the acc
+    // tree for the next step).  The `move` closure above ensures the
+    // clone held inside it is dropped when the function returns, so
+    // `captured_folded_tree` is the sole owner here.
+    let new_acc_tree: CpAccumulatorTree<F> = alloc::rc::Rc::try_unwrap(captured_folded_tree)
+        .ok()
+        .expect("captured_folded_tree Rc should be unique after warp_fold_prove_rs_committed")
+        .into_inner()
+        .expect("commit_fn must have populated the captured tree");
+
     // ── Open shift query auth paths from pre-built trees ──
-    // Build the acc tree once (its dummy root [0;8] doesn't match the real root).
-    // The fresh tree was already kept from the pre-fold commit above.
-    let (acc_actual_root, acc_tree) = merkle_commit_codeword::<
-        F, F, <F as Field>::Packing, <F as Field>::Packing, H, C, 8,
-    >(&acc.witness.codeword, rs_config.folding_factor, merkle_hash.clone(), merkle_compress.clone());
-    let input_trees = vec![acc_tree, fresh_tree];
+    // For the INIT step the acc's codeword is all-zeros; its tree is only
+    // needed once here to open shift-query paths against the all-zero
+    // accumulator's root.  Built once at init, then replaced with the
+    // post-fold tree in the output state.
+    let (acc_actual_root, init_acc_tree) =
+        merkle_commit_codeword::<F, F, <F as Field>::Packing, <F as Field>::Packing, H, C, 8>(
+            &acc.witness.codeword,
+            rs_config.folding_factor,
+            merkle_hash.clone(),
+            merkle_compress.clone(),
+        );
+    let input_trees = vec![init_acc_tree, fresh_tree];
     crate::warp::fold::open_shift_queries_from_trees::<F, H, C, 8>(
         &mut result.shift_queries,
         &input_trees,
@@ -1704,9 +3327,13 @@ where
         &merkle_compress,
     );
     let input_cw_roots = vec![acc_actual_root, fresh_root];
+    let new_acc = rebuild_accumulator(&result);
 
     // ── Commit fold transcript with shift query Merkle proofs ──
-    let init_transcript = commit_fold_transcript_with_shift_queries(
+    // Use the FULL constructor so the terminal verifier can replay the
+    // ENTIRE FS transcript (positions, OOD, ρ, eval-batching) and verify
+    // sumcheck algebra — not just the twin-constraint portion.
+    let init_transcript = commit_fold_transcript_full_with_output(
         0,
         input_commitment_roots,
         input_eval_claims,
@@ -1720,9 +3347,17 @@ where
         &result.shift_queries,
         &input_cw_roots,
         None, // no union for l=2 init
+        result.alpha_eval,
+        result.ood_points.clone(),
+        result.ood_answers.clone(),
+        result.rho,
+        &result.eval_batch_round_polys,
+        result.eval_batch_challenges.clone(),
+        result.new_eval_claim,
+        result.fresh_eval_claims.clone(),
+        result.fresh_pesat_targets.clone(),
+        &new_acc.instance,
     );
-
-    let new_acc = rebuild_accumulator(&result);
 
     WarpIVCStateCp {
         step: 1,
@@ -1732,6 +3367,7 @@ where
         prev_acc_instance: Some(acc.instance.clone()),
         public_state,
         committed_transcripts: vec![init_transcript],
+        accumulator_tree: Some(new_acc_tree),
     }
 }
 
@@ -1748,7 +3384,7 @@ where
 #[cfg(feature = "symphony")]
 #[allow(clippy::too_many_arguments)]
 pub fn warp_ivc_step_recursive_cp<F, EF, Dft, H, C, Challenger, S, FoldChal>(
-    prev_state: &WarpIVCStateCp<F>,
+    prev_state: WarpIVCStateCp<F>,
     step_circuit: &S,
     step_input_state: &[F],
     spartan_challenger: &mut Challenger,
@@ -1826,10 +3462,19 @@ where
     let fold_shape = &prev_state.shape;
     let rs_config = RSEncodingConfig::new(ivc_config.rs_folding_factor, ivc_config.rs_log_inv_rate);
     let fresh_witness_poly = EvaluationsList::new(fresh.witness.clone());
-    let fresh_cw = rs_encode(&fresh_witness_poly, rs_config.folding_factor, rs_config.log_inv_rate, dft);
-    let (fresh_root, fresh_tree) = merkle_commit_codeword::<
-        F, F, <F as Field>::Packing, <F as Field>::Packing, H, C, 8,
-    >(&fresh_cw, rs_config.folding_factor, merkle_hash.clone(), merkle_compress.clone());
+    let fresh_cw = rs_encode(
+        &fresh_witness_poly,
+        rs_config.folding_factor,
+        rs_config.log_inv_rate,
+        dft,
+    );
+    let (fresh_root, fresh_tree) =
+        merkle_commit_codeword::<F, F, <F as Field>::Packing, <F as Field>::Packing, H, C, 8>(
+            &fresh_cw,
+            rs_config.folding_factor,
+            merkle_hash.clone(),
+            merkle_compress.clone(),
+        );
 
     // ── Derive omega, tau from native Poseidon2 challenger ──
     let prev_inst = &prev_state.accumulator.instance;
@@ -1841,9 +3486,13 @@ where
 
     let mut fold_chal = make_fold_challenger();
     for i in 0..2 {
-        for &val in &input_commitment_roots[i] { fold_chal.observe(val); }
+        for &val in &input_commitment_roots[i] {
+            fold_chal.observe(val);
+        }
         fold_chal.observe(input_eval_claims[i]);
-        for &val in &input_eval_points[i] { fold_chal.observe(val); }
+        for &val in &input_eval_points[i] {
+            fold_chal.observe(val);
+        }
         fold_chal.observe(input_pesat_targets[i]);
     }
     let omega: F = fold_chal.sample();
@@ -1857,8 +3506,16 @@ where
         .collect();
 
     // ── WARP fold with Poseidon2-derived challenges ──
+    //
+    // Capture the new folded-codeword Merkle tree via the commit_fn
+    // closure so it can be cached in the next state — avoiding a costly
+    // O(2^log_n) rebuild at the following step.
     let mh = merkle_hash.clone();
     let mc = merkle_compress.clone();
+    let captured_folded_tree: alloc::rc::Rc<core::cell::RefCell<Option<CpAccumulatorTree<F>>>> =
+        alloc::rc::Rc::new(core::cell::RefCell::new(None));
+    let captured_folded_tree_fn = alloc::rc::Rc::clone(&captured_folded_tree);
+
     let mut result = warp_fold_prove_rs_committed(
         fold_shape,
         &[fresh],
@@ -1869,24 +3526,49 @@ where
         &rs_config,
         dft,
         |round_evals| {
-            for &e in round_evals { fold_chal.observe(e); }
+            for &e in round_evals {
+                fold_chal.observe(e);
+            }
             fold_chal.sample()
         },
-        |codeword, folding_factor| {
-            let (root, _tree) = merkle_commit_codeword::<
-                F, F, <F as Field>::Packing, <F as Field>::Packing, H, C, 8,
+        move |codeword, folding_factor| {
+            let (root, tree) = merkle_commit_codeword::<
+                F,
+                F,
+                <F as Field>::Packing,
+                <F as Field>::Packing,
+                H,
+                C,
+                8,
             >(codeword, folding_factor, mh.clone(), mc.clone());
+            *captured_folded_tree_fn.borrow_mut() = Some(tree);
             root
         },
     );
 
+    let new_acc_tree: CpAccumulatorTree<F> = alloc::rc::Rc::try_unwrap(captured_folded_tree)
+        .ok()
+        .expect("captured_folded_tree Rc should be unique after warp_fold_prove_rs_committed")
+        .into_inner()
+        .expect("commit_fn must have populated the captured tree");
+
     // ── Open shift query auth paths from pre-built trees ──
-    // Build the running acc tree once (its root is already correct from prior fold).
-    // The fresh tree was kept from the pre-fold commit above.
-    let (_, acc_tree) = merkle_commit_codeword::<
-        F, F, <F as Field>::Packing, <F as Field>::Packing, H, C, 8,
-    >(&EvaluationsList::new(prev_state.accumulator.witness.codeword.as_slice().to_vec()),
-      rs_config.folding_factor, merkle_hash.clone(), merkle_compress.clone());
+    //
+    // Use the acc's CACHED tree from the previous step (written into
+    // `prev_state.accumulator_tree` by the prior `_cp` call), falling
+    // back to a rebuild if the cache is somehow absent (shouldn't happen
+    // for normal IVC loops since `warp_ivc_init_cp` always populates it,
+    // but the fallback keeps this function defensively correct).
+    let acc_tree = prev_state.accumulator_tree.unwrap_or_else(|| {
+        let (_, t) =
+            merkle_commit_codeword::<F, F, <F as Field>::Packing, <F as Field>::Packing, H, C, 8>(
+                &EvaluationsList::new(prev_state.accumulator.witness.codeword.as_slice().to_vec()),
+                rs_config.folding_factor,
+                merkle_hash.clone(),
+                merkle_compress.clone(),
+            );
+        t
+    });
     let input_trees = vec![acc_tree, fresh_tree];
     crate::warp::fold::open_shift_queries_from_trees::<F, H, C, 8>(
         &mut result.shift_queries,
@@ -1895,13 +3577,12 @@ where
         &merkle_compress,
     );
     // Roots: acc root is already correct; fresh root from pre-fold commit.
-    let input_cw_roots = vec![
-        prev_state.accumulator.instance.commitment_root,
-        fresh_root,
-    ];
+    let input_cw_roots = vec![prev_state.accumulator.instance.commitment_root, fresh_root];
+    let new_acc = rebuild_accumulator(&result);
 
-    // ── Commit fold transcript with shift query Merkle proofs ──
-    let transcript = commit_fold_transcript_with_shift_queries(
+    // ── Commit fold transcript with shift query Merkle proofs + full
+    //    FS-replay data (OOD, ρ, eval-batching sumcheck). ──
+    let transcript = commit_fold_transcript_full_with_output(
         prev_state.step,
         input_commitment_roots,
         input_eval_claims,
@@ -1915,12 +3596,20 @@ where
         &result.shift_queries,
         &input_cw_roots,
         None, // no union for l=2 recursive step
+        result.alpha_eval,
+        result.ood_points.clone(),
+        result.ood_answers.clone(),
+        result.rho,
+        &result.eval_batch_round_polys,
+        result.eval_batch_challenges.clone(),
+        result.new_eval_claim,
+        result.fresh_eval_claims.clone(),
+        result.fresh_pesat_targets.clone(),
+        &new_acc.instance,
     );
 
-    let mut committed = prev_state.committed_transcripts.clone();
+    let mut committed = prev_state.committed_transcripts;
     committed.push(transcript);
-
-    let new_acc = rebuild_accumulator(&result);
 
     WarpIVCStateCp {
         step: prev_state.step + 1,
@@ -1930,6 +3619,7 @@ where
         prev_acc_instance: Some(prev_state.accumulator.instance.clone()),
         public_state: new_public_state,
         committed_transcripts: committed,
+        accumulator_tree: Some(new_acc_tree),
     }
 }
 
@@ -2015,13 +3705,15 @@ where
     let union_cw = build_union_codeword(&all_codewords_raw);
 
     // ── Commit union codeword — keep tree for shift query opening (Quasar §4) ──
-    let union_ff = crate::warp::encoding::union_folding_factor(
-        rs_config.folding_factor, l,
-    );
+    let union_ff = crate::warp::encoding::union_folding_factor(rs_config.folding_factor, l);
     let union_ev = EvaluationsList::new(union_cw);
-    let (union_root, union_tree) = merkle_commit_codeword::<
-        F, F, <F as Field>::Packing, <F as Field>::Packing, H, C, 8,
-    >(&union_ev, union_ff, merkle_hash.clone(), merkle_compress.clone());
+    let (union_root, union_tree) =
+        merkle_commit_codeword::<F, F, <F as Field>::Packing, <F as Field>::Packing, H, C, 8>(
+            &union_ev,
+            union_ff,
+            merkle_hash.clone(),
+            merkle_compress.clone(),
+        );
 
     // ── Derive challenges via union FS path: O(1) absorption ──
     let prev_inst = &prev_state.accumulator.instance;
@@ -2053,19 +3745,33 @@ where
         &rs_config,
         dft,
         |round_evals| {
-            for &e in round_evals { fold_chal.observe(e); }
+            for &e in round_evals {
+                fold_chal.observe(e);
+            }
             fold_chal.sample()
         },
         |codeword, folding_factor| {
             let (root, _tree) = merkle_commit_codeword::<
-                F, F, <F as Field>::Packing, <F as Field>::Packing, H, C, 8,
+                F,
+                F,
+                <F as Field>::Packing,
+                <F as Field>::Packing,
+                H,
+                C,
+                8,
             >(codeword, folding_factor, mh.clone(), mc.clone());
             root
         },
         |ucw, uff| {
             let uev = EvaluationsList::new(ucw.to_vec());
             let (root, _tree) = merkle_commit_codeword::<
-                F, F, <F as Field>::Packing, <F as Field>::Packing, H, C, 8,
+                F,
+                F,
+                <F as Field>::Packing,
+                <F as Field>::Packing,
+                H,
+                C,
+                8,
             >(&uev, uff, mh2.clone(), mc2.clone());
             root
         },
@@ -2087,7 +3793,8 @@ where
     // For union mode: input_commitment_roots stores ONLY the running accumulator.
     // The union root is stored separately for correct FS replay branching.
     // input_codeword_roots has 1 entry: the union root (for terminal Merkle verification).
-    let transcript = commit_fold_transcript_with_shift_queries(
+    let new_acc = rebuild_accumulator(&result);
+    let transcript = commit_fold_transcript_full_with_output(
         prev_state.step,
         vec![prev_inst.commitment_root.to_vec()], // running acc only
         vec![prev_inst.eval_claim],
@@ -2099,14 +3806,22 @@ where
         result.sumcheck_challenges.clone(),
         fresh_betas,
         &result.shift_queries,
-        &[union_root], // single union root for Merkle verification
+        &[union_root],             // single union root for Merkle verification
         Some(union_root.to_vec()), // Quasar union root for FS replay
+        result.alpha_eval,
+        result.ood_points.clone(),
+        result.ood_answers.clone(),
+        result.rho,
+        &result.eval_batch_round_polys,
+        result.eval_batch_challenges.clone(),
+        result.new_eval_claim,
+        result.fresh_eval_claims.clone(),
+        result.fresh_pesat_targets.clone(),
+        &new_acc.instance,
     );
 
     let mut committed = prev_state.committed_transcripts.clone();
     committed.push(transcript);
-
-    let new_acc = rebuild_accumulator(&result);
 
     WarpIVCStateCp {
         step: prev_state.step + 1,
@@ -2116,6 +3831,13 @@ where
         prev_acc_instance: Some(prev_state.accumulator.instance.clone()),
         public_state: new_public_state,
         committed_transcripts: committed,
+        // Union path does NOT have the per-step acc-tree rebuild bug:
+        // shift queries open against the freshly-built union tree (which
+        // already includes the acc codeword as one of its ℓ stripes), so
+        // there is no separate acc tree to cache.  The union tree itself
+        // is rebuilt each step — that's inherent to the multicast
+        // construction, not an inefficiency.
+        accumulator_tree: None,
     }
 }
 
@@ -2186,7 +3908,8 @@ where
     assert!(num_fresh > 0, "need at least one step input state");
     assert!(arity.is_power_of_two(), "arity must be a power of two");
     assert_eq!(
-        (1 + num_fresh).next_power_of_two(), arity,
+        (1 + num_fresh).next_power_of_two(),
+        arity,
         "num_fresh+1 must equal arity for consistent union sizing"
     );
     let log_l = arity.trailing_zeros() as usize;
@@ -2244,7 +3967,10 @@ where
         let num_witness = prev_state.accumulator.witness.witness.len();
         let mut witness_part = z[num_inputs..].to_vec();
         witness_part.resize(num_witness, F::ZERO);
-        fresh_instances.push(FreshInstance { public_input, witness: witness_part });
+        fresh_instances.push(FreshInstance {
+            public_input,
+            witness: witness_part,
+        });
 
         if unified_shape_opt.is_none() {
             unified_shape_opt = Some(unified_shape);
@@ -2275,13 +4001,15 @@ where
     let union_cw = build_union_codeword(&all_codewords_raw);
 
     // ── Commit union codeword, keep tree for shift query opening ──
-    let union_ff = crate::warp::encoding::union_folding_factor(
-        rs_config.folding_factor, l,
-    );
+    let union_ff = crate::warp::encoding::union_folding_factor(rs_config.folding_factor, l);
     let union_ev = EvaluationsList::new(union_cw);
-    let (union_root, union_tree) = merkle_commit_codeword::<
-        F, F, <F as Field>::Packing, <F as Field>::Packing, H, C, 8,
-    >(&union_ev, union_ff, merkle_hash.clone(), merkle_compress.clone());
+    let (union_root, union_tree) =
+        merkle_commit_codeword::<F, F, <F as Field>::Packing, <F as Field>::Packing, H, C, 8>(
+            &union_ev,
+            union_ff,
+            merkle_hash.clone(),
+            merkle_compress.clone(),
+        );
 
     // ── Derive challenges via union FS path: O(1) absorption ──
     let prev_inst = &prev_state.accumulator.instance;
@@ -2313,19 +4041,33 @@ where
         &rs_config,
         dft,
         |round_evals| {
-            for &e in round_evals { fold_chal.observe(e); }
+            for &e in round_evals {
+                fold_chal.observe(e);
+            }
             fold_chal.sample()
         },
         |codeword, folding_factor| {
             let (root, _tree) = merkle_commit_codeword::<
-                F, F, <F as Field>::Packing, <F as Field>::Packing, H, C, 8,
+                F,
+                F,
+                <F as Field>::Packing,
+                <F as Field>::Packing,
+                H,
+                C,
+                8,
             >(codeword, folding_factor, mh.clone(), mc.clone());
             root
         },
         |ucw, uff| {
             let uev = EvaluationsList::new(ucw.to_vec());
             let (root, _tree) = merkle_commit_codeword::<
-                F, F, <F as Field>::Packing, <F as Field>::Packing, H, C, 8,
+                F,
+                F,
+                <F as Field>::Packing,
+                <F as Field>::Packing,
+                H,
+                C,
+                8,
             >(&uev, uff, mh2.clone(), mc2.clone());
             root
         },
@@ -2339,8 +4081,9 @@ where
         &merkle_compress,
     );
 
-    // ── Commit fold transcript with union root ──
-    let transcript = commit_fold_transcript_with_shift_queries(
+    // ── Commit fold transcript with union root + full FS-replay data. ──
+    let new_acc = rebuild_accumulator(&result);
+    let transcript = commit_fold_transcript_full_with_output(
         prev_state.step,
         vec![prev_inst.commitment_root.to_vec()],
         vec![prev_inst.eval_claim],
@@ -2354,12 +4097,20 @@ where
         &result.shift_queries,
         &[union_root],
         Some(union_root.to_vec()),
+        result.alpha_eval,
+        result.ood_points.clone(),
+        result.ood_answers.clone(),
+        result.rho,
+        &result.eval_batch_round_polys,
+        result.eval_batch_challenges.clone(),
+        result.new_eval_claim,
+        result.fresh_eval_claims.clone(),
+        result.fresh_pesat_targets.clone(),
+        &new_acc.instance,
     );
 
     let mut committed = prev_state.committed_transcripts.clone();
     committed.push(transcript);
-
-    let new_acc = rebuild_accumulator(&result);
 
     WarpIVCStateCp {
         step: prev_state.step + 1,
@@ -2369,6 +4120,265 @@ where
         prev_acc_instance: Some(prev_state.accumulator.instance.clone()),
         public_state: new_public_state,
         committed_transcripts: committed,
+        // Union path does NOT have the per-step acc-tree rebuild bug:
+        // shift queries open against the freshly-built union tree (which
+        // already includes the acc codeword as one of its ℓ stripes), so
+        // there is no separate acc tree to cache.  The union tree itself
+        // is rebuilt each step — that's inherent to the multicast
+        // construction, not an inefficiency.
+        accumulator_tree: None,
+    }
+}
+
+/// Execute one recursive IVC step in CP-SNARK mode with standard WARP arity.
+///
+/// This is the non-Quasar counterpart of [`warp_ivc_step_recursive_union_cp`]:
+/// it builds `arity - 1` recursive circuits and folds them together, but the
+/// terminal CP transcript absorbs and authenticates every input root
+/// independently instead of using a Quasar union root.
+#[cfg(feature = "symphony")]
+#[allow(clippy::too_many_arguments)]
+pub fn warp_ivc_step_recursive_standard_cp<F, EF, Dft, H, C, Challenger, S, FoldChal>(
+    mut prev_state: WarpIVCStateCp<F>,
+    step_circuit: &S,
+    step_input_states: &[Vec<F>],
+    arity: usize,
+    spartan_challenger: &mut Challenger,
+    ivc_config: &WarpIVCConfig,
+    dft: &Dft,
+    merkle_hash: H,
+    merkle_compress: C,
+    target_num_witness: Option<usize>,
+    new_public_state: Vec<F>,
+    mut make_fold_challenger: impl FnMut() -> FoldChal,
+) -> WarpIVCStateCp<F>
+where
+    F: TwoAdicField + PrimeField64 + Ord + PrimeCharacteristicRing,
+    EF: ExtensionField<F> + TwoAdicField,
+    Dft: TwoAdicSubgroupDft<F>,
+    Challenger: FieldChallenger<F> + GrindingChallenger<Witness = F>,
+    H: CryptographicHasher<F, [F; 8]>
+        + CryptographicHasher<<F as Field>::Packing, [<F as Field>::Packing; 8]>
+        + Sync
+        + Clone,
+    C: PseudoCompressionFunction<[F; 8], 2>
+        + PseudoCompressionFunction<[<F as Field>::Packing; 8], 2>
+        + Sync
+        + Clone,
+    <F as Field>::Packing: Eq + Send + Sync,
+    S: crate::ivc::step::StepCircuit<F>,
+    FoldChal: CanObserve<F> + CanSample<F>,
+{
+    let num_fresh = step_input_states.len();
+    assert!(num_fresh > 0, "need at least one step input state");
+    assert!(arity.is_power_of_two(), "arity must be a power of two");
+    assert_eq!(
+        (1 + num_fresh).next_power_of_two(),
+        arity,
+        "num_fresh+1 must equal arity for consistent standard sizing"
+    );
+    let log_l = arity.trailing_zeros() as usize;
+    let fold_shape = prev_state.shape.clone();
+    let rs_config = RSEncodingConfig::new(ivc_config.rs_folding_factor, ivc_config.rs_log_inv_rate);
+
+    let verifier_witness = match prev_state.last_fold_result.as_ref() {
+        Some(fold_result) if fold_result.sumcheck_round_polys.len() == log_l => {
+            AlgebraicFoldVerifierWitness::from_fold_data(
+                &fold_result.sumcheck_round_polys,
+                &fold_result.sumcheck_challenges,
+            )
+        }
+        _ => AlgebraicFoldVerifierWitness {
+            sumcheck_evals: vec![[F::ZERO; 3]; log_l],
+            num_rounds: log_l,
+            sumcheck_challenges: vec![F::ZERO; log_l],
+        },
+    };
+    let verifier_witness = Some(verifier_witness);
+
+    let spartan_prover = R1CSProver::new();
+    let mut fresh_instances: Vec<FreshInstance<F>> = Vec::with_capacity(num_fresh);
+
+    for step_input_state in step_input_states {
+        let mut builder = CircuitBuilder::<F>::new();
+        let _output_vars = synthesize_warp_ivc_circuit_cp(
+            &mut builder,
+            step_circuit,
+            step_input_state,
+            verifier_witness.as_ref(),
+            target_num_witness,
+        );
+        let (unified_shape, unified_instance) = builder.build();
+        assert!(
+            unified_shape.is_sat(unified_instance.witness(), unified_instance.input()),
+            "recursive standard CP-SNARK circuit is not satisfiable at step {}",
+            prev_state.step,
+        );
+
+        let _spartan_proof = spartan_prover.prove::<EF, _>(&unified_instance, spartan_challenger);
+        let witness_poly = spartan_prover.prepare_witness(&unified_instance);
+
+        let num_inputs = unified_instance.input().len();
+        let z = witness_poly.as_slice();
+        let public_input = z[..num_inputs].to_vec();
+        let num_witness = prev_state.accumulator.witness.witness.len();
+        let mut witness_part = z[num_inputs..].to_vec();
+        witness_part.resize(num_witness, F::ZERO);
+        fresh_instances.push(FreshInstance {
+            public_input,
+            witness: witness_part,
+        });
+    }
+
+    let mut fresh_roots = Vec::with_capacity(num_fresh);
+    let mut fresh_trees = Vec::with_capacity(num_fresh);
+    for fresh in &fresh_instances {
+        let wp = EvaluationsList::new(fresh.witness.clone());
+        let cw = rs_encode(&wp, rs_config.folding_factor, rs_config.log_inv_rate, dft);
+        let (root, tree) =
+            merkle_commit_codeword::<F, F, <F as Field>::Packing, <F as Field>::Packing, H, C, 8>(
+                &cw,
+                rs_config.folding_factor,
+                merkle_hash.clone(),
+                merkle_compress.clone(),
+            );
+        fresh_roots.push(root);
+        fresh_trees.push(tree);
+    }
+
+    let (acc_actual_root, acc_tree) = match prev_state.accumulator_tree.take() {
+        Some(tree) => (prev_state.accumulator.instance.commitment_root, tree),
+        None => {
+            merkle_commit_codeword::<F, F, <F as Field>::Packing, <F as Field>::Packing, H, C, 8>(
+                &prev_state.accumulator.witness.codeword,
+                rs_config.folding_factor,
+                merkle_hash.clone(),
+                merkle_compress.clone(),
+            )
+        }
+    };
+
+    let prev_inst = &prev_state.accumulator.instance;
+    let log_m = fold_shape.num_cons().next_power_of_two().trailing_zeros() as usize;
+    let log_code = prev_state.accumulator.log_code_len();
+    let mut fold_chal = make_fold_challenger();
+    let (omega, tau, fresh_betas) = derive_fold_challenges(
+        &prev_inst.commitment_root,
+        prev_inst.eval_claim,
+        &prev_inst.eval_point,
+        prev_inst.pesat_target,
+        &fresh_roots,
+        log_code,
+        log_m,
+        &mut fold_chal,
+    );
+
+    let mh = merkle_hash.clone();
+    let mc = merkle_compress.clone();
+    let captured_folded_tree: alloc::rc::Rc<core::cell::RefCell<Option<CpAccumulatorTree<F>>>> =
+        alloc::rc::Rc::new(core::cell::RefCell::new(None));
+    let captured_folded_tree_fn = alloc::rc::Rc::clone(&captured_folded_tree);
+
+    let mut result = warp_fold_prove_rs_committed(
+        &fold_shape,
+        &fresh_instances,
+        &prev_state.accumulator,
+        omega,
+        &tau,
+        &fresh_betas,
+        &rs_config,
+        dft,
+        |round_evals| {
+            for &e in round_evals {
+                fold_chal.observe(e);
+            }
+            fold_chal.sample()
+        },
+        move |codeword, folding_factor| {
+            let (root, tree) = merkle_commit_codeword::<
+                F,
+                F,
+                <F as Field>::Packing,
+                <F as Field>::Packing,
+                H,
+                C,
+                8,
+            >(codeword, folding_factor, mh.clone(), mc.clone());
+            *captured_folded_tree_fn.borrow_mut() = Some(tree);
+            root
+        },
+    );
+
+    let new_acc_tree: CpAccumulatorTree<F> = alloc::rc::Rc::try_unwrap(captured_folded_tree)
+        .ok()
+        .expect("captured_folded_tree Rc should be unique after warp_fold_prove_rs_committed")
+        .into_inner()
+        .expect("commit_fn must have populated the captured tree");
+
+    let mut input_trees = Vec::with_capacity(arity);
+    input_trees.push(acc_tree);
+    input_trees.extend(fresh_trees);
+    crate::warp::fold::open_shift_queries_from_trees::<F, H, C, 8>(
+        &mut result.shift_queries,
+        &input_trees,
+        &merkle_hash,
+        &merkle_compress,
+    );
+
+    let mut input_codeword_roots = Vec::with_capacity(arity);
+    input_codeword_roots.push(acc_actual_root);
+    input_codeword_roots.extend(fresh_roots.iter().copied());
+
+    let mut input_commitment_roots = Vec::with_capacity(arity);
+    input_commitment_roots.push(prev_inst.commitment_root.to_vec());
+    input_commitment_roots.extend(fresh_roots.iter().map(|r| r.to_vec()));
+
+    let mut input_eval_claims = vec![prev_inst.eval_claim];
+    input_eval_claims.resize(arity, F::ZERO);
+    let mut input_eval_points = vec![prev_inst.eval_point.clone()];
+    input_eval_points.resize(arity, vec![F::ZERO; log_code]);
+    let mut input_pesat_targets = vec![prev_inst.pesat_target];
+    input_pesat_targets.resize(arity, F::ZERO);
+
+    let new_acc = rebuild_accumulator(&result);
+    let transcript = commit_fold_transcript_full_with_output(
+        prev_state.step,
+        input_commitment_roots,
+        input_eval_claims,
+        input_eval_points,
+        input_pesat_targets,
+        &result.sumcheck_round_polys,
+        omega,
+        tau,
+        result.sumcheck_challenges.clone(),
+        fresh_betas,
+        &result.shift_queries,
+        &input_codeword_roots,
+        None,
+        result.alpha_eval,
+        result.ood_points.clone(),
+        result.ood_answers.clone(),
+        result.rho,
+        &result.eval_batch_round_polys,
+        result.eval_batch_challenges.clone(),
+        result.new_eval_claim,
+        result.fresh_eval_claims.clone(),
+        result.fresh_pesat_targets.clone(),
+        &new_acc.instance,
+    );
+
+    let mut committed = prev_state.committed_transcripts;
+    committed.push(transcript);
+
+    WarpIVCStateCp {
+        step: prev_state.step + 1,
+        accumulator: new_acc,
+        shape: fold_shape,
+        last_fold_result: Some(result),
+        prev_acc_instance: Some(prev_state.accumulator.instance.clone()),
+        public_state: new_public_state,
+        committed_transcripts: committed,
+        accumulator_tree: Some(new_acc_tree),
     }
 }
 
@@ -2394,7 +4404,10 @@ where
     F: TwoAdicField + PrimeField64 + Ord,
     S: crate::ivc::step::StepCircuit<F>,
 {
-    assert!(arity.is_power_of_two() && arity >= 2, "arity must be power of two ≥ 2");
+    assert!(
+        arity.is_power_of_two() && arity >= 2,
+        "arity must be power of two ≥ 2"
+    );
     let log_l = arity.trailing_zeros() as usize;
 
     // Build a sample recursive circuit (with dummy log_l-round verifier) to extract
@@ -2406,8 +4419,11 @@ where
     };
     let mut builder = CircuitBuilder::<F>::new();
     let _ = synthesize_warp_ivc_circuit_cp(
-        &mut builder, step_circuit, step_input_state,
-        Some(&dummy_verifier), Some(target_num_witness),
+        &mut builder,
+        step_circuit,
+        step_input_state,
+        Some(&dummy_verifier),
+        Some(target_num_witness),
     );
     let (shape, instance) = builder.build();
 
@@ -2431,7 +4447,37 @@ where
         prev_acc_instance: None,
         public_state,
         committed_transcripts: Vec::new(),
+        accumulator_tree: None,
     }
+}
+
+/// Initialize the recursive standard CP-SNARK IVC state.
+///
+/// The initial zero state is identical to the union CP state: no fold transcript
+/// exists yet, and the first step supplies a dummy `log_arity`-round algebraic
+/// verifier witness. The difference appears in the step function, which uses
+/// standard per-root absorption instead of a Quasar union root.
+#[cfg(feature = "symphony")]
+pub fn warp_ivc_init_recursive_standard_cp<F, S>(
+    step_circuit: &S,
+    step_input_state: &[F],
+    arity: usize,
+    ivc_config: &WarpIVCConfig,
+    target_num_witness: usize,
+    public_state: Vec<F>,
+) -> WarpIVCStateCp<F>
+where
+    F: TwoAdicField + PrimeField64 + Ord,
+    S: crate::ivc::step::StepCircuit<F>,
+{
+    warp_ivc_init_recursive_union_cp(
+        step_circuit,
+        step_input_state,
+        arity,
+        ivc_config,
+        target_num_witness,
+        public_state,
+    )
 }
 
 /// Compute recursive union IVC circuit size with log_l rounds for the verifier.
@@ -2457,7 +4503,11 @@ where
     };
     let mut builder = CircuitBuilder::<F>::new();
     let _ = synthesize_warp_ivc_circuit_cp(
-        &mut builder, step_circuit, step_input_state, Some(&dummy_witness), None,
+        &mut builder,
+        step_circuit,
+        step_input_state,
+        Some(&dummy_witness),
+        None,
     );
     let num_witness = builder.num_witness_vars();
     let num_constraints = builder.num_constraints();
@@ -2465,22 +4515,40 @@ where
     (num_witness, num_constraints, shape.num_poly_vars_y())
 }
 
+/// Compute the recursive standard CP-SNARK circuit size at the given arity.
+///
+/// The algebraic verifier is identical to the union variant inside the circuit:
+/// both verify a `log_arity`-round WARP sumcheck. Quasar's saving is outside
+/// this circuit, in how terminal FS/Merkle data is committed and checked.
+#[cfg(feature = "symphony")]
+pub fn compute_recursive_standard_cp_circuit_size<F, S>(
+    step_circuit: &S,
+    step_input_state: &[F],
+    arity: usize,
+) -> (usize, usize, usize)
+where
+    F: Field,
+    S: crate::ivc::step::StepCircuit<F>,
+{
+    compute_recursive_union_circuit_size(step_circuit, step_input_state, arity)
+}
+
 #[cfg(test)]
 mod tests {
     use alloc::vec;
 
-    use p3_koala_bear::{KoalaBear, Poseidon2KoalaBear};
     use p3_challenger::DuplexChallenger;
     use p3_dft::Radix2DFTSmallBatch;
-    use p3_field::{extension::BinomialExtensionField, PrimeCharacteristicRing};
+    use p3_field::{PrimeCharacteristicRing, extension::BinomialExtensionField};
+    use p3_koala_bear::{KoalaBear, Poseidon2KoalaBear};
     use p3_symmetric::{PaddingFreeSponge, TruncatedPermutation};
-    use rand::{rngs::SmallRng, SeedableRng};
+    use rand::{SeedableRng, rngs::SmallRng};
 
     use super::*;
     use crate::spartan::r1cs::SparseMatEntry;
     use crate::{
         fiat_shamir::domain_separator::DomainSeparator,
-        parameters::{errors::SecurityAssumption, FoldingFactor, ProtocolParameters},
+        parameters::{FoldingFactor, ProtocolParameters, errors::SecurityAssumption},
         whir::{
             committer::{reader::CommitmentReader, writer::CommitmentWriter},
             constraints::statement::{EqStatement, InitialClaim, LinearStatement},
@@ -2501,7 +4569,9 @@ mod tests {
     fn make_shape() -> R1CSShape<F> {
         // x^2 = y constraint: A[0,0]=1, B[0,0]=1, C[0,1]=1
         R1CSShape::new(
-            4, 4, 1,
+            4,
+            4,
+            1,
             vec![SparseMatEntry::new(0, 0, F::ONE)],
             vec![SparseMatEntry::new(0, 0, F::ONE)],
             vec![SparseMatEntry::new(0, 1, F::ONE)],
@@ -2542,8 +4612,13 @@ mod tests {
         let instance0 = make_instance(&shape, 3);
         let mut chal0 = make_challenger(1);
         let mut state = warp_ivc_init::<F, EF, _, _, _, _, _>(
-            &shape, &instance0, &mut chal0,
-            &ivc_config, &dft, mh.clone(), mc.clone(),
+            &shape,
+            &instance0,
+            &mut chal0,
+            &ivc_config,
+            &dft,
+            mh.clone(),
+            mc.clone(),
             vec![F::from_u64(9)],
             make_fold_challenger_factory(),
         );
@@ -2556,8 +4631,13 @@ mod tests {
             let instance = make_instance(&shape, *root);
             let mut chal = make_challenger(i as u64 + 10);
             state = warp_ivc_step::<F, EF, _, _, _, _, _>(
-                &state, &instance, &mut chal,
-                &ivc_config, &dft, mh.clone(), mc.clone(),
+                &state,
+                &instance,
+                &mut chal,
+                &ivc_config,
+                &dft,
+                mh.clone(),
+                mc.clone(),
                 vec![F::from_u64(root * root)],
                 make_fold_challenger_factory(),
             );
@@ -2566,12 +4646,14 @@ mod tests {
             assert_eq!(
                 state.accumulator.witness.codeword.as_slice().len(),
                 initial_code_len,
-                "codeword grew at step {}", i + 1,
+                "codeword grew at step {}",
+                i + 1,
             );
             assert_eq!(
                 state.accumulator.witness.witness.len(),
                 initial_wit_len,
-                "witness grew at step {}", i + 1,
+                "witness grew at step {}",
+                i + 1,
             );
         }
 
@@ -2600,8 +4682,13 @@ mod tests {
         let instance0 = make_instance(&shape, 3);
         let mut chal0 = make_challenger(1);
         let mut state = warp_ivc_init::<F, EF, _, _, _, _, _>(
-            &shape, &instance0, &mut chal0,
-            &ivc_config, &dft, mh.clone(), mc.clone(),
+            &shape,
+            &instance0,
+            &mut chal0,
+            &ivc_config,
+            &dft,
+            mh.clone(),
+            mc.clone(),
             vec![F::from_u64(9)],
             make_fold_challenger_factory(),
         );
@@ -2611,10 +4698,14 @@ mod tests {
         let mut chals1 = [make_challenger(10), make_challenger(11)];
         let mut cb_chal = make_challenger(300);
         state = warp_ivc_step_batch::<F, EF, _, _, _, _, _>(
-            &state, &batch1,
+            &state,
+            &batch1,
             &mut chals1,
             EF::from_u64(3),
-            &ivc_config, &dft, mh.clone(), mc.clone(),
+            &ivc_config,
+            &dft,
+            mh.clone(),
+            mc.clone(),
             &mut cb_chal,
             vec![F::from_u64(49)],
             make_fold_challenger_factory(),
@@ -2627,8 +4718,10 @@ mod tests {
             &state.accumulator.witness.codeword,
             &state.accumulator.instance.eval_point,
         );
-        assert_eq!(eval_claim, state.accumulator.instance.eval_claim,
-            "eval claim mismatch after batch step");
+        assert_eq!(
+            eval_claim, state.accumulator.instance.eval_claim,
+            "eval claim mismatch after batch step"
+        );
     }
 
     // ── WHIR helpers ─────────────────────────────────────────────
@@ -2636,16 +4729,19 @@ mod tests {
     fn make_whir_config(num_vars: usize) -> WhirConfig<EF, F, MyHash, MyCompress, MyChallenger> {
         let mut rng = SmallRng::seed_from_u64(42);
         let perm = Perm::new_from_rng_128(&mut rng);
-        WhirConfig::new(num_vars, ProtocolParameters {
-            security_level: 100,
-            pow_bits: 0,
-            rs_domain_initial_reduction_factor: 1,
-            folding_factor: FoldingFactor::Constant(2),
-            merkle_hash: MyHash::new(perm.clone()),
-            merkle_compress: MyCompress::new(perm),
-            soundness_type: SecurityAssumption::CapacityBound,
-            starting_log_inv_rate: 1,
-        })
+        WhirConfig::new(
+            num_vars,
+            ProtocolParameters {
+                security_level: 100,
+                pow_bits: 0,
+                rs_domain_initial_reduction_factor: 1,
+                folding_factor: FoldingFactor::Constant(2),
+                merkle_hash: MyHash::new(perm.clone()),
+                merkle_compress: MyCompress::new(perm),
+                soundness_type: SecurityAssumption::CapacityBound,
+                starting_log_inv_rate: 1,
+            },
+        )
     }
 
     fn seed_whir_challenger(
@@ -2676,8 +4772,13 @@ mod tests {
         let instance0 = make_instance(&shape, 3);
         let mut chal0 = make_challenger(1);
         let mut state = warp_ivc_init::<F, EF, _, _, _, _, _>(
-            &shape, &instance0, &mut chal0,
-            &ivc_config, &dft, mh.clone(), mc.clone(),
+            &shape,
+            &instance0,
+            &mut chal0,
+            &ivc_config,
+            &dft,
+            mh.clone(),
+            mc.clone(),
             vec![F::from_u64(9)],
             make_fold_challenger_factory(),
         );
@@ -2686,8 +4787,13 @@ mod tests {
             let instance = make_instance(&shape, *root);
             let mut chal = make_challenger(i as u64 + 10);
             state = warp_ivc_step::<F, EF, _, _, _, _, _>(
-                &state, &instance, &mut chal,
-                &ivc_config, &dft, mh.clone(), mc.clone(),
+                &state,
+                &instance,
+                &mut chal,
+                &ivc_config,
+                &dft,
+                mh.clone(),
+                mc.clone(),
                 vec![F::from_u64(root * root)],
                 make_fold_challenger_factory(),
             );
@@ -2743,19 +4849,25 @@ mod tests {
 
         // PROVE: WHIR commits to the witness and proves RS proximity.
         let linear_claim = LinearStatement::<F, EF>::initialize(witness_num_vars);
-        let mut statement = whir_config.initial_statement_with_linear(
-            witness_poly.clone(), linear_claim.clone(),
-        );
+        let mut statement =
+            whir_config.initial_statement_with_linear(witness_poly.clone(), linear_claim.clone());
         let mut whir_proof = WhirProof::<F, EF, F, 8>::from_whir_config(&whir_config);
         let mut prove_challenger = seed_whir_challenger(&whir_config, 999);
         let commitment = CommitmentWriter::new(&whir_config)
             .commit::<_, <F as Field>::Packing, F, <F as Field>::Packing, 8>(
-                &dft, &mut whir_proof, &mut prove_challenger, &mut statement,
+                &dft,
+                &mut whir_proof,
+                &mut prove_challenger,
+                &mut statement,
             )
             .expect("WHIR commit failed");
         WhirProver(&whir_config)
             .prove::<_, <F as Field>::Packing, F, <F as Field>::Packing, 8>(
-                &dft, &mut whir_proof, &mut prove_challenger, &statement, commitment,
+                &dft,
+                &mut whir_proof,
+                &mut prove_challenger,
+                &statement,
+                commitment,
             )
             .expect("WHIR prove failed");
 
@@ -2787,13 +4899,40 @@ mod tests {
             .parse_commitment::<F, 8>(&whir_proof, &mut verify_challenger);
         let verify_result = WhirVerifier::new(&whir_config)
             .verify_with_initial_claim::<<F as Field>::Packing, F, <F as Field>::Packing, 8>(
-                &whir_proof, &mut verify_challenger, &parsed, initial_claim,
+                &whir_proof,
+                &mut verify_challenger,
+                &parsed,
+                initial_claim,
             );
 
         assert!(
             verify_result.is_ok(),
             "Terminal WHIR verify failed after 4 IVC steps: {verify_result:?}"
         );
+
+        // The terminal WHIR proof must be bound to the accumulated root.
+        // A malicious prover cannot ask the helper to prove the witness while
+        // advertising a different final accumulator root.
+        {
+            let mut bad_acc = state.accumulator.clone();
+            bad_acc.instance.commitment_root[0] += F::ONE;
+            let result = crate::warp::decider::terminal_whir_prove_and_verify(
+                &state.shape,
+                &bad_acc,
+                ivc_config.rs_folding_factor,
+                ivc_config.rs_log_inv_rate,
+                &dft,
+                &whir_config,
+                || seed_whir_challenger(&whir_config, 999),
+            );
+            assert!(
+                matches!(
+                    result,
+                    Err(crate::warp::decider::TerminalWhirError::CommitmentRootMismatch)
+                ),
+                "terminal WHIR must reject root mismatch. Got: {result:?}"
+            );
+        }
     }
 
     // ── Recursive IVC tests ──────────────────────────────────────
@@ -2801,21 +4940,21 @@ mod tests {
     /// Measure the recursive circuit size: step circuit + WARP fold verifier.
     #[test]
     fn measure_recursive_circuit_size() {
-        use p3_koala_bear::GenericPoseidon2LinearLayersKoalaBear;
         use crate::ivc::step::{StepCircuit, TrivialStepCircuit};
+        use p3_koala_bear::GenericPoseidon2LinearLayersKoalaBear;
 
         let poseidon_perm = Perm::new_from_rng_128(&mut SmallRng::seed_from_u64(99));
-        let poseidon_config = Poseidon2CircuitConfig::<F, 16>::from_rng(
-            8, 20, 3, &mut SmallRng::seed_from_u64(99),
-        );
+        let poseidon_config =
+            Poseidon2CircuitConfig::<F, 16>::from_rng(8, 20, 3, &mut SmallRng::seed_from_u64(99));
         let step = TrivialStepCircuit::new(1);
 
         // Measure with verifier (the full recursive circuit)
         let (num_witness, num_constraints, _num_poly_vars_y) =
-            compute_recursive_circuit_size::<
-                F, GenericPoseidon2LinearLayersKoalaBear, _, _,
-            >(
-                &step, &[F::ZERO], &poseidon_config, &poseidon_perm,
+            compute_recursive_circuit_size::<F, GenericPoseidon2LinearLayersKoalaBear, _, _>(
+                &step,
+                &[F::ZERO],
+                &poseidon_config,
+                &poseidon_perm,
                 3, // eval_point has 3 vars for our test shape
                 2, // log_m for fresh_betas
             );
@@ -2859,10 +4998,17 @@ mod tests {
         let mut verifier_only_builder = CircuitBuilder::<F>::new();
         let mut verifier_chal = CircuitChallenger::<F, 16, 8>::new(&mut verifier_only_builder);
         let _ = crate::ivc::warp_fold_verifier_circuit::synthesize_warp_fold_verifier::<
-            F, GenericPoseidon2LinearLayersKoalaBear, _, 16, 8,
+            F,
+            GenericPoseidon2LinearLayersKoalaBear,
+            _,
+            16,
+            8,
         >(
-            &mut verifier_only_builder, &mut verifier_chal,
-            &poseidon_config, &poseidon_perm, &dummy_witness,
+            &mut verifier_only_builder,
+            &mut verifier_chal,
+            &poseidon_config,
+            &poseidon_perm,
+            &dummy_witness,
         );
         let _verifier_only_witness = verifier_only_builder.num_witness_vars();
         let verifier_only_constraints = verifier_only_builder.num_constraints();
@@ -2900,9 +5046,12 @@ mod tests {
              Unified (step+verif):  {:>6} witness, {:>6} constraints\n\
              num_poly_vars_y:       {}\n\
              Verifier overhead:     {:.1}% of constraints\n",
-            step_only_witness, step_only_constraints,
-            verifier_only_witness, verifier_only_constraints,
-            num_witness, num_constraints,
+            step_only_witness,
+            step_only_constraints,
+            verifier_only_witness,
+            verifier_only_constraints,
+            num_witness,
+            num_constraints,
             num_poly_vars_y,
             verifier_fraction * 100.0,
         );
@@ -2917,17 +5066,16 @@ mod tests {
     /// Full recursive IVC: init (padded) → 2 recursive steps → verify sizes match.
     #[test]
     fn warp_ivc_recursive_two_steps() {
-        use p3_koala_bear::GenericPoseidon2LinearLayersKoalaBear;
         use crate::ivc::step::TrivialStepCircuit;
+        use p3_koala_bear::GenericPoseidon2LinearLayersKoalaBear;
 
         let _shape = make_shape();
         let dft = Radix2DFTSmallBatch::<F>::default();
         let ivc_config = WarpIVCConfig::default();
         let (mh, mc) = make_hash_compress();
         let poseidon_perm = Perm::new_from_rng_128(&mut SmallRng::seed_from_u64(99));
-        let poseidon_config = Poseidon2CircuitConfig::<F, 16>::from_rng(
-            8, 20, 3, &mut SmallRng::seed_from_u64(99),
-        );
+        let poseidon_config =
+            Poseidon2CircuitConfig::<F, 16>::from_rng(8, 20, 3, &mut SmallRng::seed_from_u64(99));
         let step = TrivialStepCircuit::new(1);
 
         // The fold challenger MUST use the same Poseidon2 permutation as the
@@ -2940,10 +5088,13 @@ mod tests {
 
         // Compute target circuit size from a probe build
         let (target_witness, _target_constraints, _target_poly_vars) =
-            compute_recursive_circuit_size::<
-                F, GenericPoseidon2LinearLayersKoalaBear, _, _,
-            >(
-                &step, &[F::ZERO], &poseidon_config, &poseidon_perm, 3, 2,
+            compute_recursive_circuit_size::<F, GenericPoseidon2LinearLayersKoalaBear, _, _>(
+                &step,
+                &[F::ZERO],
+                &poseidon_config,
+                &poseidon_perm,
+                3,
+                2,
             );
 
         // M2 FIX: Build init WITH a dummy verifier so init_shape matches the
@@ -2953,9 +5104,13 @@ mod tests {
             let mut dc = make_recursive_fold_chal();
             // Union-less: absorb 2 instances of zeros
             for _ in 0..2 {
-                for _ in 0..8 { dc.observe(F::ZERO); } // root
+                for _ in 0..8 {
+                    dc.observe(F::ZERO);
+                } // root
                 dc.observe(F::ZERO); // eval_claim
-                for _ in 0..3 { dc.observe(F::ZERO); } // eval_point (3 vars)
+                for _ in 0..3 {
+                    dc.observe(F::ZERO);
+                } // eval_point (3 vars)
                 dc.observe(F::ZERO); // pesat_target
             }
             let o: F = dc.sample();
@@ -2991,12 +5146,13 @@ mod tests {
         };
         let mut init_builder = CircuitBuilder::<F>::new();
         let mut init_chal = CircuitChallenger::<F, 16, 8>::new(&mut init_builder);
-        let _ = synthesize_warp_ivc_circuit::<
-            F, GenericPoseidon2LinearLayersKoalaBear, _, _, 16, 8,
-        >(
-            &mut init_builder, &mut init_chal,
-            &poseidon_config, &poseidon_perm,
-            &step, &[F::from_u64(9)],
+        let _ = synthesize_warp_ivc_circuit::<F, GenericPoseidon2LinearLayersKoalaBear, _, _, 16, 8>(
+            &mut init_builder,
+            &mut init_chal,
+            &poseidon_config,
+            &poseidon_perm,
+            &step,
+            &[F::from_u64(9)],
             Some(&dummy_verifier),
             Some(target_witness),
         );
@@ -3026,25 +5182,46 @@ mod tests {
             witness: wit0,
         };
         let zero_acc = make_initial_accumulator::<F>(num_witness_0, log_code, log_m, num_inputs);
-        let rs_config = RSEncodingConfig::new(ivc_config.rs_folding_factor, ivc_config.rs_log_inv_rate);
+        let rs_config =
+            RSEncodingConfig::new(ivc_config.rs_folding_factor, ivc_config.rs_log_inv_rate);
 
         // Pre-compute fresh commitment root for Fiat-Shamir seeding
         let fresh_witness_poly0 = EvaluationsList::new(fresh0.witness.clone());
-        let fresh_cw0 = rs_encode(&fresh_witness_poly0, rs_config.folding_factor, rs_config.log_inv_rate, &dft);
-        let (fresh_root0, _) = merkle_commit_codeword::<
-            F, F, <F as Field>::Packing, <F as Field>::Packing, MyHash, MyCompress, 8,
-        >(&fresh_cw0, rs_config.folding_factor, mh.clone(), mc.clone());
+        let fresh_cw0 = rs_encode(
+            &fresh_witness_poly0,
+            rs_config.folding_factor,
+            rs_config.log_inv_rate,
+            &dft,
+        );
+        let (fresh_root0, _) =
+            merkle_commit_codeword::<
+                F,
+                F,
+                <F as Field>::Packing,
+                <F as Field>::Packing,
+                MyHash,
+                MyCompress,
+                8,
+            >(&fresh_cw0, rs_config.folding_factor, mh.clone(), mc.clone());
 
         // Derive omega, tau from Poseidon2 challenger (Fiat-Shamir)
         let mut fold_chal0 = make_recursive_fold_chal();
-        for &val in &zero_acc.instance.commitment_root { fold_chal0.observe(val); }
+        for &val in &zero_acc.instance.commitment_root {
+            fold_chal0.observe(val);
+        }
         fold_chal0.observe(zero_acc.instance.eval_claim);
-        for &val in &zero_acc.instance.eval_point { fold_chal0.observe(val); }
+        for &val in &zero_acc.instance.eval_point {
+            fold_chal0.observe(val);
+        }
         fold_chal0.observe(zero_acc.instance.pesat_target);
-        for &val in &fresh_root0 { fold_chal0.observe(val); }
+        for &val in &fresh_root0 {
+            fold_chal0.observe(val);
+        }
         // Match derive_fold_challenges: fresh instances absorb zeros
         fold_chal0.observe(F::ZERO); // fresh eval_claim
-        for _ in 0..log_code { fold_chal0.observe(F::ZERO); } // fresh eval_point
+        for _ in 0..log_code {
+            fold_chal0.observe(F::ZERO);
+        } // fresh eval_point
         fold_chal0.observe(F::ZERO); // fresh pesat_target
 
         let omega0: F = fold_chal0.sample();
@@ -3060,18 +5237,31 @@ mod tests {
         let mh0 = mh.clone();
         let mc0 = mc.clone();
         let result0 = warp_fold_prove_rs_committed(
-            &init_shape, &[fresh0], &zero_acc, omega0, &tau0,
+            &init_shape,
+            &[fresh0],
+            &zero_acc,
+            omega0,
+            &tau0,
             &fresh_betas0,
-            &rs_config, &dft,
+            &rs_config,
+            &dft,
             |round_evals| {
-                for &e in round_evals { fold_chal0.observe(e); }
+                for &e in round_evals {
+                    fold_chal0.observe(e);
+                }
                 fold_chal0.sample()
             },
             |codeword, folding_factor| {
-                let (root, _tree) = merkle_commit_codeword::<
-                    F, F, <F as Field>::Packing, <F as Field>::Packing,
-                    MyHash, MyCompress, 8,
-                >(codeword, folding_factor, mh0.clone(), mc0.clone());
+                let (root, _tree) =
+                    merkle_commit_codeword::<
+                        F,
+                        F,
+                        <F as Field>::Packing,
+                        <F as Field>::Packing,
+                        MyHash,
+                        MyCompress,
+                        8,
+                    >(codeword, folding_factor, mh0.clone(), mc0.clone());
                 root
             },
         );
@@ -3088,14 +5278,27 @@ mod tests {
         // Recursive step 1
         let mut chal1 = make_challenger(10);
         state = warp_ivc_step_recursive::<
-            F, EF, _, _, _, _, GenericPoseidon2LinearLayersKoalaBear, _, _, _,
+            F,
+            EF,
+            _,
+            _,
+            _,
+            _,
+            GenericPoseidon2LinearLayersKoalaBear,
+            _,
+            _,
+            _,
         >(
             &state,
             &step,
             &[F::from_u64(25)],
             &mut chal1,
-            &ivc_config, &dft, mh.clone(), mc.clone(),
-            &poseidon_config, &poseidon_perm,
+            &ivc_config,
+            &dft,
+            mh.clone(),
+            mc.clone(),
+            &poseidon_config,
+            &poseidon_perm,
             Some(target_witness),
             vec![F::from_u64(25)],
             &make_recursive_fold_chal,
@@ -3105,14 +5308,27 @@ mod tests {
         // Recursive step 2
         let mut chal2 = make_challenger(20);
         state = warp_ivc_step_recursive::<
-            F, EF, _, _, _, _, GenericPoseidon2LinearLayersKoalaBear, _, _, _,
+            F,
+            EF,
+            _,
+            _,
+            _,
+            _,
+            GenericPoseidon2LinearLayersKoalaBear,
+            _,
+            _,
+            _,
         >(
             &state,
             &step,
             &[F::from_u64(49)],
             &mut chal2,
-            &ivc_config, &dft, mh.clone(), mc.clone(),
-            &poseidon_config, &poseidon_perm,
+            &ivc_config,
+            &dft,
+            mh.clone(),
+            mc.clone(),
+            &poseidon_config,
+            &poseidon_perm,
             Some(target_witness),
             vec![F::from_u64(49)],
             &make_recursive_fold_chal,
@@ -3145,7 +5361,8 @@ mod tests {
         let (mh, mc) = make_hash_compress();
 
         // Init: create initial accumulator
-        let _rs_config = RSEncodingConfig::new(ivc_config.rs_folding_factor, ivc_config.rs_log_inv_rate);
+        let _rs_config =
+            RSEncodingConfig::new(ivc_config.rs_folding_factor, ivc_config.rs_log_inv_rate);
         let spartan_prover = crate::spartan::r1cs_prover::R1CSProver::new();
         let inst0 = make_instance(&shape, 3);
         let w0 = spartan_prover.prepare_witness(&inst0);
@@ -3196,7 +5413,12 @@ mod tests {
 
             // Verify union root is set
             assert!(
-                new_state.last_fold_result.as_ref().unwrap().union_commitment_root.is_some(),
+                new_state
+                    .last_fold_result
+                    .as_ref()
+                    .unwrap()
+                    .union_commitment_root
+                    .is_some(),
                 "union root should be set at step {step}"
             );
 
@@ -3208,9 +5430,8 @@ mod tests {
             );
 
             // Verify R1CS satisfaction via decider
-            let decide = crate::warp::decider::warp_decide_algebraic_rs(
-                &shape, &new_state.accumulator,
-            );
+            let decide =
+                crate::warp::decider::warp_decide_algebraic_rs(&shape, &new_state.accumulator);
             assert!(
                 decide.is_ok(),
                 "decider should accept at union step {step}: {decide:?}"
@@ -3222,33 +5443,52 @@ mod tests {
 
     #[test]
     fn warp_ivc_union_circuit_size_smaller() {
-        use p3_koala_bear::GenericPoseidon2LinearLayersKoalaBear;
-        use crate::ivc::step::TrivialStepCircuit;
         use crate::circuit::poseidon2::Poseidon2CircuitConfig;
+        use crate::ivc::step::TrivialStepCircuit;
+        use p3_koala_bear::GenericPoseidon2LinearLayersKoalaBear;
 
         let poseidon_perm = Perm::new_from_rng_128(&mut SmallRng::seed_from_u64(99));
-        let poseidon_config = Poseidon2CircuitConfig::<F, 16>::from_rng(
-            8, 20, 3, &mut SmallRng::seed_from_u64(99),
-        );
+        let poseidon_config =
+            Poseidon2CircuitConfig::<F, 16>::from_rng(8, 20, 3, &mut SmallRng::seed_from_u64(99));
         let step = TrivialStepCircuit::new(1);
         let step_input = [F::ZERO];
         let num_eval_point_vars = 3;
 
         // Non-union l=2 circuit size
         let log_m = 2;
-        let (nw_l2, nc_l2, _) = compute_recursive_circuit_size::<
-            F, GenericPoseidon2LinearLayersKoalaBear, _, _,
-        >(&step, &step_input, &poseidon_config, &poseidon_perm, num_eval_point_vars, log_m);
+        let (nw_l2, nc_l2, _) =
+            compute_recursive_circuit_size::<F, GenericPoseidon2LinearLayersKoalaBear, _, _>(
+                &step,
+                &step_input,
+                &poseidon_config,
+                &poseidon_perm,
+                num_eval_point_vars,
+                log_m,
+            );
 
         // Union l=4 circuit size
-        let (nw_u4, nc_u4, _) = compute_recursive_circuit_size_union::<
-            F, GenericPoseidon2LinearLayersKoalaBear, _, _,
-        >(&step, &step_input, &poseidon_config, &poseidon_perm, num_eval_point_vars, 4, log_m);
+        let (nw_u4, nc_u4, _) =
+            compute_recursive_circuit_size_union::<F, GenericPoseidon2LinearLayersKoalaBear, _, _>(
+                &step,
+                &step_input,
+                &poseidon_config,
+                &poseidon_perm,
+                num_eval_point_vars,
+                4,
+                log_m,
+            );
 
         // Union l=8 circuit size
-        let (nw_u8, nc_u8, _) = compute_recursive_circuit_size_union::<
-            F, GenericPoseidon2LinearLayersKoalaBear, _, _,
-        >(&step, &step_input, &poseidon_config, &poseidon_perm, num_eval_point_vars, 8, log_m);
+        let (nw_u8, nc_u8, _) =
+            compute_recursive_circuit_size_union::<F, GenericPoseidon2LinearLayersKoalaBear, _, _>(
+                &step,
+                &step_input,
+                &poseidon_config,
+                &poseidon_perm,
+                num_eval_point_vars,
+                8,
+                log_m,
+            );
 
         // Union l=4 should be smaller than non-union l=2 despite more sumcheck rounds,
         // because the union absorbs only 1 root vs 2 for non-union
@@ -3263,7 +5503,8 @@ mod tests {
         assert!(
             nc_u8 > nc_u4,
             "union l=8 has more sumcheck rounds than l=4: {} vs {} constraints",
-            nc_u8, nc_u4,
+            nc_u8,
+            nc_u4,
         );
 
         // Verify union sizes are in a reasonable range
@@ -3281,9 +5522,9 @@ mod tests {
     /// This is the "pure" pipeline — no Symphony CP-SNARK, all FS in-circuit.
     #[test]
     fn warp_ivc_recursive_union_poseidon2_pipeline() {
-        use p3_koala_bear::GenericPoseidon2LinearLayersKoalaBear;
-        use crate::ivc::step::TrivialStepCircuit;
         use crate::circuit::poseidon2::Poseidon2CircuitConfig;
+        use crate::ivc::step::TrivialStepCircuit;
+        use p3_koala_bear::GenericPoseidon2LinearLayersKoalaBear;
 
         let shape = make_shape();
         let dft = Radix2DFTSmallBatch::<F>::default();
@@ -3296,13 +5537,11 @@ mod tests {
         // CRITICAL: The fold challenger and the in-circuit Poseidon2 must use
         // the same permutation (same round constants). Use seed 99 for both.
         let poseidon_perm_circuit = Perm::new_from_rng_128(&mut SmallRng::seed_from_u64(99));
-        let poseidon_config = Poseidon2CircuitConfig::<F, 16>::from_rng(
-            8, 20, 3, &mut SmallRng::seed_from_u64(99),
-        );
+        let poseidon_config =
+            Poseidon2CircuitConfig::<F, 16>::from_rng(8, 20, 3, &mut SmallRng::seed_from_u64(99));
         let perm_for_fold = poseidon_perm_circuit.clone();
-        let make_union_fold_challenger = move || -> MyChallenger {
-            MyChallenger::new(perm_for_fold.clone())
-        };
+        let make_union_fold_challenger =
+            move || -> MyChallenger { MyChallenger::new(perm_for_fold.clone()) };
         let step = TrivialStepCircuit::new(1);
         let arity = 4;
         let num_fresh = arity - 1; // 3
@@ -3312,21 +5551,37 @@ mod tests {
         let mut spartan_chal = make_challenger(1);
         let mut mfc = make_union_fold_challenger.clone();
         let state = warp_ivc_init_recursive_union::<
-            F, EF, _, _, _, _, GenericPoseidon2LinearLayersKoalaBear, _, _, _,
+            F,
+            EF,
+            _,
+            _,
+            _,
+            _,
+            GenericPoseidon2LinearLayersKoalaBear,
+            _,
+            _,
+            _,
         >(
-            &shape, &inst0, &mut spartan_chal,
-            &ivc_config, &dft, mh.clone(), mc.clone(),
-            &poseidon_config, &poseidon_perm_circuit,
-            &step, &[F::from_u64(9)], arity,
+            &shape,
+            &inst0,
+            &mut spartan_chal,
+            &ivc_config,
+            &dft,
+            mh.clone(),
+            mc.clone(),
+            &poseidon_config,
+            &poseidon_perm_circuit,
+            &step,
+            &[F::from_u64(9)],
+            arity,
             vec![F::from_u64(9)],
             &mut mfc,
         );
         assert_eq!(state.step, 1);
 
         // Verify decider accepts init
-        let decide = crate::warp::decider::warp_decide_algebraic_rs(
-            &state.shape, &state.accumulator,
-        );
+        let decide =
+            crate::warp::decider::warp_decide_algebraic_rs(&state.shape, &state.accumulator);
         assert!(decide.is_ok(), "decider should accept init: {decide:?}");
 
         // ── Step 2: recursive union with 3 fresh instances ──
@@ -3338,34 +5593,60 @@ mod tests {
         // Must use the ORIGINAL shape's log_m and num_poly_vars_y to match what the init
         // function passes to compute_recursive_circuit_size_union.
         let log_m_orig = shape.num_cons().next_power_of_two().trailing_zeros() as usize;
-        let (target_w, _, _) = compute_recursive_circuit_size_union::<
-            F, GenericPoseidon2LinearLayersKoalaBear, _, _,
-        >(
-            &step, &[F::ZERO], &poseidon_config, &poseidon_perm_circuit,
-            shape.num_poly_vars_y(), arity, log_m_orig,
-        );
+        let (target_w, _, _) =
+            compute_recursive_circuit_size_union::<F, GenericPoseidon2LinearLayersKoalaBear, _, _>(
+                &step,
+                &[F::ZERO],
+                &poseidon_config,
+                &poseidon_perm_circuit,
+                shape.num_poly_vars_y(),
+                arity,
+                log_m_orig,
+            );
 
         let mut mfc2 = make_union_fold_challenger.clone();
         let state2 = warp_ivc_step_recursive_union::<
-            F, EF, _, _, _, _, GenericPoseidon2LinearLayersKoalaBear, _, _, _,
+            F,
+            EF,
+            _,
+            _,
+            _,
+            _,
+            GenericPoseidon2LinearLayersKoalaBear,
+            _,
+            _,
+            _,
         >(
-            &state, &step, &step_inputs, arity,
-            &mut spartan_chal2, &ivc_config, &dft, mh.clone(), mc.clone(),
-            &poseidon_config, &poseidon_perm_circuit,
-            Some(target_w), vec![],
+            &state,
+            &step,
+            &step_inputs,
+            arity,
+            &mut spartan_chal2,
+            &ivc_config,
+            &dft,
+            mh.clone(),
+            mc.clone(),
+            &poseidon_config,
+            &poseidon_perm_circuit,
+            Some(target_w),
+            vec![],
             &mut mfc2,
         );
         assert_eq!(state2.step, 2);
 
         // Verify decider accepts step 2
-        let decide2 = crate::warp::decider::warp_decide_algebraic_rs(
-            &state2.shape, &state2.accumulator,
-        );
+        let decide2 =
+            crate::warp::decider::warp_decide_algebraic_rs(&state2.shape, &state2.accumulator);
         assert!(decide2.is_ok(), "decider should accept step 2: {decide2:?}");
 
         // Verify union root was set
         assert!(
-            state2.last_fold_result.as_ref().unwrap().union_commitment_root.is_some(),
+            state2
+                .last_fold_result
+                .as_ref()
+                .unwrap()
+                .union_commitment_root
+                .is_some(),
             "union commitment root should be set"
         );
 
@@ -3392,8 +5673,7 @@ mod tests {
         let step = TrivialStepCircuit::new(1);
 
         // Compute CP circuit target size for consistent accumulator dimensions
-        let (cp_target_witness, _cp_constraints, _) =
-            compute_cp_circuit_size(&step, &[F::ZERO]);
+        let (cp_target_witness, _cp_constraints, _) = compute_cp_circuit_size(&step, &[F::ZERO]);
 
         // ── Init via warp_ivc_init_cp ──
         let mut init_builder = CircuitBuilder::<F>::new();
@@ -3428,7 +5708,7 @@ mod tests {
         // ── Recursive step 1 ──
         let mut chal1 = make_challenger(10);
         state = warp_ivc_step_recursive_cp::<F, EF, _, _, _, _, _, _>(
-            &state,
+            state,
             &step,
             &[F::from_u64(25)],
             &mut chal1,
@@ -3446,7 +5726,7 @@ mod tests {
         // ── Recursive step 2 ──
         let mut chal2 = make_challenger(20);
         state = warp_ivc_step_recursive_cp::<F, EF, _, _, _, _, _, _>(
-            &state,
+            state,
             &step,
             &[F::from_u64(49)],
             &mut chal2,
@@ -3476,23 +5756,25 @@ mod tests {
     #[test]
     #[cfg(feature = "symphony")]
     fn cp_snark_vs_regular_circuit_size() {
-        use p3_koala_bear::GenericPoseidon2LinearLayersKoalaBear;
         use crate::ivc::step::TrivialStepCircuit;
         use crate::ivc::warp_fold_verifier_algebraic::compute_cp_circuit_size;
+        use p3_koala_bear::GenericPoseidon2LinearLayersKoalaBear;
 
         let poseidon_perm = Perm::new_from_rng_128(&mut SmallRng::seed_from_u64(99));
-        let poseidon_config = Poseidon2CircuitConfig::<F, 16>::from_rng(
-            8, 20, 3, &mut SmallRng::seed_from_u64(99),
-        );
+        let poseidon_config =
+            Poseidon2CircuitConfig::<F, 16>::from_rng(8, 20, 3, &mut SmallRng::seed_from_u64(99));
         let step = TrivialStepCircuit::new(1);
 
         // Regular recursive circuit size
-        let (reg_witness, reg_constraints, _) = compute_recursive_circuit_size::<
-            F,
-            GenericPoseidon2LinearLayersKoalaBear,
-            _,
-            _,
-        >(&step, &[F::ZERO], &poseidon_config, &poseidon_perm, 3, 2);
+        let (reg_witness, reg_constraints, _) =
+            compute_recursive_circuit_size::<F, GenericPoseidon2LinearLayersKoalaBear, _, _>(
+                &step,
+                &[F::ZERO],
+                &poseidon_config,
+                &poseidon_perm,
+                3,
+                2,
+            );
 
         // CP-SNARK circuit size
         let (cp_witness, cp_constraints, _) = compute_cp_circuit_size(&step, &[F::ZERO]);
@@ -3519,11 +5801,7 @@ mod tests {
              Regular (Poseidon2):  {:>6} witness, {:>6} constraints\n\
              CP-SNARK (algebraic): {:>6} witness, {:>6} constraints\n\
              Reduction:            {:.1}x fewer constraints\n",
-            reg_witness,
-            reg_constraints,
-            cp_witness,
-            cp_constraints,
-            reduction,
+            reg_witness, reg_constraints, cp_witness, cp_constraints, reduction,
         );
     }
 
@@ -3539,8 +5817,7 @@ mod tests {
     #[test]
     #[cfg(feature = "symphony")]
     fn warp_ivc_cp_snark_full_pipeline_with_terminal() {
-        use crate::cp_snark::{cp_snark_terminal_verify_with_merkle, CpSnarkDeciderError};
-        use crate::warp::decider::WarpDeciderError;
+        use crate::cp_snark::{CpSnarkDeciderError, cp_snark_terminal_verify_with_merkle};
         use crate::ivc::step::TrivialStepCircuit;
         use crate::ivc::warp_fold_verifier_algebraic::compute_cp_circuit_size;
 
@@ -3554,15 +5831,24 @@ mod tests {
         // ── Init ──
         let mut init_builder = CircuitBuilder::<F>::new();
         let _ = synthesize_warp_ivc_circuit_cp(
-            &mut init_builder, &step, &[F::from_u64(9)], None, Some(cp_target_witness),
+            &mut init_builder,
+            &step,
+            &[F::from_u64(9)],
+            None,
+            Some(cp_target_witness),
         );
         let (init_shape, init_instance) = init_builder.build();
         assert!(init_shape.is_sat(init_instance.witness(), init_instance.input()));
 
         let mut chal0 = make_challenger(1);
         let mut state = warp_ivc_init_cp::<F, EF, _, _, _, _, _>(
-            &init_shape, &init_instance, &mut chal0,
-            &ivc_config, &dft, mh.clone(), mc.clone(),
+            &init_shape,
+            &init_instance,
+            &mut chal0,
+            &ivc_config,
+            &dft,
+            mh.clone(),
+            mc.clone(),
             vec![F::from_u64(9)],
             make_fold_challenger_factory(),
         );
@@ -3571,9 +5857,16 @@ mod tests {
         for (i, val) in [25u64, 49, 121].iter().enumerate() {
             let mut chal = make_challenger(i as u64 + 10);
             state = warp_ivc_step_recursive_cp::<F, EF, _, _, _, _, _, _>(
-                &state, &step, &[F::from_u64(*val)], &mut chal,
-                &ivc_config, &dft, mh.clone(), mc.clone(),
-                Some(cp_target_witness), vec![F::from_u64(*val)],
+                state,
+                &step,
+                &[F::from_u64(*val)],
+                &mut chal,
+                &ivc_config,
+                &dft,
+                mh.clone(),
+                mc.clone(),
+                Some(cp_target_witness),
+                vec![F::from_u64(*val)],
                 make_fold_challenger_factory(),
             );
         }
@@ -3608,19 +5901,25 @@ mod tests {
 
         // WHIR Prove
         let linear_claim = LinearStatement::<F, EF>::initialize(witness_num_vars);
-        let mut statement = whir_config.initial_statement_with_linear(
-            witness_poly.clone(), linear_claim.clone(),
-        );
+        let mut statement =
+            whir_config.initial_statement_with_linear(witness_poly.clone(), linear_claim.clone());
         let mut whir_proof = WhirProof::<F, EF, F, 8>::from_whir_config(&whir_config);
         let mut prove_challenger = seed_whir_challenger(&whir_config, 999);
         let commitment = CommitmentWriter::new(&whir_config)
             .commit::<_, <F as Field>::Packing, F, <F as Field>::Packing, 8>(
-                &dft, &mut whir_proof, &mut prove_challenger, &mut statement,
+                &dft,
+                &mut whir_proof,
+                &mut prove_challenger,
+                &mut statement,
             )
             .expect("WHIR commit failed");
         WhirProver(&whir_config)
             .prove::<_, <F as Field>::Packing, F, <F as Field>::Packing, 8>(
-                &dft, &mut whir_proof, &mut prove_challenger, &statement, commitment,
+                &dft,
+                &mut whir_proof,
+                &mut prove_challenger,
+                &statement,
+                commitment,
             )
             .expect("WHIR prove failed");
 
@@ -3634,7 +5933,10 @@ mod tests {
             .parse_commitment::<F, 8>(&whir_proof, &mut verify_challenger);
         let verify_result = WhirVerifier::new(&whir_config)
             .verify_with_initial_claim::<<F as Field>::Packing, F, <F as Field>::Packing, 8>(
-                &whir_proof, &mut verify_challenger, &parsed, initial_claim,
+                &whir_proof,
+                &mut verify_challenger,
+                &parsed,
+                initial_claim,
             );
         assert!(
             verify_result.is_ok(),
@@ -3655,9 +5957,13 @@ mod tests {
          -> Result<(), CpSnarkDeciderError> {
             let (h, c) = make_hash_compress();
             cp_snark_terminal_verify_with_merkle(
-                &state.shape, acc, transcripts,
+                &state.shape,
+                acc,
+                transcripts,
                 make_fold_challenger_factory(),
-                ivc_config.rs_folding_factor, &h, &c,
+                ivc_config.rs_folding_factor,
+                &h,
+                &c,
             )
         };
 
@@ -3666,7 +5972,10 @@ mod tests {
             let mut bad = state.committed_transcripts.clone();
             bad[2].data.omega += F::ONE;
             assert!(
-                matches!(verify(&state.accumulator, &bad), Err(CpSnarkDeciderError::CommitmentBindingFailed { step: 2 })),
+                matches!(
+                    verify(&state.accumulator, &bad),
+                    Err(CpSnarkDeciderError::CommitmentBindingFailed { step: 2 })
+                ),
                 "should reject tampered omega via commitment binding"
             );
         }
@@ -3676,7 +5985,10 @@ mod tests {
             let mut bad = state.committed_transcripts.clone();
             bad[1].data.sumcheck_challenges[0] += F::ONE;
             assert!(
-                matches!(verify(&state.accumulator, &bad), Err(CpSnarkDeciderError::CommitmentBindingFailed { step: 1 })),
+                matches!(
+                    verify(&state.accumulator, &bad),
+                    Err(CpSnarkDeciderError::CommitmentBindingFailed { step: 1 })
+                ),
                 "should reject tampered sumcheck challenge via binding"
             );
         }
@@ -3686,7 +5998,10 @@ mod tests {
             let mut bad = state.committed_transcripts.clone();
             bad[0].data.tau_challenges[0] += F::ONE;
             assert!(
-                matches!(verify(&state.accumulator, &bad), Err(CpSnarkDeciderError::CommitmentBindingFailed { step: 0 })),
+                matches!(
+                    verify(&state.accumulator, &bad),
+                    Err(CpSnarkDeciderError::CommitmentBindingFailed { step: 0 })
+                ),
                 "should reject tampered tau via binding"
             );
         }
@@ -3697,7 +6012,7 @@ mod tests {
             bad_acc.instance.eval_claim += F::ONE;
             assert_eq!(
                 verify(&bad_acc, &state.committed_transcripts),
-                Err(CpSnarkDeciderError::AlgebraicCheck(WarpDeciderError::EvaluationClaimFailed)),
+                Err(CpSnarkDeciderError::TerminalAccumulatorMismatch { step: 3 }),
                 "should reject tampered eval_claim"
             );
         }
@@ -3708,7 +6023,7 @@ mod tests {
             bad_acc.instance.pesat_target += F::ONE;
             assert_eq!(
                 verify(&bad_acc, &state.committed_transcripts),
-                Err(CpSnarkDeciderError::AlgebraicCheck(WarpDeciderError::PesatSatisfactionFailed)),
+                Err(CpSnarkDeciderError::TerminalAccumulatorMismatch { step: 3 }),
                 "should reject tampered pesat_target"
             );
         }
@@ -3718,7 +6033,10 @@ mod tests {
             let mut bad = state.committed_transcripts.clone();
             bad[3].data.sumcheck_evals[0][0] += F::ONE;
             assert!(
-                matches!(verify(&state.accumulator, &bad), Err(CpSnarkDeciderError::CommitmentBindingFailed { step: 3 })),
+                matches!(
+                    verify(&state.accumulator, &bad),
+                    Err(CpSnarkDeciderError::CommitmentBindingFailed { step: 3 })
+                ),
                 "should reject tampered sumcheck eval via binding"
             );
         }
@@ -3728,7 +6046,10 @@ mod tests {
             let mut bad = state.committed_transcripts.clone();
             bad[0].data.input_commitment_roots[0][0] += F::ONE;
             assert!(
-                matches!(verify(&state.accumulator, &bad), Err(CpSnarkDeciderError::CommitmentBindingFailed { step: 0 })),
+                matches!(
+                    verify(&state.accumulator, &bad),
+                    Err(CpSnarkDeciderError::CommitmentBindingFailed { step: 0 })
+                ),
                 "should reject tampered commitment root via binding"
             );
         }
@@ -3743,7 +6064,10 @@ mod tests {
             {
                 bad[1].data.shift_query_values[0][0][0] += F::ONE;
                 assert!(
-                    matches!(verify(&state.accumulator, &bad), Err(CpSnarkDeciderError::CommitmentBindingFailed { step: 1 })),
+                    matches!(
+                        verify(&state.accumulator, &bad),
+                        Err(CpSnarkDeciderError::CommitmentBindingFailed { step: 1 })
+                    ),
                     "should reject tampered shift query value via binding"
                 );
             }
@@ -3758,10 +6082,118 @@ mod tests {
             {
                 bad[2].data.shift_query_auth_paths[0][0][0][0] += F::ONE;
                 assert!(
-                    matches!(verify(&state.accumulator, &bad), Err(CpSnarkDeciderError::CommitmentBindingFailed { step: 2 })),
+                    matches!(
+                        verify(&state.accumulator, &bad),
+                        Err(CpSnarkDeciderError::CommitmentBindingFailed { step: 2 })
+                    ),
                     "should reject tampered shift query auth path via binding"
                 );
             }
+        }
+
+        // ══════════════════════════════════════════════════════════════
+        // POST-BINDING adversarial tests: tamper data AND re-commit with a
+        // fresh HashCommitment, bypassing the binding check.  These
+        // exercise the soundness guarantees that have to come from FS
+        // re-derivation + sumcheck algebra (NOT just the binding hash).
+        //
+        // Each test proves a concrete cheating-prover strategy fails:
+        //   1. Re-commit with tampered omega → ChallengeMismatch
+        //      (FS re-derives omega and compares; mismatch is caught).
+        //   2. Re-commit with tampered sumcheck_evals → SumcheckAlgebraFailed
+        //      (σ_0 check now fires regardless of binding).
+        //   3. Re-commit with tampered ρ → RhoMismatch.
+        //   4. Re-commit with tampered shift_query_expected → verified
+        //      separately by verify_shift_query_merkle_proofs via LC check.
+        // ══════════════════════════════════════════════════════════════
+
+        // Helper exposed by whir-cp-snark: re-commit a transcript so the
+        // SHA-256 binding accepts it (simulating a malicious prover who
+        // commits tampered data honestly).
+        use crate::cp_snark::re_commit_transcript as re_commit;
+
+        // ── Post-binding 1: tampered ω is caught by FS re-derivation ──
+        {
+            let mut bad = state.committed_transcripts.clone();
+            bad[2].data.omega += F::ONE;
+            bad[2] = re_commit(&bad[2]); // bypass binding
+            assert!(
+                matches!(
+                    verify(&state.accumulator, &bad),
+                    Err(CpSnarkDeciderError::ChallengeMismatch { step: 2 })
+                ),
+                "post-binding: tampered omega must be rejected via FS re-derivation"
+            );
+        }
+
+        // ── Post-binding 2: tampered sumcheck eval is caught by σ_0/algebra ──
+        {
+            let mut bad = state.committed_transcripts.clone();
+            // Flip one byte of round-0's e0.  If the stored σ_0 inputs
+            // still imply σ_0 == e0_new + e1, this slips through — but
+            // since σ_0 is fully determined by ω/τ/μ/η in the transcript
+            // and those are unchanged, e0_new + e1 ≠ σ_0 w.h.p.
+            bad[3].data.sumcheck_evals[0][0] += F::ONE;
+            bad[3] = re_commit(&bad[3]);
+            let result = verify(&state.accumulator, &bad);
+            assert!(
+                matches!(
+                    result,
+                    Err(CpSnarkDeciderError::SumcheckAlgebraFailed { step: 3, .. })
+                        | Err(CpSnarkDeciderError::ChallengeMismatch { step: 3 })
+                ),
+                "post-binding: tampered sumcheck evals must be rejected by \
+                 σ_0/algebra or FS mismatch.  Got: {result:?}"
+            );
+        }
+
+        // ── Post-binding 3: tampered ρ is caught by RhoMismatch ──
+        {
+            let mut bad = state.committed_transcripts.clone();
+            // All transcripts at log_n_rs>0 have a ρ field.
+            if !bad[1].data.eval_batch_round_polys.is_empty() {
+                bad[1].data.rho += F::ONE;
+                bad[1] = re_commit(&bad[1]);
+                let result = verify(&state.accumulator, &bad);
+                assert!(
+                    matches!(result, Err(CpSnarkDeciderError::RhoMismatch { step: 1 })),
+                    "post-binding: tampered ρ must be rejected via RhoMismatch.  \
+                     Got: {result:?}"
+                );
+            }
+        }
+
+        // ── Post-binding 4: tampered output accumulator breaks the chain ──
+        {
+            let mut bad = state.committed_transcripts.clone();
+            bad[0].data.output_commitment_root[0] += F::ONE;
+            bad[0] = re_commit(&bad[0]);
+            let result = verify(&state.accumulator, &bad);
+            assert!(
+                matches!(
+                    result,
+                    Err(CpSnarkDeciderError::TranscriptChainMismatch {
+                        prev_step: 0,
+                        next_step: 1,
+                    })
+                ),
+                "post-binding: tampered transcript output must break the fold chain. Got: {result:?}"
+            );
+        }
+
+        // ── Post-binding 5: tampered last output no longer matches terminal instance ──
+        {
+            let mut bad = state.committed_transcripts.clone();
+            bad[3].data.output_eval_claim += F::ONE;
+            bad[3] = re_commit(&bad[3]);
+            let result = verify(&state.accumulator, &bad);
+            assert!(
+                matches!(
+                    result,
+                    Err(CpSnarkDeciderError::TerminalAccumulatorMismatch { step: 3 })
+                ),
+                "post-binding: tampered final transcript output must be rejected. Got: {result:?}"
+            );
         }
     }
 
@@ -3779,9 +6211,7 @@ mod tests {
     #[test]
     #[cfg(feature = "symphony")]
     fn warp_ivc_union_cp_snark_pipeline() {
-        use crate::cp_snark::{
-            cp_snark_terminal_verify_with_merkle, CommittedFoldTranscript, CpSnarkDeciderError,
-        };
+        use crate::cp_snark::{CpSnarkDeciderError, cp_snark_terminal_verify_with_merkle};
 
         let dft = Radix2DFTSmallBatch::<F>::default();
         let ivc_config = WarpIVCConfig::default();
@@ -3802,15 +6232,25 @@ mod tests {
 
         let mut init_chal = make_challenger(1);
         let mut state = warp_ivc_init_cp::<F, EF, _, _, _, _, _>(
-            &shape, &instance, &mut init_chal,
-            &ivc_config, &dft, mh.clone(), mc.clone(),
+            &shape,
+            &instance,
+            &mut init_chal,
+            &ivc_config,
+            &dft,
+            mh.clone(),
+            mc.clone(),
             vec![F::from_u64(9)],
             make_fold_challenger_factory(),
         );
         assert_eq!(state.step, 1);
         assert_eq!(state.committed_transcripts.len(), 1);
         // Init transcript has no union root
-        assert!(state.committed_transcripts[0].data.union_commitment_root.is_none());
+        assert!(
+            state.committed_transcripts[0]
+                .data
+                .union_commitment_root
+                .is_none()
+        );
 
         // ── Helper: create a fresh instance from the same R1CS ──
         let make_fresh = |seed: u64| -> crate::warp::accumulator::FreshInstance<F> {
@@ -3829,20 +6269,33 @@ mod tests {
         // ── Union step 1: l=4 (3 fresh instances) ──
         let fresh_batch_1 = vec![make_fresh(100), make_fresh(101), make_fresh(102)];
         state = warp_ivc_step_union_cp::<F, _, _, _, _>(
-            &state, &fresh_batch_1,
-            &ivc_config, &dft, mh.clone(), mc.clone(),
+            &state,
+            &fresh_batch_1,
+            &ivc_config,
+            &dft,
+            mh.clone(),
+            mc.clone(),
             vec![F::from_u64(25)],
             make_fold_challenger_factory(),
         );
         assert_eq!(state.step, 2);
         assert_eq!(state.committed_transcripts.len(), 2);
-        assert!(state.committed_transcripts[1].data.union_commitment_root.is_some());
+        assert!(
+            state.committed_transcripts[1]
+                .data
+                .union_commitment_root
+                .is_some()
+        );
 
         // ── Union step 2: l=4 (3 fresh instances) ──
         let fresh_batch_2 = vec![make_fresh(200), make_fresh(201), make_fresh(202)];
         state = warp_ivc_step_union_cp::<F, _, _, _, _>(
-            &state, &fresh_batch_2,
-            &ivc_config, &dft, mh.clone(), mc.clone(),
+            &state,
+            &fresh_batch_2,
+            &ivc_config,
+            &dft,
+            mh.clone(),
+            mc.clone(),
             vec![F::from_u64(49)],
             make_fold_challenger_factory(),
         );
@@ -3883,12 +6336,19 @@ mod tests {
             }
             let (h, c) = make_hash_compress();
             let result = cp_snark_terminal_verify_with_merkle(
-                &state.shape, &state.accumulator, &bad,
+                &state.shape,
+                &state.accumulator,
+                &bad,
                 make_fold_challenger_factory(),
-                ivc_config.rs_folding_factor, &h, &c,
+                ivc_config.rs_folding_factor,
+                &h,
+                &c,
             );
             assert!(
-                matches!(result, Err(CpSnarkDeciderError::CommitmentBindingFailed { step: 1 })),
+                matches!(
+                    result,
+                    Err(CpSnarkDeciderError::CommitmentBindingFailed { step: 1 })
+                ),
                 "should reject tampered union root via binding: {result:?}"
             );
         }
@@ -3899,12 +6359,19 @@ mod tests {
             bad[2].data.omega += F::ONE;
             let (h, c) = make_hash_compress();
             let result = cp_snark_terminal_verify_with_merkle(
-                &state.shape, &state.accumulator, &bad,
+                &state.shape,
+                &state.accumulator,
+                &bad,
                 make_fold_challenger_factory(),
-                ivc_config.rs_folding_factor, &h, &c,
+                ivc_config.rs_folding_factor,
+                &h,
+                &c,
             );
             assert!(
-                matches!(result, Err(CpSnarkDeciderError::CommitmentBindingFailed { step: 2 })),
+                matches!(
+                    result,
+                    Err(CpSnarkDeciderError::CommitmentBindingFailed { step: 2 })
+                ),
                 "should reject tampered omega in union step: {result:?}"
             );
         }
@@ -3919,12 +6386,19 @@ mod tests {
                 bad[1].data.shift_query_values[0][0][0] += F::ONE;
                 let (h, c) = make_hash_compress();
                 let result = cp_snark_terminal_verify_with_merkle(
-                    &state.shape, &state.accumulator, &bad,
+                    &state.shape,
+                    &state.accumulator,
+                    &bad,
                     make_fold_challenger_factory(),
-                    ivc_config.rs_folding_factor, &h, &c,
+                    ivc_config.rs_folding_factor,
+                    &h,
+                    &c,
                 );
                 assert!(
-                    matches!(result, Err(CpSnarkDeciderError::CommitmentBindingFailed { step: 1 })),
+                    matches!(
+                        result,
+                        Err(CpSnarkDeciderError::CommitmentBindingFailed { step: 1 })
+                    ),
                     "should reject tampered shift query in union step: {result:?}"
                 );
             }
@@ -3945,9 +6419,8 @@ mod tests {
     #[test]
     #[cfg(feature = "symphony")]
     fn warp_ivc_recursive_union_cp_snark_pipeline() {
-        use crate::cp_snark::{cp_snark_terminal_verify_with_merkle, CpSnarkDeciderError};
+        use crate::cp_snark::{CpSnarkDeciderError, cp_snark_terminal_verify_with_merkle};
         use crate::ivc::step::TrivialStepCircuit;
-        use crate::ivc::warp_fold_verifier_algebraic::compute_cp_circuit_size;
 
         let dft = Radix2DFTSmallBatch::<F>::default();
         let ivc_config = WarpIVCConfig::default();
@@ -3957,14 +6430,16 @@ mod tests {
         let num_fresh = arity - 1;
 
         // Compute target witness size based on recursive union circuit (log_l=2 rounds)
-        let (target_witness, _, _) = compute_recursive_union_circuit_size(
-            &step, &[F::ZERO], arity,
-        );
+        let (target_witness, _, _) = compute_recursive_union_circuit_size(&step, &[F::ZERO], arity);
 
         // ── Init: dedicated recursive union init (no fold yet) ──
         let mut state = warp_ivc_init_recursive_union_cp(
-            &step, &[F::ZERO], arity, &ivc_config,
-            target_witness, vec![F::from_u64(9)],
+            &step,
+            &[F::ZERO],
+            arity,
+            &ivc_config,
+            target_witness,
+            vec![F::from_u64(9)],
         );
         assert_eq!(state.step, 0);
         assert_eq!(state.committed_transcripts.len(), 0);
@@ -3975,15 +6450,28 @@ mod tests {
             .collect();
         let mut chal1 = make_challenger(10);
         state = warp_ivc_step_recursive_union_cp::<F, EF, _, _, _, _, _, _>(
-            &state, &step, &step_inputs_1, arity, &mut chal1,
-            &ivc_config, &dft, mh.clone(), mc.clone(),
-            Some(target_witness), vec![F::from_u64(25)],
+            &state,
+            &step,
+            &step_inputs_1,
+            arity,
+            &mut chal1,
+            &ivc_config,
+            &dft,
+            mh.clone(),
+            mc.clone(),
+            Some(target_witness),
+            vec![F::from_u64(25)],
             make_fold_challenger_factory(),
         );
         assert_eq!(state.step, 1);
         assert_eq!(state.committed_transcripts.len(), 1);
         // Union step transcript has union root
-        assert!(state.committed_transcripts[0].data.union_commitment_root.is_some());
+        assert!(
+            state.committed_transcripts[0]
+                .data
+                .union_commitment_root
+                .is_some()
+        );
 
         // ── Recursive union step 2: 3 more recursive circuits ──
         let step_inputs_2: Vec<Vec<F>> = (0..num_fresh)
@@ -3991,9 +6479,17 @@ mod tests {
             .collect();
         let mut chal2 = make_challenger(20);
         state = warp_ivc_step_recursive_union_cp::<F, EF, _, _, _, _, _, _>(
-            &state, &step, &step_inputs_2, arity, &mut chal2,
-            &ivc_config, &dft, mh.clone(), mc.clone(),
-            Some(target_witness), vec![F::from_u64(49)],
+            &state,
+            &step,
+            &step_inputs_2,
+            arity,
+            &mut chal2,
+            &ivc_config,
+            &dft,
+            mh.clone(),
+            mc.clone(),
+            Some(target_witness),
+            vec![F::from_u64(49)],
             make_fold_challenger_factory(),
         );
         assert_eq!(state.step, 2);
@@ -4017,7 +6513,8 @@ mod tests {
             &state.committed_transcripts,
             make_fold_challenger_factory(),
             ivc_config.rs_folding_factor,
-            &tmh, &tmc,
+            &tmh,
+            &tmc,
         );
         assert!(
             terminal_result.is_ok(),
@@ -4032,12 +6529,19 @@ mod tests {
             }
             let (h, c) = make_hash_compress();
             let result = cp_snark_terminal_verify_with_merkle(
-                &state.shape, &state.accumulator, &bad,
+                &state.shape,
+                &state.accumulator,
+                &bad,
                 make_fold_challenger_factory(),
-                ivc_config.rs_folding_factor, &h, &c,
+                ivc_config.rs_folding_factor,
+                &h,
+                &c,
             );
             assert!(
-                matches!(result, Err(CpSnarkDeciderError::CommitmentBindingFailed { step: 0 })),
+                matches!(
+                    result,
+                    Err(CpSnarkDeciderError::CommitmentBindingFailed { step: 0 })
+                ),
                 "should reject tampered union root: {result:?}"
             );
         }

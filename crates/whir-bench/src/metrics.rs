@@ -39,6 +39,8 @@ pub struct StaticMetrics {
 
 #[derive(Debug, Serialize)]
 pub struct Row {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workload: Option<String>,
     pub scheme: String,
     pub axes: crate::axes::Axes,
     pub run: u32,

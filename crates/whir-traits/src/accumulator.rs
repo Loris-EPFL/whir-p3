@@ -21,9 +21,8 @@ pub trait CommitmentRoot: Clone + Eq + core::fmt::Debug + Send + Sync {}
 // per-crate boilerplate.
 // ──────────────────────────────────────────────────────────────────────────
 
-impl<T, const N: usize> CommitmentRoot for [T; N]
-where
-    T: Clone + Eq + core::fmt::Debug + Send + Sync + 'static,
+impl<T, const N: usize> CommitmentRoot for [T; N] where
+    T: Clone + Eq + core::fmt::Debug + Send + Sync + 'static
 {
 }
 

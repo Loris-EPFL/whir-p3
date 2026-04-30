@@ -1,10 +1,10 @@
 use alloc::vec::Vec;
 
-use p3_koala_bear::{KoalaBear, Poseidon2KoalaBear};
 use p3_challenger::{CanObserve, CanSample, DuplexChallenger, GrindingChallenger};
 use p3_field::extension::BinomialExtensionField;
+use p3_koala_bear::{KoalaBear, Poseidon2KoalaBear};
 use proptest::prelude::*;
-use rand::{rngs::SmallRng, RngExt, SeedableRng};
+use rand::{RngExt, SeedableRng, rngs::SmallRng};
 
 use crate::fiat_shamir::domain_separator::DomainSeparator;
 

@@ -7,6 +7,7 @@ pub fn write_row(w: &mut impl Write, r: &Row) -> io::Result<()> {
     // struct (which is shared with scheme tests).
     let wrapped = serde_json::json!({
         "kind": "scheme",
+        "workload": r.workload,
         "scheme": r.scheme,
         "axes": r.axes,
         "run": r.run,
@@ -34,6 +35,7 @@ mod tests {
     #[test]
     fn row_roundtrips_through_serde_json() {
         let row = Row {
+            workload: None,
             scheme: "test".to_string(),
             axes: Axes {
                 log_n: 10,
@@ -42,6 +44,8 @@ mod tests {
                 ivc_steps: 4,
                 step_muls: 100,
                 seed: 42,
+                total_instances: None,
+                total_step_circuits: None,
             },
             run: 0,
             skipped: None,
